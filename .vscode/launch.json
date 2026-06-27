@@ -1,0 +1,69 @@
+// VSCode launch 配置：启动 Extension Dev Host 调试 mcode 扩展
+//
+// 用法：
+//   1. code .
+//   2. F5 → 选 "Debug VS Code Extension" → 自动 build:cargo + build:ts → 启动新 VSCode 窗口
+//   3. 在新窗口里打开 data/*.mc 文件测试 LSP
+//   4. 要同时调试 Rust LSP server，选 compound "Debug Extension + LSP Server"
+//
+{
+  "version": "0.2.0",
+  "configurations": [
+    // 1. 独立调试 Rust LSP server
+    {
+      "name": "Debug LSP Server",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/mcodels",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_LOG": "trace,tower_lsp=trace,tokio=trace",
+        "RUST_BACKTRACE": "full"
+      },
+      "sourceLanguages": ["rust"],
+      "console": "integratedTerminal",
+      "preLaunchTask": "cargo build"
+    },
+
+    // 2. 启动 Extension Dev Host 调试扩展
+    //    - preLaunchTask: build:all（先 cargo build + npm: compile）
+    //    - outFiles: dist/**/*.js（esbuild 产物）
+    //    - 第二参数 ${workspaceFolder}/data 让新窗口打开 data/ 目录作为测试 workspace
+    {
+      "name": "Debug VS Code Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "${workspaceFolder}/data"
+      ],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "build: all",
+      "env": {
+        "SERVER_PATH": "${workspaceFolder}/target/debug/mcodels",
+        "RUST_LOG": "debug"
+      }
+    },
+
+    // 3. 附加到已运行的 LSP server 进程
+    {
+      "name": "Attach to LSP Server",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_LOG": "trace,tower_lsp=trace,tokio::io=trace"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Extension + LSP Server",
+      "configurations": ["Debug LSP Server", "Debug VS Code Extension"],
+      "stopAll": true
+    }
+  ]
+}

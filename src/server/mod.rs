@@ -1,0 +1,577 @@
+//! LSP Server: Backend struct + LanguageServer implementation
+//!
+//! Phase 0 keeps existing LSP behavior (goto-definition, references, semantic tokens, diagnostics),
+//! all handlers internally delegate to `features::*` module. Zero behavior changes.
+//!
+//! Phase 2 incremental sync + debounce:
+//! - TextDocumentSyncKind::INCREMENTAL
+//! - ReparseScheduler debounce 150ms
+//! - version validation to prevent out-of-order diagnostics
+
+use crate::common::ServerConfig;
+use crate::index::IndexCommand;
+use crate::mcc_lock::MCC_LOCK;
+use crate::state::WorkspaceState;
+use dashmap::DashMap;
+use mcc::McURI;
+use ropey::Rope;
+use std::sync::Arc;
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
+use tower_lsp::{Client, LanguageServer};
+use tracing::{debug, error, trace, warn};
+
+/// mcode LSP server
+pub struct Backend {
+    pub client: Client,
+    pub state: Arc<WorkspaceState>,
+    /// Config (updated by did_change_configuration after startup)
+    pub config: Arc<DashMap<String, ServerConfig>>,
+}
+
+impl Backend {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            state: Arc::new(WorkspaceState::with_worker()),
+            config: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Synchronous path for did_save: immediate parse + publish
+    async fn on_change_full(&self, uri: Url, text: &str, version: Option<i32>) {
+        debug!("on_change_full: {}", uri.path());
+        let rope = Rope::from_str(text);
+        let ver = version.unwrap_or(-1);
+        self.state.insert_document(uri.clone(), rope.clone(), ver);
+
+        // Fire immediately, bypass debounce
+        let state = Arc::clone(&self.state);
+        let client = self.client.clone();
+        let uri_for_task = uri.clone();
+        self.state.scheduler.fire_immediately(uri, move || {
+            tokio::spawn(parse_and_publish(state, client, uri_for_task, version));
+        });
+    }
+
+    /// Incremental path for did_change: apply changes + schedule debounced reparse
+    async fn on_change_incremental(
+        &self,
+        uri: Url,
+        changes: &[TextDocumentContentChangeEvent],
+        version: Option<i32>,
+    ) {
+        debug!("on_change_incremental: {}", uri.path());
+
+        // Get Rope, apply changes
+        let mut rope = self
+            .state
+            .document_rope(&uri)
+            .unwrap_or_else(|| Rope::from_str(""));
+        if let Err(e) = crate::state::apply_changes(&mut rope, changes) {
+            debug!("apply_changes failed: {e}");
+            return;
+        }
+
+        let ver = version.unwrap_or(-1);
+        self.state.insert_document(uri.clone(), rope, ver);
+
+        // Schedule debounced reparse
+        let state = Arc::clone(&self.state);
+        let client = self.client.clone();
+        let uri_for_task = uri.clone();
+        self.state.scheduler.schedule(uri, move || {
+            tokio::spawn(parse_and_publish(state, client, uri_for_task, version));
+        });
+    }
+}
+
+/// Parse + publish diagnostics (executed in debounced task)
+async fn parse_and_publish(
+    state: Arc<WorkspaceState>,
+    client: Client,
+    uri: Url,
+    version: Option<i32>,
+) {
+    let span = tracing::info_span!("parse_and_publish", uri = %uri.path(), ?version);
+    let _guard = span.enter();
+
+    trace!("enter");
+    let mc_uri = McURI::from(uri.path());
+
+    // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
+    let text = state
+        .document_rope(&uri)
+        .map(|r| r.to_string())
+        .unwrap_or_default();
+    if let crate::util::UseCheckResult::Missing {
+        use_line,
+        candidates,
+    } = crate::util::check_use_targets(&uri, &text)
+    {
+        warn!("use target missing for {uri}: {use_line} (tried: {candidates:?})");
+    }
+
+    // mcc call: must be in spawn_blocking + wrapped with catch_unwind
+    // 4 layers of defense:
+    //   1. MCC_LOCK mutex serializes all mcc access
+    //   2. spawn_blocking moves mcc to blocking pool, doesn't steal async workers
+    //   3. catch_unwind catches mcc internal Rust panics
+    //   4. lock acquire inside closure (MutexGuard can't be Send across threads)
+    //
+    // Key: use `mcc_load_project` instead of `mcc_add`!
+    // - `mcc_add` only adds files to mcodes, doesn't call `mcb_parse_all_modules`,
+    //   -> lapper is empty, F12 can't find symbols
+    // - `mcc_load_project` calls `mcb_add_recursive` + `mcb_parse_all_modules`,
+    //   -> true topological parsing, symbol population
+    let mc_uri_for_blocking = mc_uri.clone();
+    let parse_result = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = MCC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            mcc::mcc_load_project(&mc_uri_for_blocking);
+            mcc::mcc_query(&mc_uri_for_blocking)
+        }))
+    })
+    .await;
+
+    let parse = match parse_result {
+        Ok(Ok(Some(p))) => p,
+        Ok(Ok(None)) => {
+            debug!("mcc_query returned None for {uri}");
+            return;
+        }
+        Ok(Err(panic)) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else {
+                "unknown".into()
+            };
+            error!("mcc panicked for {uri}: {msg}");
+            return;
+        }
+        Err(join_err) => {
+            error!("spawn_blocking join error: {join_err:?}");
+            return;
+        }
+    };
+
+    state.insert_parse(
+        uri.clone(),
+        Arc::clone(&parse.sem_tokens),
+        Arc::clone(&parse.sem_symbols),
+        mc_uri,
+    );
+
+    let diagnostics = crate::features::diagnostics::collect(&state, &uri);
+    let current_version = state.document_version(&uri);
+    if let (Some(sent), Some(curr)) = (version, current_version) {
+        if sent < curr {
+            debug!("stale diagnostics for {uri}, sent={sent} < curr={curr}");
+            return;
+        }
+    }
+    client
+        .publish_diagnostics(uri.clone(), diagnostics, version)
+        .await;
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for Backend {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Parse initialization_options
+        let cfg = params
+            .initialization_options
+            .map(ServerConfig::from_initialization_options)
+            .unwrap_or_default();
+
+        // Initialize mcc system/project root
+        if let Some(root) = &cfg.system_root {
+            mcc::mcc_set_project_root(root);
+        }
+        // Infer project root: cfg.project_root > first workspace folder
+        let project_root = cfg
+            .project_root
+            .clone()
+            .or_else(|| {
+                params
+                    .workspace_folders
+                    .as_ref()
+                    .and_then(|f| f.first())
+                    .and_then(|f| f.uri.to_file_path().ok())
+            })
+            .or_else(|| std::env::current_dir().ok());
+
+        if let Some(root) = &project_root {
+            mcc::mcc_set_project_root(root);
+        }
+        mcc::mcc_init_no_lib();
+
+        // Trigger project index
+        if let Some(root) = project_root {
+            let _ = self.state.index.send(IndexCommand::ParseAll(root.clone()));
+            trace!(
+                "server: project index ParseAll triggered: {}",
+                root.display()
+            );
+        }
+
+        self.config.insert("current".to_string(), cfg);
+
+        Ok(InitializeResult {
+            server_info: None,
+            offset_encoding: None,
+            capabilities: ServerCapabilities {
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        // Phase 2: change to INCREMENTAL
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(true),
+                        })),
+                        ..Default::default()
+                    },
+                )),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                        SemanticTokensRegistrationOptions {
+                            text_document_registration_options: {
+                                TextDocumentRegistrationOptions {
+                                    document_selector: Some(vec![DocumentFilter {
+                                        language: Some("mcode".to_string()),
+                                        scheme: Some("file".to_string()),
+                                        pattern: None,
+                                    }]),
+                                }
+                            },
+                            semantic_tokens_options: SemanticTokensOptions {
+                                work_done_progress_options: WorkDoneProgressOptions::default(),
+                                legend: SemanticTokensLegend {
+                                    token_types: crate::common::LEGEND_TYPE.into(),
+                                    token_modifiers: vec![],
+                                },
+                                range: Some(true),
+                                // Phase 3: enable Delta mode, support incremental updates
+                                full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                            },
+                            static_registration_options: StaticRegistrationOptions::default(),
+                        },
+                    ),
+                ),
+                // F12 go to definition — previously missing declaration, VSCode doesn't send request, F12 doesn't work
+                definition_provider: Some(OneOf::Left(true)),
+                // Shift+F12 find references
+                references_provider: Some(OneOf::Left(true)),
+                // Phase 4: auto-completion
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(true),
+                    trigger_characters: Some(vec![
+                        // Trigger completion characters
+                        ".".to_string(), // member access
+                        ":".to_string(), // type annotation
+                        " ".to_string(), // may be keyword after space
+                    ]),
+                    all_commit_characters: Some(vec![]),
+                    completion_item: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                }),
+                // Phase 4.2: code formatting
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                // Phase 4.3: inline hints
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                ..ServerCapabilities::default()
+            },
+        })
+    }
+
+    async fn initialized(&self, _: InitializedParams) {
+        debug!("initialized!");
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        debug!("did_open: {}", params.text_document.uri.path());
+        let uri = params.text_document.uri.clone();
+        // did_open uses full path (first load always has complete text)
+        self.on_change_full(
+            uri.clone(),
+            &params.text_document.text,
+            Some(params.text_document.version),
+        )
+        .await;
+        // Notify index worker
+        let mc_uri = McURI::from(uri.path());
+        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        debug!("did_change: {}", params.text_document.uri.path());
+        let uri = params.text_document.uri.clone();
+        // Phase 2: INCREMENTAL processing
+        self.on_change_incremental(
+            uri.clone(),
+            &params.content_changes,
+            Some(params.text_document.version),
+        )
+        .await;
+        // Notify index worker
+        let mc_uri = McURI::from(uri.path());
+        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        debug!("did_save: {}", params.text_document.uri.path());
+        if let Some(text) = params.text {
+            self.on_change_full(params.text_document.uri, &text, None)
+                .await;
+            let _ = self.client.semantic_tokens_refresh().await;
+        }
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        debug!("did_close: {}", params.text_document.uri.path());
+        self.state.remove_document(&params.text_document.uri);
+        self.state.scheduler.remove(&params.text_document.uri);
+        let mc_uri = McURI::from(params.text_document.uri.path());
+        let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        debug!("did_change_watched_files: {} changes", params.changes.len());
+        for change in &params.changes {
+            let mc_uri = McURI::from(change.uri.path());
+            match change.typ {
+                FileChangeType::DELETED => {
+                    let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
+                }
+                FileChangeType::CREATED | FileChangeType::CHANGED => {
+                    let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Phase 4: auto-completion
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let span = tracing::debug_span!("completion", uri = %params.text_document_position.text_document.uri.path());
+        let _guard = span.enter();
+        Ok(crate::features::completion::resolve(
+            &self.state,
+            &params.text_document_position,
+        ))
+    }
+
+    // Phase 4: completionItem/resolve additional info
+    async fn completion_resolve(&self, params: CompletionItem) -> Result<CompletionItem> {
+        Ok(crate::features::completion::resolve_item(params))
+    }
+
+    // Phase 4.2: full document formatting
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.clone();
+        let span = tracing::debug_span!("formatting", uri = %uri.path());
+        let _guard = span.enter();
+
+        let rope = match self.state.document_rope(&uri) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let options = crate::features::formatting::FormatOptions::new();
+        Ok(crate::features::formatting::format_document(
+            &uri,
+            &rope,
+            Some(options),
+        ))
+    }
+
+    // Phase 4.2: 范围格式化
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.clone();
+        let span = tracing::debug_span!("range_formatting", uri = %uri.path());
+        let _guard = span.enter();
+
+        let rope = match self.state.document_rope(&uri) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let options = crate::features::formatting::FormatOptions::new();
+        Ok(crate::features::formatting::format_range(
+            &uri,
+            &rope,
+            params.range,
+            Some(options),
+        ))
+    }
+
+    // Phase 4.3: inline hints
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.clone();
+        let span = tracing::debug_span!("inlay_hint", uri = %uri.path());
+        let _guard = span.enter();
+
+        let _rope = match self.state.document_rope(&uri) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        Ok(crate::features::inlay_hint::compute(
+            &self.state,
+            &uri,
+            params.range,
+        ))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        let pos = params.text_document_position_params.position;
+        let span = tracing::debug_span!("goto_definition", uri = %uri.path(), line = pos.line, col = pos.character);
+        let _guard = span.enter();
+        Ok(crate::features::goto_definition::resolve(
+            &self.state,
+            &uri,
+            pos,
+        ))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let include_decl = params.context.include_declaration;
+        let span = tracing::debug_span!("references", uri = %uri.path(), line = pos.line, col = pos.character, include_decl);
+        let _guard = span.enter();
+        Ok(crate::features::references::resolve(
+            &self.state,
+            &uri,
+            pos,
+            include_decl,
+        ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let span =
+            tracing::debug_span!("semantic_tokens_full", uri = %params.text_document.uri.path());
+        let _guard = span.enter();
+        debug!("");
+        let uri = params.text_document.uri;
+        let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let tokens = tokens.unwrap_or_default();
+        let result_id = self.state.tokens.next_id();
+        self.state
+            .tokens
+            .store(uri.clone(), result_id, tokens.clone());
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: Some(result_id.to_string()),
+            data: tokens,
+        })))
+    }
+
+    // Phase 3: semantic_tokens_full_delta handler
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> Result<Option<SemanticTokensFullDeltaResult>> {
+        let span = tracing::debug_span!("semantic_tokens_full_delta", uri = %params.text_document.uri.path(), prev_id = %params.previous_result_id);
+        let _guard = span.enter();
+        debug!("");
+        let uri = params.text_document.uri;
+
+        let curr = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let curr = curr.unwrap_or_default();
+
+        // Try incremental: check last tokens
+        let prev_tokens = self.state.tokens.get(&uri);
+        let prev_id_num: u64 = params.previous_result_id.parse().unwrap_or(0);
+        if let Some((stored_id, prev_tokens)) = prev_tokens {
+            if stored_id == prev_id_num {
+                // id matches, try diff
+                if let Some(delta) =
+                    crate::features::semantic_tokens::compute_delta(&prev_tokens, &curr)
+                {
+                    let new_id = self.state.tokens.next_id();
+                    self.state.tokens.store(uri.clone(), new_id, curr);
+                    return Ok(Some(SemanticTokensFullDeltaResult::TokensDelta(
+                        tower_lsp::lsp_types::SemanticTokensDelta {
+                            result_id: Some(new_id.to_string()),
+                            edits: delta.edits,
+                        },
+                    )));
+                }
+            }
+        }
+
+        // fallback to full
+        let new_id = self.state.tokens.next_id();
+        self.state.tokens.store(uri.clone(), new_id, curr.clone());
+        Ok(Some(SemanticTokensFullDeltaResult::Tokens(
+            SemanticTokens {
+                result_id: Some(new_id.to_string()),
+                data: curr,
+            },
+        )))
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        debug!("semantic_tokens_range: {}", params.text_document.uri.path());
+        let uri = params.text_document.uri;
+        let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let tokens = tokens.unwrap_or_default();
+        Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    }
+
+    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
+        debug!("did_change_configuration");
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        debug!("did_change_workspace_folders: {:?}", params.event);
+        // Project root changed -> re-index
+        if let Some(root) = params
+            .event
+            .added
+            .first()
+            .and_then(|f| f.uri.to_file_path().ok())
+        {
+            let _ = self.state.index.send(IndexCommand::ParseAll(root));
+        }
+    }
+
+    async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+        debug!("execute_command");
+        Ok(None)
+    }
+}
