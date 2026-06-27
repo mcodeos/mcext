@@ -1,0 +1,100 @@
+{
+	"name": "mcodels",
+	"displayName": "MCode Language Server",
+	"description": "mcode language server",
+	"publisher": "mcodels",
+	"license": "MIT",
+	"version": "0.1.0",
+	"categories": [
+		"Programming Languages"
+	],
+	"keywords": [
+		"language-server",
+		"tower-lsp",
+		"mcode"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/mcodels/mcext.git"
+	},
+	"engines": {
+		"vscode": "^1.66.0"
+	},
+	"enabledApiProposals": [],
+	"activationEvents": [
+		"onLanguage:mcode"
+	],
+	"main": "./dist/extension.js",
+	"contributes": {
+		"languages": [
+			{
+				"id": "mcode",
+				"extensions": [
+					".mc"
+				],
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"snippets": [
+			{
+				"language": "mcode",
+				"path": "./snippets/mcode.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "mcode",
+				"scopeName": "source.mcode",
+				"path": "./syntaxes/mcode.tmLanguage.json"
+			}
+		],
+		"configuration": {
+			"type": "object",
+			"title": "mcodels",
+			"properties": {
+				"mcodels.trace.server": {
+					"type": "string",
+					"scope": "window",
+					"enum": [
+						"off",
+						"messages",
+						"verbose"
+					],
+					"enumDescriptions": [
+						"No traces",
+						"Error only",
+						"Full log"
+					],
+					"default": "off",
+					"description": "Traces the communication between VS Code and the language server."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"postinstall": "cd client && pnpm i",
+		"compile": "npm run check-types && node esbuild.js --production",
+		"check-types": "tsc --noEmit",
+		"watch": "npm-run-all -p watch:*",
+		"watch:esbuild": "node esbuild.js --watch",
+		"watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+		"package": "vsce package --no-dependencies"
+	},
+	"devDependencies": {
+		"@types/glob": "8.1.0",
+		"@types/mocha": "10.0.10",
+		"@types/node": "22.10.2",
+		"@vscode/vsce": "^3.2.1",
+		"cross-env": "^7.0.2",
+		"esbuild": "^0.24.2",
+		"eslint": "9.17.0",
+		"glob": "11.0.0",
+		"mocha": "11.0.2",
+		"npm-run-all": "^4.1.5",
+		"ts-loader": "^9.5.1",
+		"typescript": "5.4.5",
+		"vscode-test": "^1.4.0",
+		"vscode-uri": "^3.0.2"
+	},
+	"packageManager": "pnpm@8.15.7"
+}

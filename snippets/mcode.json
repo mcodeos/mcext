@@ -1,0 +1,127 @@
+{
+  "component": {
+    "prefix": "comp",
+    "body": [
+      "component ${1:Name} {",
+      "    pins = [${2}]",
+      "}"
+    ],
+    "description": "Create a component definition"
+  },
+  "interface": {
+    "prefix": "intf",
+    "body": [
+      "interface ${1:Name} {",
+      "    pins = [${2}]",
+      "}"
+    ],
+    "description": "Create an interface definition"
+  },
+  "enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:Value}",
+      "}"
+    ],
+    "description": "Create an enum definition"
+  },
+  "pins": {
+    "prefix": "pins",
+    "body": [
+      "pins = [${1}]"
+    ],
+    "description": "Add pin definition"
+  },
+  "config": {
+    "prefix": "cfg",
+    "body": [
+      "config {",
+      "    ${1}",
+      "}"
+    ],
+    "description": "Add config block"
+  },
+  "property": {
+    "prefix": "prop",
+    "body": [
+      "property ${1:name} = ${2:value}"
+    ],
+    "description": "Add property"
+  },
+  "function": {
+    "prefix": "fn",
+    "body": [
+      "function ${1:name}(${2}) {",
+      "    ${3}",
+      "}"
+    ],
+    "description": "Add function definition"
+  },
+  "event handler": {
+    "prefix": "on",
+    "body": [
+      "on ${1:event} {",
+      "    ${2}",
+      "}"
+    ],
+    "description": "Add event handler"
+  },
+  "use module": {
+    "prefix": "use",
+    "body": [
+      "use ${1:module}"
+    ],
+    "description": "Add module import"
+  },
+  "meta": {
+    "prefix": "meta",
+    "body": [
+      "meta {",
+      "    ${1}",
+      "}"
+    ],
+    "description": "Add metadata block"
+  },
+  "if statement": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2}",
+      "}"
+    ],
+    "description": "Add if statement"
+  },
+  "for loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:range} {",
+      "    ${3}",
+      "}"
+    ],
+    "description": "Add for loop"
+  },
+  "while loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "    ${2}",
+      "}"
+    ],
+    "description": "Add while loop"
+  },
+  "variable": {
+    "prefix": "var",
+    "body": [
+      "var ${1:name} = ${2:value}"
+    ],
+    "description": "Declare variable"
+  },
+  "constant": {
+    "prefix": "const",
+    "body": [
+      "const ${1:name} = ${2:value}"
+    ],
+    "description": "Declare constant"
+  }
+}
