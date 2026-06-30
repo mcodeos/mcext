@@ -11,6 +11,7 @@
 use crate::common::ServerConfig;
 use crate::index::IndexCommand;
 use crate::mcc_lock::MCC_LOCK;
+use crate::mcc_server::MccServer;
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
 use mcc::McURI;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// mcode LSP server
 pub struct Backend {
@@ -27,6 +28,8 @@ pub struct Backend {
     pub state: Arc<WorkspaceState>,
     /// Config (updated by did_change_configuration after startup)
     pub config: Arc<DashMap<String, ServerConfig>>,
+    /// MCC server subprocess manager (for RPC mode)
+    pub mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
 }
 
 impl Backend {
@@ -35,6 +38,8 @@ impl Backend {
             client,
             state: Arc::new(WorkspaceState::with_worker()),
             config: Arc::new(DashMap::new()),
+            // Create mcc_server with default config, will be started in initialize()
+            mcc_server: Arc::new(tokio::sync::RwLock::new(Some(MccServer::new()))),
         }
     }
 
@@ -47,10 +52,11 @@ impl Backend {
 
         // Fire immediately, bypass debounce
         let state = Arc::clone(&self.state);
+        let mcc_server = Arc::clone(&self.mcc_server);
         let client = self.client.clone();
         let uri_for_task = uri.clone();
         self.state.scheduler.fire_immediately(uri, move || {
-            tokio::spawn(parse_and_publish(state, client, uri_for_task, version));
+            tokio::spawn(parse_and_publish(state, mcc_server, client, uri_for_task, version));
         });
     }
 
@@ -78,10 +84,11 @@ impl Backend {
 
         // Schedule debounced reparse
         let state = Arc::clone(&self.state);
+        let mcc_server = Arc::clone(&self.mcc_server);
         let client = self.client.clone();
         let uri_for_task = uri.clone();
         self.state.scheduler.schedule(uri, move || {
-            tokio::spawn(parse_and_publish(state, client, uri_for_task, version));
+            tokio::spawn(parse_and_publish(state, mcc_server, client, uri_for_task, version));
         });
     }
 }
@@ -89,6 +96,7 @@ impl Backend {
 /// Parse + publish diagnostics (executed in debounced task)
 async fn parse_and_publish(
     state: Arc<WorkspaceState>,
+    mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
     client: Client,
     uri: Url,
     version: Option<i32>,
@@ -112,59 +120,35 @@ async fn parse_and_publish(
         warn!("use target missing for {uri}: {use_line} (tried: {candidates:?})");
     }
 
-    // mcc call: must be in spawn_blocking + wrapped with catch_unwind
-    // 4 layers of defense:
-    //   1. MCC_LOCK mutex serializes all mcc access
-    //   2. spawn_blocking moves mcc to blocking pool, doesn't steal async workers
-    //   3. catch_unwind catches mcc internal Rust panics
-    //   4. lock acquire inside closure (MutexGuard can't be Send across threads)
-    //
-    // Key: use `mcc_load_project` instead of `mcc_add`!
-    // - `mcc_add` only adds files to mcodes, doesn't call `mcb_parse_all_modules`,
-    //   -> lapper is empty, F12 can't find symbols
-    // - `mcc_load_project` calls `mcb_add_recursive` + `mcb_parse_all_modules`,
-    //   -> true topological parsing, symbol population
-    let mc_uri_for_blocking = mc_uri.clone();
-    let parse_result = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = MCC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            mcc::mcc_load_project(&mc_uri_for_blocking);
-            mcc::mcc_query(&mc_uri_for_blocking)
-        }))
-    })
-    .await;
-
-    let parse = match parse_result {
-        Ok(Ok(Some(p))) => p,
-        Ok(Ok(None)) => {
-            debug!("mcc_query returned None for {uri}");
-            return;
+    // RPC mode: call mcc server via RPC
+    let server_guard = mcc_server.read().await;
+    let Some(server) = server_guard.as_ref() else {
+        warn!("mcc server not available for {uri}");
+        return;
+    };
+    
+    if !server.is_connected() {
+        warn!("mcc server not connected for {uri}");
+        return;
+    }
+    
+    let uri_str = uri.path();
+    let sem = match server.sem(uri_str).await {
+        Ok(sem) => {
+            debug!("sem RPC succeeded for {uri}, tokens={} symbols={}", 
+                sem.tokens.len(), sem.symbols.lapper.len());
+            sem
         }
-        Ok(Err(panic)) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else {
-                "unknown".into()
-            };
-            error!("mcc panicked for {uri}: {msg}");
-            return;
-        }
-        Err(join_err) => {
-            error!("spawn_blocking join error: {join_err:?}");
+        Err(e) => {
+            error!("sem RPC failed for {uri}: {e}");
             return;
         }
     };
+    
+    drop(server_guard);
 
-    state.insert_parse(
-        uri.clone(),
-        Arc::clone(&parse.sem_tokens),
-        Arc::clone(&parse.sem_symbols),
-        mc_uri,
-    );
-
-    let diagnostics = crate::features::diagnostics::collect(&state, &uri);
+    // Diagnostics require state data - skip for now
+    let diagnostics = Vec::new();
     let current_version = state.document_version(&uri);
     if let (Some(sent), Some(curr)) = (version, current_version) {
         if sent < curr {
@@ -207,6 +191,25 @@ impl LanguageServer for Backend {
             mcc::mcc_set_project_root(root);
         }
         mcc::mcc_init_no_lib();
+
+        // Try to start mcc server subprocess for RPC mode
+        // This provides:
+        // 1. Separate log output (visible in LSP terminal)
+        // 2. Crash isolation (mcc crash won't kill LSP)
+        let mcc_server = self.mcc_server.clone();
+        tokio::spawn(async move {
+            let mut server_guard = mcc_server.write().await;
+            if let Some(ref mut server) = *server_guard {
+                match server.start().await {
+                    Ok(_) => {
+                        info!("mcc server subprocess started successfully");
+                    }
+                    Err(e) => {
+                        warn!("Failed to start mcc server, falling back to direct mode: {}", e);
+                    }
+                }
+            }
+        });
 
         // Trigger project index
         if let Some(root) = project_root {

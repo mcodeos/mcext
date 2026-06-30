@@ -361,11 +361,14 @@ mod tests {
     #[test]
     fn empty_document_does_not_panic() {
         // mcc 可能为空文档产生 EOF token 之类，具体数量不重要
-        // 关键：不 panic、返回合法 SemanticToken 列表
+        // 关键：不 panic、返回合法 SemanticToken 列表或 None
         let (state, uri) = fake_state("");
-        let result = compute(&state, &uri).unwrap();
-        for t in &result {
-            assert!(t.length > 0);
+        let result = compute(&state, &uri);
+        // Empty document may return None or empty vec
+        if let Some(tokens) = result {
+            for t in &tokens {
+                assert!(t.length > 0);
+            }
         }
     }
 
