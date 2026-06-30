@@ -106,7 +106,7 @@ fn emit_single_token(
         let pos = position as usize;
         let end = pos + length as usize;
         if pos < rope.len_bytes() && end <= rope.len_bytes() {
-            let text = rope.slice(pos..end).to_string();
+            let text = rope.byte_slice(pos..end).to_string();
             if is_mcode_keyword(&text) {
                 13 // KEYWORD
             } else {
