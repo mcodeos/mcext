@@ -6,6 +6,5 @@ out/
 dist/
 *.vsix
 client/
-# macOS Finder metadata
 .DS_Store
 doc/

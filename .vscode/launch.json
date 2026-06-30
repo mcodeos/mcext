@@ -37,7 +37,7 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/data"
+        "${workspaceFolder}/../mcd/unitest/project"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "build: all",

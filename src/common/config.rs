@@ -1,41 +1,41 @@
-//! Server 端配置
+//! Server-side configuration
 //!
-//! 由 LSP client 在 `InitializeParams::initialization_options` 传入，或在
-//! `workspace/didChangeConfiguration` 中更新。本期 (Phase 0) 仅做骨架，
-//! 详细配置项见 `doc/features/settings.md`。
+//! Passed by LSP client via `InitializeParams::initialization_options`, or updated via
+//! `workspace/didChangeConfiguration`. This phase (Phase 0) only provides the skeleton;
+//! detailed config items are documented in `doc/features/settings.md`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// mcc 系统库根路径（设置 MCC_SYSTEM_ROOT）
+/// mcc system library root path (sets MCC_SYSTEM_ROOT)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// mcc 系统库根；为 None 时按 mcc 内部默认优先级
+    /// mcc system library root; when None, uses mcc internal default priority
     #[serde(default)]
     pub system_root: Option<PathBuf>,
 
-    /// mcc 项目根；为 None 时取第一个 workspace folder
+    /// mcc project root; when None, uses the first workspace folder
     #[serde(default)]
     pub project_root: Option<PathBuf>,
 
-    /// 是否启用 semantic tokens（默认开）
+    /// Whether semantic tokens are enabled (enabled by default)
     #[serde(default = "default_true")]
     pub semantic_tokens_enabled: bool,
 
-    /// 是否启用 inlay hints（默认开）
+    /// Whether inlay hints are enabled (enabled by default)
     #[serde(default = "default_true")]
     pub inlay_hints_enabled: bool,
 
-    /// 诊断防抖（ms）
+    /// Diagnostics debounce interval (ms)
     #[serde(default = "default_debounce_ms")]
     pub diagnostics_debounce_ms: u64,
 
-    /// 格式化 tab size
+    /// Formatting tab size
     #[serde(default = "default_tab_size")]
     pub format_tab_size: u32,
 
-    /// 格式化 insert final newline
+    /// Whether to insert final newline on formatting
     #[serde(default = "default_true")]
     pub format_insert_final_newline: bool,
 }
