@@ -38,6 +38,27 @@ pub struct ServerConfig {
     /// Whether to insert final newline on formatting
     #[serde(default = "default_true")]
     pub format_insert_final_newline: bool,
+
+    /// mcc server host (for RPC mode)
+    #[serde(default = "default_mcc_host")]
+    pub mcc_host: String,
+
+    /// mcc server port (for RPC mode)
+    #[serde(default = "default_mcc_port")]
+    pub mcc_port: u16,
+
+    /// Whether to use RPC mode (connect to external mcc server)
+    /// If false, use direct FFI calls (current behavior)
+    #[serde(default)]
+    pub use_rpc_mode: bool,
+}
+
+fn default_mcc_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_mcc_port() -> u16 {
+    8080
 }
 
 fn default_true() -> bool {
@@ -73,6 +94,9 @@ impl ServerConfig {
             diagnostics_debounce_ms: 150,
             format_tab_size: 4,
             format_insert_final_newline: true,
+            mcc_host: default_mcc_host(),
+            mcc_port: default_mcc_port(),
+            use_rpc_mode: false,
         }
     }
 }

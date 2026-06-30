@@ -11,9 +11,9 @@
 //! Note: This test triggers the mcast C library (complementary to tests/crossfile.rs's
 //! "no parse" fake-state test, which doesn't call the C library).
 
+use mcc::{mcc_load_project, McURI};
 use mcodels::features::{completion, goto_definition, references, semantic_tokens};
 use mcodels::WorkspaceState;
-use mcc::{mcc_load_project, McURI};
 use ropey::Rope;
 use std::path::PathBuf;
 use tower_lsp::lsp_types::{
@@ -31,10 +31,8 @@ fn fixture_uri(name: &str) -> Url {
 
 /// Load file into LSP state and trigger mcc parsing
 fn load_into_state(state: &WorkspaceState, url: &Url, name: &str) {
-    let text = std::fs::read_to_string(
-        url.to_file_path().expect("url->path"),
-    )
-    .expect("read fixture");
+    let text =
+        std::fs::read_to_string(url.to_file_path().expect("url->path")).expect("read fixture");
 
     state.insert_document(url.clone(), Rope::from_str(&text), 1);
 
@@ -73,7 +71,9 @@ fn completion_in_pins_list_returns_items() {
 
     // Cursor position after `pins = [` (line 3 "    pins = [" inside)
     let params = TextDocumentPositionParams {
-        text_document: TextDocumentIdentifier { uri: helper_url.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: helper_url.clone(),
+        },
         position: Position::new(3, 12),
     };
     let result = completion::resolve(&state, &params);
@@ -83,7 +83,10 @@ fn completion_in_pins_list_returns_items() {
         tower_lsp::lsp_types::CompletionResponse::Array(arr) => arr,
     };
     // Should at least have common pin names (VDD/GND/SCL/...)
-    assert!(!items.is_empty(), "pins context should have completion items");
+    assert!(
+        !items.is_empty(),
+        "pins context should have completion items"
+    );
     assert!(
         items.iter().any(|i| i.label == "VDD"),
         "should include VDD completion"
@@ -98,7 +101,9 @@ fn completion_returns_keywords_at_general_position() {
 
     // Position at start of file (empty line inside module main) -> General context -> should have keywords
     let params = TextDocumentPositionParams {
-        text_document: TextDocumentIdentifier { uri: main_url.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: main_url.clone(),
+        },
         position: Position::new(5, 0),
     };
     let result = completion::resolve(&state, &params);

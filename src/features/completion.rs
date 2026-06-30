@@ -11,11 +11,9 @@
 
 use crate::common::position::position_to_offset;
 use crate::state::WorkspaceState;
-use mcc::McURI;
-use std::sync::Arc;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, InsertTextFormat,
-    Position, TextDocumentPositionParams, Url,
+    TextDocumentPositionParams, Url,
 };
 
 /// mcode syntax keywords
@@ -31,7 +29,11 @@ const KEYWORDS: &[(&str, &str, &str)] = &[
         "Declare interface",
         "interface ${1:Name} {\n    pins = []\n}",
     ),
-    ("enum", "Declare enum", "enum ${1:Name} {\n    ${2:Value}\n}"),
+    (
+        "enum",
+        "Declare enum",
+        "enum ${1:Name} {\n    ${2:Value}\n}",
+    ),
     ("pins", "Pin list", "pins = [${1}]"),
     ("config", "Config block", "config {\n    ${1}\n}"),
     ("property", "Property", "property ${1:name} = ${2:value}"),
@@ -50,7 +52,11 @@ const KEYWORDS: &[(&str, &str, &str)] = &[
     ("for", "For loop", "for ${1:i} in ${2:range} {\n    ${3}\n}"),
     ("while", "While loop", "while ${1:condition} {\n    ${2}\n}"),
     ("var", "Variable declaration", "var ${1:name} = ${2:value}"),
-    ("const", "Constant declaration", "const ${1:name} = ${2:value}"),
+    (
+        "const",
+        "Constant declaration",
+        "const ${1:name} = ${2:value}",
+    ),
     ("true", "Boolean true", "true"),
     ("false", "Boolean false", "false"),
     ("null", "Null value", "null"),
@@ -334,7 +340,10 @@ pub fn resolve_item(item: CompletionItem) -> CompletionItem {
 mod tests {
     use super::*;
     use crate::state::WorkspaceState;
+    use mcc::McURI;
     use ropey::Rope;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::Position;
 
     fn fake_state(text: &str) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();

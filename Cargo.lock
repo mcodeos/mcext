@@ -1211,6 +1211,7 @@ dependencies = [
  "im-rc",
  "mcc",
  "oxc_index",
+ "reqwest",
  "ropey",
  "rust-lapper",
  "serde",
