@@ -11,7 +11,12 @@ use tower_lsp::lsp_types::{SemanticToken, Url};
 /// Tokens state
 pub struct TokensState {
     next_id: AtomicU64,
-    last: RwLock<HashMap<Url, (u64, Vec<SemanticToken>)>>,
+    last: RwLock<HashMap<Url, (TokenEntry)>>,
+}
+
+struct TokenEntry {
+    result_id: String,
+    tokens: Vec<SemanticToken>,
 }
 
 impl TokensState {
@@ -27,16 +32,23 @@ impl TokensState {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Store latest tokens for URI
+    /// Store latest tokens for URI (with auto-generated numeric id)
     pub fn store(&self, uri: Url, id: u64, tokens: Vec<SemanticToken>) {
+        let result_id = id.to_string();
         let mut last = self.last.write().expect("tokens lock poisoned");
-        last.insert(uri, (id, tokens));
+        last.insert(uri, TokenEntry { result_id, tokens });
     }
 
-    /// Get last stored (id, tokens) for URI
-    pub fn get(&self, uri: &Url) -> Option<(u64, Vec<SemanticToken>)> {
+    /// Store latest tokens for URI with a pre-set string result_id (from RPC)
+    pub fn store_with_result_id(&self, uri: Url, result_id: String, tokens: Vec<SemanticToken>) {
+        let mut last = self.last.write().expect("tokens lock poisoned");
+        last.insert(uri, TokenEntry { result_id, tokens });
+    }
+
+    /// Get last stored (result_id, tokens) for URI
+    pub fn get(&self, uri: &Url) -> Option<(String, Vec<SemanticToken>)> {
         let last = self.last.read().expect("tokens lock poisoned");
-        last.get(uri).cloned()
+        last.get(uri).map(|e| (e.result_id.clone(), e.tokens.clone()))
     }
 
     /// Remove URI (cleanup on document close)
@@ -82,10 +94,10 @@ mod tests {
         let state = TokensState::new();
         let uri = Url::parse("file:///t.mc").unwrap();
         let tokens = vec![dummy_token(0, 0, 3, 13)];
-        let id = state.next_id();
-        state.store(uri.clone(), id, tokens.clone());
+        let id_num = state.next_id();
+        state.store(uri.clone(), id_num, tokens.clone());
         let (got_id, got_tokens) = state.get(&uri).unwrap();
-        assert_eq!(got_id, id);
+        assert_eq!(got_id, id_num.to_string());
         assert_eq!(got_tokens.len(), 1);
     }
 
