@@ -245,9 +245,9 @@ impl MccServer {
     }
 
     /// Call sem RPC to get semantic data for a file
-    pub async fn sem(&self, uri: &str) -> Result<crate::rpc::SemResponse, MccServerError> {
+    pub async fn sem(&self, uri: &str, content: Option<&str>) -> Result<crate::rpc::SemResponse, MccServerError> {
         let client = self.client().ok_or(MccServerError::NotConnected)?;
-        client.sem(uri).await.map_err(|e| MccServerError::Rpc(e.to_string()))
+        client.sem(uri, content).await.map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
     /// Find mcc binary path

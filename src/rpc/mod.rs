@@ -66,8 +66,13 @@ impl MccRpcClient {
     }
 
     /// Get semantic data (tokens + symbols) for a file
-    pub async fn sem(&self, uri: &str) -> Result<SemResponse, RpcError> {
-        let result = self.call("sem", json!({"uri": uri})).await?;
+    pub async fn sem(&self, uri: &str, content: Option<&str>) -> Result<SemResponse, RpcError> {
+        let params = if let Some(text) = content {
+            json!({"uri": uri, "content": text})
+        } else {
+            json!({"uri": uri})
+        };
+        let result = self.call("sem", params).await?;
         serde_json::from_value(result)
             .map_err(|e| RpcError::Parse(e.to_string()))
     }
@@ -130,6 +135,9 @@ impl std::error::Error for RpcError {}
 pub struct SemResponse {
     pub tokens: Vec<SemToken>,
     pub symbols: SemSymbols,
+    /// Stable result_id for semantic tokens (hash of token data)
+    #[serde(default)]
+    pub result_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
