@@ -20,11 +20,11 @@ anyhow = "1.0.93"
 thiserror = "2.0.3"
 rust-lapper = "1.1.0"
 
-# tracing: 结构化日志 + span 支持
+# tracing: structured logging + span support
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# tokio-console: 异步调试工具（仅开发依赖）
+# tokio-console: async debugging tool (dev dependency only)
 [dev-dependencies]
 console-subscriber = "0.4"
 

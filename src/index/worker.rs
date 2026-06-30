@@ -15,7 +15,7 @@ use mcc::McURI;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Index worker commands
 #[derive(Debug, Clone)]
@@ -145,21 +145,37 @@ fn rebuild_all(root: &std::path::Path) -> ProjectIndex {
             .unwrap_or_else(|e| e.into_inner());
         mcc::mcc_set_project_root(&root);
 
-        // Recursively scan all .mc files, call mcc_load_project on each
-        // Note: use mcc_load_project, not mcc_add — the latter doesn't call mcb_parse_all_modules,
-        //       -> lapper is empty, symbols not populated
-        // Missing use targets only log warning, don't skip — mcc itself has defense
-        for mc_path in walk_mc_files(&root) {
-            let uri = McURI::from(mc_path.to_string_lossy().to_string());
-            let text = std::fs::read_to_string(&mc_path).unwrap_or_default();
-            let url = tower_lsp::lsp_types::Url::from_file_path(&mc_path)
+        // Find entry point: main.mc in root, or first .mc file
+        // mcc_load_project should be called ONCE with entry point, not for each file
+        let mc_files = walk_mc_files(&root);
+        if mc_files.is_empty() {
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        }
+
+        // Check use targets for each file (warning only)
+        for mc_path in &mc_files {
+            let text = std::fs::read_to_string(mc_path).unwrap_or_default();
+            let url = tower_lsp::lsp_types::Url::from_file_path(mc_path)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap());
             if let crate::util::UseCheckResult::Missing { use_line, .. } =
                 crate::util::check_use_targets(&url, &text)
             {
+                let uri = McURI::from(mc_path.to_string_lossy().to_string());
                 warn!("worker: use target missing for {uri}: {use_line}");
             }
-            mcc::mcc_load_project(&uri);
+        }
+
+        // Find entry point: prefer main.mc, fall back to first file
+        let entry_path = mc_files
+            .iter()
+            .find(|p| p.file_name().map_or(false, |n| n == "main.mc"))
+            .or_else(|| mc_files.first())
+            .cloned();
+
+        if let Some(entry_path) = entry_path {
+            let entry_uri = McURI::from(entry_path.to_string_lossy().to_string());
+            debug!("worker: loading project with entry: {}", entry_uri);
+            mcc::mcc_load_project(&entry_uri);
         }
 
         let components = mcc::mcb_iter_components();
@@ -173,8 +189,15 @@ fn rebuild_all(root: &std::path::Path) -> ProjectIndex {
         Ok((components, interfaces, enums, modules)) => {
             build_from_mcb_iter(Some(root), components, interfaces, enums, modules)
         }
-        Err(_) => {
-            error!("mcc panic during rebuild_all");
+        Err(panic_payload) => {
+            let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else {
+                "unknown panic payload".into()
+            };
+            error!("mcc panic during rebuild_all: {}", msg);
             ProjectIndex::new()
         }
     }
