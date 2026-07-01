@@ -5,6 +5,7 @@ out/
 *.ast 
 dist/
 *.vsix
-client/
+client/node_modules/
+client/target/
 .DS_Store
 doc/
