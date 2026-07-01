@@ -74,8 +74,19 @@ impl MccServer {
         s
     }
 
+    /// Clear the log file at start (useful when LSP restarts and reconnects to existing mcc)
+    pub fn clear_log() {
+        if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+            let log_path = std::path::Path::new(&manifest).join("log.txt");
+            let _ = std::fs::write(&log_path, "");
+        }
+    }
+
     /// Start mcc server subprocess and connect
     pub async fn start(&mut self) -> Result<(), MccServerError> {
+        // Clear log at start of each session
+        Self::clear_log();
+
         if self.state == ConnectionState::Connected {
             return Ok(());
         }

@@ -3,11 +3,21 @@ use tower_lsp::{LspService, Server};
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing-subscriber, explicitly use stderr to avoid polluting LSP stdout
-    // (default fmt() is also stderr, but being explicit is safer — prevents issues if default
-    // behavior changes or another crate registers a subscriber first)
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("log.txt");
+    // Truncate log file for fresh session
+    let _ = std::fs::write(&log_path, "");
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .expect("failed to open log file");
+
+    // Only write to log.txt; DO NOT write to stderr/stdout
+    // (stderr output can interfere with VS Code LSP client)
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_writer(file)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
