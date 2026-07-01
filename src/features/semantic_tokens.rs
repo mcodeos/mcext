@@ -81,18 +81,18 @@ fn emit_single_token(
     if position < 0 || length <= 0 {
         return;
     }
-    
+
     let pos = position as usize;
     let len = length as usize;
     let rope_len = rope.len_bytes();
-    
+
     // Skip tokens that are clearly out of bounds
     if pos >= rope_len || pos.saturating_add(len) > rope_len {
         return;
     }
-    
+
     let end = pos.saturating_add(len);
-    
+
     let line = match rope.try_byte_to_line(pos) {
         Ok(l) => l as u32,
         Err(_) => return,
@@ -333,16 +333,16 @@ fn emit_multiline_comment(
     if start_byte < 0 || length <= 0 {
         return;
     }
-    
+
     let start = start_byte as usize;
     let len = length as usize;
     let rope_len = rope.len_bytes();
-    
+
     // Skip tokens that are clearly out of bounds
     if start >= rope_len || start.saturating_add(len) > rope_len {
         return;
     }
-    
+
     // Clamp end to rope boundaries
     let end = (start + len).min(rope_len);
     if end <= start {
@@ -364,7 +364,7 @@ fn emit_multiline_comment(
         if line_idx >= rope.len_lines() {
             break;
         }
-        
+
         let line_u32 = line_idx as u32;
         let line_start_char = match rope.try_line_to_char(line_idx) {
             Ok(c) => c as u32,

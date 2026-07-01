@@ -99,6 +99,12 @@ pub fn resolve(
                 }
             }
         }
+        SymbolType::InstanceRef(sid) => {
+            // ★ New: sid: DeclareId (来自 global table)
+            if let Some(decl_span) = symbols.local_table.declare_inst_to_span.get(&sid) {
+                entries.push((mcc::McURI::from(""), decl_span.clone(), true));
+            }
+        }
     }
 
     if entries.is_empty() {

@@ -161,7 +161,7 @@ async fn parse_and_publish(
             sem
         }
         Err(e) => {
-            error!("sem RPC failed for {uri}: {e}");
+            debug!("sem RPC failed for {uri}: {e}");
             return;
         }
     };
@@ -202,7 +202,28 @@ async fn parse_and_publish(
     state
         .sem_tokens
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(tokens)));
-    state.registered_uris.insert(uri.clone(), mc_uri);
+    state.registered_uris.insert(uri.clone(), mc_uri.clone());
+
+    // ★ Fix: Store sem_symbols for goto_definition and other features
+    // Call mcc_query to get the full McSemSymbols with symbol_lapper
+    tracing::info!("parse_and_publish: calling mcc_query for {}", mc_uri);
+    match mcc::mcc_query(&mc_uri) {
+        Some(result) => {
+            let lapper_len = result
+                .sem_symbols
+                .lock()
+                .map(|s| s.symbol_lapper.len())
+                .unwrap_or(0);
+            state.sem_symbols.insert(uri.clone(), result.sem_symbols);
+            tracing::info!(
+                "Stored sem_symbols for goto_definition, lapper_len={}",
+                lapper_len
+            );
+        }
+        None => {
+            tracing::warn!("parse_and_publish: mcc_query returned None for {}", mc_uri);
+        }
+    }
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
