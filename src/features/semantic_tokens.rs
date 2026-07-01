@@ -110,7 +110,7 @@ fn emit_single_token(
             if is_mcode_keyword(&text) {
                 13 // KEYWORD
             } else {
-                9  // VARIABLE (identifier)
+                9 // VARIABLE (identifier)
             }
         } else {
             type_ as u32
@@ -132,11 +132,32 @@ fn emit_single_token(
 fn is_mcode_keyword(text: &str) -> bool {
     matches!(
         text,
-        "module" | "component" | "interface" | "enum" | "func"
-        | "if" | "else" | "use" | "pub" | "as" | "in" | "io"
-        | "ps" | "nc" | "anl" | "out" | "this" | "role"
-        | "pins" | "int" | "float" | "string" | "bool"
-        | "true" | "false" | "return"
+        "module"
+            | "component"
+            | "interface"
+            | "enum"
+            | "func"
+            | "if"
+            | "else"
+            | "use"
+            | "pub"
+            | "as"
+            | "in"
+            | "io"
+            | "ps"
+            | "nc"
+            | "anl"
+            | "out"
+            | "this"
+            | "role"
+            | "pins"
+            | "int"
+            | "float"
+            | "string"
+            | "bool"
+            | "true"
+            | "false"
+            | "return"
     )
 }
 

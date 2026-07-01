@@ -55,7 +55,13 @@ impl Backend {
         let client = self.client.clone();
         let uri_for_task = uri.clone();
         self.state.scheduler.fire_immediately(uri, move || {
-            tokio::spawn(parse_and_publish(state, mcc_server, client, uri_for_task, version));
+            tokio::spawn(parse_and_publish(
+                state,
+                mcc_server,
+                client,
+                uri_for_task,
+                version,
+            ));
         });
     }
 
@@ -87,7 +93,13 @@ impl Backend {
         let client = self.client.clone();
         let uri_for_task = uri.clone();
         self.state.scheduler.schedule(uri, move || {
-            tokio::spawn(parse_and_publish(state, mcc_server, client, uri_for_task, version));
+            tokio::spawn(parse_and_publish(
+                state,
+                mcc_server,
+                client,
+                uri_for_task,
+                version,
+            ));
         });
     }
 }
@@ -104,7 +116,11 @@ async fn parse_and_publish(
     let _guard = span.enter();
 
     trace!("enter");
-    warn!("parse_and_publish: START uri={} version={:?}", uri.path(), version);
+    warn!(
+        "parse_and_publish: START uri={} version={:?}",
+        uri.path(),
+        version
+    );
     let mc_uri = McURI::from(uri.path());
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
@@ -126,19 +142,22 @@ async fn parse_and_publish(
         warn!("mcc server not available for {uri}");
         return;
     };
-    
+
     if !server.is_connected() {
         warn!("mcc server not connected for {uri}");
         return;
     }
-    
+
     let uri_str = uri.path();
     // Pass current document text so mcc parses live content (not stale disk file)
     let content_for_rpc: Option<&str> = Some(&text);
     let sem = match server.sem(uri_str, content_for_rpc).await {
         Ok(sem) => {
-            debug!("sem RPC succeeded for {uri}, tokens={} symbols={}", 
-                sem.tokens.len(), sem.symbols.lapper.len());
+            debug!(
+                "sem RPC succeeded for {uri}, tokens={} symbols={}",
+                sem.tokens.len(),
+                sem.symbols.lapper.len()
+            );
             sem
         }
         Err(e) => {
@@ -146,7 +165,7 @@ async fn parse_and_publish(
             return;
         }
     };
-    
+
     drop(server_guard);
 
     // Store tokens in state so semantic_tokens_full can read them
@@ -158,26 +177,42 @@ async fn parse_and_publish(
     for &t in &raw_types {
         *counts.entry(t).or_insert(0) += 1;
     }
-    let count_str: String = counts.iter().map(|(k,v)| format!("{k}:{v}")).collect::<Vec<_>>().join(", ");
-    warn!("parse_and_publish: RPC tokens={} type_counts=[{}]", sem.tokens.len(), count_str);
+    let count_str: String = counts
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    warn!(
+        "parse_and_publish: RPC tokens={} type_counts=[{}]",
+        sem.tokens.len(),
+        count_str
+    );
 
     let tokens = mcc::McSemTokens {
-        tokens: sem.tokens.into_iter().map(|t| mcc::McSemToken {
-            type_: t.token_type,
-            position: t.position,
-            length: t.length,
-        }).collect(),
+        tokens: sem
+            .tokens
+            .into_iter()
+            .map(|t| mcc::McSemToken {
+                type_: t.token_type,
+                position: t.position,
+                length: t.length,
+            })
+            .collect(),
     };
-    state.sem_tokens.insert(uri.clone(), Arc::new(std::sync::Mutex::new(tokens)));
+    state
+        .sem_tokens
+        .insert(uri.clone(), Arc::new(std::sync::Mutex::new(tokens)));
     state.registered_uris.insert(uri.clone(), mc_uri);
-    
+
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
-        let lsp_tokens = crate::features::semantic_tokens::compute(&state, &uri)
-            .unwrap_or_default();
-        state.tokens.store_with_result_id(uri.clone(), rid, lsp_tokens);
+        let lsp_tokens =
+            crate::features::semantic_tokens::compute(&state, &uri).unwrap_or_default();
+        state
+            .tokens
+            .store_with_result_id(uri.clone(), rid, lsp_tokens);
     }
-    
+
     // Trigger semantic tokens refresh so VSCode re-requests after parse
     client.semantic_tokens_refresh().await.ok();
 
@@ -239,7 +274,10 @@ impl LanguageServer for Backend {
                         info!("mcc server subprocess started successfully");
                     }
                     Err(e) => {
-                        warn!("Failed to start mcc server, falling back to direct mode: {}", e);
+                        warn!(
+                            "Failed to start mcc server, falling back to direct mode: {}",
+                            e
+                        );
                     }
                 }
             }
@@ -519,7 +557,7 @@ impl LanguageServer for Backend {
         let _guard = span.enter();
         debug!("");
         let uri = params.text_document.uri;
-        
+
         // Check if tokens are in state before calling compute
         let has_tokens = self.state.sem_tokens.get(&uri).is_some();
         let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
@@ -533,13 +571,24 @@ impl LanguageServer for Backend {
         for t in &tokens {
             *counts.entry(t.token_type).or_insert(0) += 1;
         }
-        let count_str: String = counts.iter().map(|(k,v)| format!("{k}:{v}")).collect::<Vec<_>>().join(", ");
-        warn!("semantic_tokens_full: uri={} tokens={} has_state={} type_counts=[{}]", 
-            uri.path(), tokens.len(), has_tokens, count_str);
-        
+        let count_str: String = counts
+            .iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warn!(
+            "semantic_tokens_full: uri={} tokens={} has_state={} type_counts=[{}]",
+            uri.path(),
+            tokens.len(),
+            has_tokens,
+            count_str
+        );
+
         // Also log first few tokens to verify position/length
         if !tokens.is_empty() {
-            let sample: Vec<(u32, u32, u32)> = tokens.iter().take(5)
+            let sample: Vec<(u32, u32, u32)> = tokens
+                .iter()
+                .take(5)
                 .map(|t| (t.delta_line, t.delta_start, t.token_type))
                 .collect();
             warn!("semantic_tokens_full: first_tokens={:?}", sample);
@@ -573,7 +622,9 @@ impl LanguageServer for Backend {
                     crate::features::semantic_tokens::compute_delta(&prev_tokens, &curr)
                 {
                     let new_id = prev_id_str.clone();
-                    self.state.tokens.store_with_result_id(uri.clone(), new_id.clone(), curr);
+                    self.state
+                        .tokens
+                        .store_with_result_id(uri.clone(), new_id.clone(), curr);
                     return Ok(Some(SemanticTokensFullDeltaResult::TokensDelta(
                         tower_lsp::lsp_types::SemanticTokensDelta {
                             result_id: Some(new_id),
@@ -585,7 +636,9 @@ impl LanguageServer for Backend {
 
             // fallback to full
             let new_id = self.state.tokens.next_id().to_string();
-            self.state.tokens.store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+            self.state
+                .tokens
+                .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
             return Ok(Some(SemanticTokensFullDeltaResult::Tokens(
                 SemanticTokens {
                     result_id: Some(new_id),
@@ -596,7 +649,9 @@ impl LanguageServer for Backend {
 
         // No previous data, return full
         let new_id = self.state.tokens.next_id().to_string();
-        self.state.tokens.store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+        self.state
+            .tokens
+            .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
         Ok(Some(SemanticTokensFullDeltaResult::Tokens(
             SemanticTokens {
                 result_id: Some(new_id),

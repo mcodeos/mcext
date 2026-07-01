@@ -11,7 +11,7 @@ use tower_lsp::lsp_types::{SemanticToken, Url};
 /// Tokens state
 pub struct TokensState {
     next_id: AtomicU64,
-    last: RwLock<HashMap<Url, (TokenEntry)>>,
+    last: RwLock<HashMap<Url, TokenEntry>>,
 }
 
 struct TokenEntry {
@@ -48,7 +48,8 @@ impl TokensState {
     /// Get last stored (result_id, tokens) for URI
     pub fn get(&self, uri: &Url) -> Option<(String, Vec<SemanticToken>)> {
         let last = self.last.read().expect("tokens lock poisoned");
-        last.get(uri).map(|e| (e.result_id.clone(), e.tokens.clone()))
+        last.get(uri)
+            .map(|e| (e.result_id.clone(), e.tokens.clone()))
     }
 
     /// Remove URI (cleanup on document close)
