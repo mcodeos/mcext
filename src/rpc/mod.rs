@@ -90,12 +90,33 @@ impl MccRpcClient {
         let result = self.call("diagnostics", json!({"uri": uri})).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
+
+    /// Get project-wide symbols (components, interfaces, enums, modules)
+    pub async fn project_symbols(&self) -> Result<ProjectSymbolsResponse, RpcError> {
+        let result = self.call("project_symbols", json!({})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
 }
 
 /// Response from `diagnostics` RPC
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsResponse {
     pub diagnostics: Vec<DiagEntry>,
+}
+
+/// Response from `project_symbols` RPC
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectSymbolsResponse {
+    pub components: Vec<SymbolEntry>,
+    pub interfaces: Vec<SymbolEntry>,
+    pub enums: Vec<SymbolEntry>,
+    pub modules: Vec<SymbolEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SymbolEntry {
+    pub name: String,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +244,9 @@ pub struct GlobalSymbols {
     pub declares: Vec<GlobalDeclare>,
     #[serde(default)]
     pub references: Vec<GlobalReference>,
+    /// ★ LSP: Cross-file goto targets (reference_id -> target)
+    #[serde(default)]
+    pub cross_file_targets: Vec<CrossFileTarget>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +260,14 @@ pub struct GlobalDeclare {
 pub struct GlobalReference {
     pub id: u32,
     pub uri: String,
+    pub span: [usize; 2],
+}
+
+/// ★ LSP: Cross-file goto target entry
+#[derive(Debug, Clone, Deserialize)]
+pub struct CrossFileTarget {
+    pub ref_id: u32,
+    pub target_uri: String,
     pub span: [usize; 2],
 }
 

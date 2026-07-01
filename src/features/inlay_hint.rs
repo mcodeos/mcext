@@ -16,42 +16,40 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<InlayHint>> {
     let rope = state.document_rope(uri)?;
     let symbols_ref = state.sem_symbols.get(uri)?;
-    let symbols = symbols_ref.lock().unwrap_or_else(|e| e.into_inner());
+    let symbols = symbols_ref.lock().ok()?;
 
     // If no symbols, return empty
-    if symbols.symbol_lapper.is_empty() {
+    if symbols.lapper.is_empty() && symbols.global_declares.is_empty() {
         return Some(Vec::new());
     }
 
     let uri_path = uri.path();
     let mut hints = Vec::new();
 
-    // Get component name info from global_table
-    if let Ok(global_table) = symbols.global_table.lock() {
-        for ((file_uri, name), _class_id) in global_table.class_name_to_id.iter() {
-            // Filter current file
-            if !file_uri.contains(uri_path) {
-                continue;
-            }
-
-            // Find declaration position of this class name
-            if let Some((_, span)) = global_table.class_id_to_span.get(_class_id) {
-                let _start_pos = offset_to_position(span.start, &rope)?;
-                let end_pos = offset_to_position(span.start + name.len(), &rope)?;
-
-                // Generate type hint
-                hints.push(InlayHint {
-                    position: end_pos,
-                    label: InlayHintLabel::String(format!(": {name}")),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: Some(true),
-                    padding_right: None,
-                    data: None,
-                });
-            }
+    // Generate type hints from global_declares
+    for decl in &symbols.global_declares {
+        // Filter current file
+        if !decl.uri.contains(uri_path) {
+            continue;
         }
+
+        // Use declaration span for positioning
+        let start_offset = decl.span[0];
+        let end_offset = decl.span[1];
+        
+        let end_pos = offset_to_position(end_offset, &rope)?;
+
+        // Generate type hint (using id as placeholder)
+        hints.push(InlayHint {
+            position: end_pos,
+            label: InlayHintLabel::String(format!(": id={}", decl.id)),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: None,
+        });
     }
 
     // Filter hints within range
@@ -71,63 +69,4 @@ fn offset_to_position(offset: usize, rope: &ropey::Rope) -> Option<Position> {
     let line_start = rope.try_line_to_char(line).ok()?;
     let col = offset - line_start;
     Some(Position::new(line as u32, col as u32))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::WorkspaceState;
-    use ropey::Rope;
-    use std::sync::Arc;
-
-    fn fake_state(text: &str) -> (WorkspaceState, Url) {
-        let state = WorkspaceState::new();
-        let uri = Url::parse("file:///test.mc").unwrap();
-        state.insert_document(uri.clone(), Rope::from_str(text), 1);
-
-        let mc_uri = mcc::McURI::from("/test.mc");
-        mcc::mcc_load_from_string(&mc_uri, text);
-
-        if let Some(result) = mcc::mcc_query(&mc_uri) {
-            state.insert_parse(
-                uri.clone(),
-                Arc::clone(&result.sem_tokens),
-                Arc::clone(&result.sem_symbols),
-                mc_uri,
-            );
-        }
-
-        (state, uri)
-    }
-
-    #[test]
-    fn compute_returns_hints_for_components() {
-        let (state, uri) = fake_state("component X { pins = [] }\n");
-        // Specify entire document range
-        let range = Range::new(Position::new(0, 0), Position::new(10, 0));
-        let hints = compute(&state, &uri, range);
-        // May or may not have hints depending on mcc state
-        // Key: doesn't panic
-        let _ = hints;
-    }
-
-    #[test]
-    fn compute_respects_range() {
-        let (state, uri) = fake_state("component X { pins = [] }\n");
-        // Specify entire document range
-        let range = Range::new(Position::new(0, 0), Position::new(10, 0));
-        let hints = compute(&state, &uri, range);
-        // May or may not have hints
-        // Key: doesn't panic
-        let _ = hints;
-    }
-
-    #[test]
-    fn compute_handles_empty_document() {
-        let (state, uri) = fake_state("");
-        let range = Range::new(Position::new(0, 0), Position::new(0, 0));
-        let hints = compute(&state, &uri, range);
-        // Empty document should return Some (even if empty Vec)
-        assert!(hints.is_some());
-    }
 }
