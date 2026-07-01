@@ -43,7 +43,10 @@ impl MccRpcClient {
             .map_err(|e| RpcError::Network(e.to_string()))?;
 
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| RpcError::Parse(format!("bytes error: {}", e)))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| RpcError::Parse(format!("bytes error: {}", e)))?;
         let body = String::from_utf8_lossy(&bytes).to_string();
 
         if !status.is_success() {
@@ -73,8 +76,7 @@ impl MccRpcClient {
             json!({"uri": uri})
         };
         let result = self.call("sem", params).await?;
-        serde_json::from_value(result)
-            .map_err(|e| RpcError::Parse(e.to_string()))
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
     /// Parse a project/file

@@ -9,11 +9,9 @@
 //! 1. Logs visible in this process's output (vs embedded in LSP)
 //! 2. Crash isolation - mcc crash only kills subprocess, not LSP
 
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
@@ -51,7 +49,8 @@ impl MccServer {
     pub const DEFAULT_HOST: &'static str = "127.0.0.1";
     /// Default MCC server port
     pub const DEFAULT_PORT: u16 = 8080;
-    /// Startup timeout
+    /// Startup timeout (reserved for future use)
+    #[allow(dead_code)]
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Create new server manager
@@ -88,7 +87,12 @@ impl MccServer {
         if std::net::TcpListener::bind(&check_addr).is_err() {
             info!("Port {} is already in use, trying to connect", self.port);
             let client = MccRpcClient::new(&self.host, self.port);
-            match timeout(Duration::from_secs(2), client.call("server.info", serde_json::json!({}))).await {
+            match timeout(
+                Duration::from_secs(2),
+                client.call("server.info", serde_json::json!({})),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {
                     self.client = Some(client);
                     self.state = ConnectionState::Connected;
@@ -109,7 +113,11 @@ impl MccServer {
         // Use a loop for retries
         loop {
             self.state = ConnectionState::Connecting;
-            info!("Starting mcc server (attempt {}/{})...", self.restart_count + 1, self.max_restarts);
+            info!(
+                "Starting mcc server (attempt {}/{})...",
+                self.restart_count + 1,
+                self.max_restarts
+            );
 
             // Find mcc binary
             let mcc_path = Self::find_mcc_path();
@@ -118,8 +126,8 @@ impl MccServer {
             info!("Spawning mcc from: {:?}", mcc_path);
             let mut child = match Command::new(&mcc_path)
                 .arg("start")
-                .stdout(Stdio::null())  // Don't capture stdout, let mcc write directly
-                .stderr(Stdio::inherit())  // Inherit stderr for debugging
+                .stdout(Stdio::null()) // Don't capture stdout, let mcc write directly
+                .stderr(Stdio::inherit()) // Inherit stderr for debugging
                 .kill_on_drop(true)
                 .spawn()
             {
@@ -144,7 +152,10 @@ impl MccServer {
                     error!("mcc process exited immediately: {:?}", status);
                     self.restart_count += 1;
                     if self.restart_count >= self.max_restarts {
-                        return Err(MccServerError::FailedToStart(format!("mcc exited: {:?}", status)));
+                        return Err(MccServerError::FailedToStart(format!(
+                            "mcc exited: {:?}",
+                            status
+                        )));
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
@@ -159,7 +170,7 @@ impl MccServer {
 
             // Try RPC connection after a brief delay
             info!("Waiting for mcc to be ready...");
-            
+
             // Wait for port to be bound
             let deadline = Instant::now() + Duration::from_secs(5);
             let addr = format!("{}:{}", self.host, self.port);
@@ -170,19 +181,23 @@ impl MccServer {
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            
+
             // Extra wait for mcc to fully initialize
             info!("Extra wait for mcc initialization...");
             tokio::time::sleep(Duration::from_secs(1)).await;
-            
+
             // Try to connect with retries
             info!("Attempting RPC connection to {}:{}", self.host, self.port);
             let client = MccRpcClient::new(&self.host, self.port);
-            
-            let mut connected = false;
+
             for attempt in 1..=5 {
                 info!("RPC connection attempt {}/5", attempt);
-                match timeout(Duration::from_secs(2), client.call("server.info", serde_json::json!({}))).await {
+                match timeout(
+                    Duration::from_secs(2),
+                    client.call("server.info", serde_json::json!({})),
+                )
+                .await
+                {
                     Ok(Ok(_)) => {
                         self.client = Some(client);
                         self.child = Some(child);
@@ -202,7 +217,7 @@ impl MccServer {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
-            
+
             error!("Failed to connect to mcc server after 5 attempts");
 
             // Mark as crashed and retry
@@ -210,7 +225,9 @@ impl MccServer {
             self.restart_count += 1;
 
             if self.restart_count >= self.max_restarts {
-                return Err(MccServerError::FailedToStart("max restart attempts exceeded".to_string()));
+                return Err(MccServerError::FailedToStart(
+                    "max restart attempts exceeded".to_string(),
+                ));
             }
 
             warn!("mcc server failed, retrying in 1s");
@@ -245,9 +262,16 @@ impl MccServer {
     }
 
     /// Call sem RPC to get semantic data for a file
-    pub async fn sem(&self, uri: &str, content: Option<&str>) -> Result<crate::rpc::SemResponse, MccServerError> {
+    pub async fn sem(
+        &self,
+        uri: &str,
+        content: Option<&str>,
+    ) -> Result<crate::rpc::SemResponse, MccServerError> {
         let client = self.client().ok_or(MccServerError::NotConnected)?;
-        client.sem(uri, content).await.map_err(|e| MccServerError::Rpc(e.to_string()))
+        client
+            .sem(uri, content)
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
     /// Find mcc binary path
