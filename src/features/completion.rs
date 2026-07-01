@@ -88,22 +88,19 @@ fn analyze_context(rope: &ropey::Rope, offset: usize) -> CompletionContext {
     let line_text = rope.line(line_idx).to_string();
     let offset_in_line = offset.saturating_sub(rope.line_to_byte(line_idx));
 
-    // Get current word
-    let mut word_end = offset_in_line;
-    while word_end < line_text.len()
-        && (line_text.is_char_boundary(word_end)
-            && line_text
-                .chars()
-                .nth(word_end)
-                .is_some_and(|c| c.is_alphanumeric() || c == '_'))
-    {
-        word_end += line_text.chars().nth(word_end).map_or(0, |c| c.len_utf8());
+    // Get current word - use character index consistently
+    let line_chars: Vec<char> = line_text.chars().collect();
+    let line_char_len = line_chars.len();
+    let offset_in_line_chars = offset_in_line.min(line_char_len);
+
+    let mut char_idx = offset_in_line_chars;
+    while char_idx < line_char_len && (line_chars[char_idx].is_alphanumeric() || line_chars[char_idx] == '_') {
+        char_idx += 1;
     }
 
     // Analyze text before current word
-    let before_text = line_text[..word_end.min(line_text.len())]
-        .trim()
-        .to_string();
+    let before_text: String = line_chars[..char_idx].iter().collect();
+    let before_text = before_text.trim().to_string();
 
     // Check if in use statement
     if before_text.starts_with("use") || before_text.ends_with("use") {
