@@ -84,6 +84,34 @@ impl MccRpcClient {
         self.call("parse", json!({"entry": entry, "include_system": true}))
             .await
     }
+    
+    /// Get diagnostics for a file
+    pub async fn diagnostics(&self, uri: &str) -> Result<DiagnosticsResponse, RpcError> {
+        let result = self.call("diagnostics", json!({"uri": uri})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+}
+
+/// Response from `diagnostics` RPC
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsResponse {
+    pub diagnostics: Vec<DiagEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagEntry {
+    pub code: u32,
+    pub level: String,
+    pub message: String,
+    pub location: DiagLocation,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagLocation {
+    pub pos: u32,
+    pub len: u32,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Debug, Serialize)]

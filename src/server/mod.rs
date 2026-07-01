@@ -166,6 +166,43 @@ async fn parse_and_publish(
         }
     };
 
+    // Get diagnostics via RPC
+    let mut diagnostics = Vec::new();
+    match server.diagnostics(uri_str).await {
+        Ok(resp) => {
+            let rope = state.document_rope(&uri).unwrap_or_else(|| ropey::Rope::new());
+            for d in resp.diagnostics {
+                let start = match crate::common::position::offset_to_position(d.location.pos as usize, &rope) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let end = match crate::common::position::offset_to_position((d.location.pos + d.location.len) as usize, &rope) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let severity = match d.level.as_str() {
+                    "error" => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
+                    "warning" => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
+                    "info" => tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION,
+                    "hint" => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
+                    _ => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
+                };
+                diagnostics.push(tower_lsp::lsp_types::Diagnostic::new(
+                    tower_lsp::lsp_types::Range::new(start, end),
+                    Some(severity),
+                    Some(tower_lsp::lsp_types::NumberOrString::Number(d.code as i32)),
+                    Some("mcc".into()),
+                    d.message,
+                    None,
+                    None,
+                ));
+            }
+        }
+        Err(e) => {
+            debug!("diagnostics RPC failed for {uri}: {e}");
+        }
+    }
+
     drop(server_guard);
 
     // Store tokens in state so semantic_tokens_full can read them
@@ -237,8 +274,6 @@ async fn parse_and_publish(
     // Trigger semantic tokens refresh so VSCode re-requests after parse
     client.semantic_tokens_refresh().await.ok();
 
-    // Diagnostics require state data - skip for now
-    let diagnostics = Vec::new();
     let current_version = state.document_version(&uri);
     if let (Some(sent), Some(curr)) = (version, current_version) {
         if sent < curr {
