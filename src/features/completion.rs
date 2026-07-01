@@ -85,6 +85,11 @@ fn analyze_context(rope: &ropey::Rope, offset: usize) -> CompletionContext {
         Err(_) => return CompletionContext::Unknown,
     };
 
+    // Defensive: ensure line_idx is within bounds
+    if line_idx >= rope.len_lines() {
+        return CompletionContext::Unknown;
+    }
+
     let line_text = rope.line(line_idx).to_string();
     let offset_in_line = offset.saturating_sub(rope.line_to_byte(line_idx));
 
@@ -116,7 +121,11 @@ fn analyze_context(rope: &ropey::Rope, offset: usize) -> CompletionContext {
     }
 
     // Check if in declaration body (has braces)
-    let text_before = rope.slice(..offset.min(rope.len_chars()));
+    let char_offset = match rope.try_byte_to_char(offset) {
+        Ok(c) => c,
+        Err(_) => return CompletionContext::Unknown,
+    };
+    let text_before = rope.slice(..char_offset.min(rope.len_chars()));
     let brace_count = text_before.chars().filter(|c| *c == '{').count()
         - text_before.chars().filter(|c| *c == '}').count();
     if brace_count > 0 {
