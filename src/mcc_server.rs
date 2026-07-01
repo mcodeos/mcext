@@ -285,6 +285,18 @@ impl MccServer {
             .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
+    /// Call diagnostics RPC to get diagnostics for a file
+    pub async fn diagnostics(
+        &self,
+        uri: &str,
+    ) -> Result<crate::rpc::DiagnosticsResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client
+            .diagnostics(uri)
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
+    }
+
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
         // Try common locations
