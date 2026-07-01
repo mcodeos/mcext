@@ -42,13 +42,13 @@ pub fn position_to_offset(position: Position, rope: &Rope) -> Option<usize> {
     let line_content_len = line_end.saturating_sub(line_char_offset);
     let col = (position.character as usize).min(line_content_len);
     let target_offset = line_char_offset + col;
-    
+
     // Clamp target_offset to rope char length to prevent panic
     let rope_len_chars = rope.len_chars();
     if target_offset > rope_len_chars {
         return None;
     }
-    
+
     // Use document-level slice to get absolute offset
     // Clamp to rope boundaries to prevent panic
     let slice_end = target_offset.min(rope_len_chars);

@@ -24,34 +24,90 @@ pub fn resolve(
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
-    trace!("goto_def: enter uri={uri} pos={position:?}");
-    let rope = state.document_rope(uri)?;
-    let offset = position_to_offset(position, &rope)?;
+    tracing::info!("goto_def: enter uri={uri} pos={position:?}");
 
-    let symbols_ref = state.sem_symbols.get(uri)?;
+    let rope = match state.document_rope(uri) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("goto_def: no rope for uri={uri}");
+            return None;
+        }
+    };
+    let offset = match position_to_offset(position, &rope) {
+        Some(o) => o,
+        None => {
+            tracing::warn!("goto_def: no offset for pos={position:?}");
+            return None;
+        }
+    };
+
+    let symbols_ref = match state.sem_symbols.get(uri) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("goto_def: no sem_symbols for uri={uri}");
+            return None;
+        }
+    };
     let symbols = symbols_ref.lock().unwrap_or_else(|e| e.into_inner());
 
-    let interval = symbols.symbol_lapper.find(offset, offset + 1).next()?;
+    // ★ DEBUG: Log the lapper content
+    let lapper_len = symbols.symbol_lapper.len();
+    let decl_count = symbols.local_table.declare_inst_to_span.len();
+    tracing::info!(
+        "goto_def: lapper_len={lapper_len}, local_decl_count={decl_count}, offset={offset}"
+    );
+
+    // Check if there's any DeclareInstance in the lapper
+    let intervals: Vec<_> = symbols.symbol_lapper.find(offset, offset + 1).collect();
+    if intervals.is_empty() {
+        tracing::info!(
+            "goto_def: no symbol found at offset {offset}, line={}, char={}",
+            position.line,
+            position.character
+        );
+        // Try to find any DeclareInstance in the file
+        for i in symbols.symbol_lapper.iter() {
+            if matches!(i.val, SymbolType::DeclareInstance(_)) {
+                tracing::info!(
+                    "goto_def: DeclareInstance at {}-{} id={:?}",
+                    i.start,
+                    i.stop,
+                    i.val
+                );
+            }
+        }
+        return None;
+    }
+
+    let interval = intervals.into_iter().next()?;
     trace!("goto_def: symbol={:?}", interval.val);
 
     match interval.val {
         SymbolType::DeclareClass(sid) => {
+            // sid is a ReferenceId — look up the target definition span directly
+            // (cross-file: class_id is per-file, so use declare_id_to_target_span)
             trace!("goto_def: DeclareClass sid={sid:?}");
             let gtable = symbols.global_table.lock().ok()?;
-            let (target_uri_str, span) = gtable.declare_class_id_to_span.get(&sid)?;
-            trace!("goto_def: target_uri={target_uri_str} span={span:?}");
-            cross_file_response(state, target_uri_str, span.clone(), &rope, uri)
+            let (target_uri_str, span) = gtable.declare_id_to_target_span.get(&sid)?;
+            trace!("goto_def: DeclareClass target_uri={target_uri_str} span={span:?}");
+            resolve_response(state, target_uri_str, span.clone(), &rope, uri)
         }
         SymbolType::ClassDefinition(sid) => {
             trace!("goto_def: ClassDefinition sid={sid:?}");
             let gtable = symbols.global_table.lock().ok()?;
             let (target_uri_str, span) = gtable.class_id_to_span.get(&sid)?;
             trace!("goto_def: target_uri={target_uri_str} span={span:?}");
-            cross_file_response(state, target_uri_str, span.clone(), &rope, uri)
+            resolve_response(state, target_uri_str, span.clone(), &rope, uri)
         }
         SymbolType::InstanceReference(sid) => {
             trace!("goto_def: InstanceReference sid={sid:?}");
             let span = symbols.local_table.inst_id_to_span.get(&sid)?;
+            local_response(uri, span.clone(), &rope)
+        }
+        SymbolType::InstanceRef(sid) => {
+            // ★ New: Instance reference using DeclareId (from global table)
+            trace!("goto_def: InstanceRef sid={sid:?}");
+            let span = symbols.local_table.declare_inst_to_span.get(&sid)?;
             local_response(uri, span.clone(), &rope)
         }
         SymbolType::DeclareInstance(sid) => {
@@ -59,6 +115,40 @@ pub fn resolve(
             let span = symbols.local_table.declare_inst_to_span.get(&sid)?;
             local_response(uri, span.clone(), &rope)
         }
+    }
+}
+
+/// Choose between same-file and cross-file response based on if the target URI
+/// matches the current file.
+fn resolve_response(
+    state: &WorkspaceState,
+    target_uri_str: &mcc::McURI,
+    span: Span,
+    current_rope: &Rope,
+    current_uri: &Url,
+) -> Option<GotoDefinitionResponse> {
+    let target_url = parse_url_from_mc_uri(target_uri_str)?;
+    tracing::debug!(
+        "goto_def: resolve target_uri={target_uri_str} current_uri={current_uri} span={span:?} same_file={}",
+        target_url == *current_uri
+    );
+    if target_url == *current_uri {
+        let result = local_response(current_uri, span, current_rope);
+        if let Some(ref r) = result {
+            match r {
+                GotoDefinitionResponse::Scalar(loc) => {
+                    tracing::debug!(
+                        "goto_def: local_response success -> line={} col={}",
+                        loc.range.start.line,
+                        loc.range.start.character
+                    );
+                }
+                _ => {}
+            }
+        }
+        result
+    } else {
+        cross_file_response(state, target_uri_str, span, current_rope, current_uri)
     }
 }
 
@@ -98,11 +188,10 @@ fn cross_file_response(
         match read_file_to_rope(&target_url) {
             Some(r) => r,
             None => {
-                // Try 3: fallback (0,0)-(0,0)
-                return Some(GotoDefinitionResponse::Scalar(Location::new(
-                    target_url,
-                    Range::new(Position::new(0, 0), Position::new(0, 0)),
-                )));
+                tracing::warn!(
+                    "goto_def: cross_file_response fallback to None for file={target_url}"
+                );
+                return None;
             }
         }
     };

@@ -34,7 +34,7 @@ pub fn apply_changes(
                     .ok_or_else(|| format!("invalid range start: {:?}", range.start))?;
                 let end_byte = position_to_offset(range.end, rope)
                     .ok_or_else(|| format!("invalid range end: {:?}", range.end))?;
-                
+
                 let rope_len = rope.len_bytes();
                 if start_byte > rope_len || end_byte > rope_len || start_byte > end_byte {
                     return Err(format!(
@@ -42,13 +42,15 @@ pub fn apply_changes(
                         start_byte, end_byte, rope_len
                     ));
                 }
-                
+
                 // Convert byte offsets to char offsets (ropey remove/insert use char indices)
-                let start_char = rope.try_byte_to_char(start_byte)
+                let start_char = rope
+                    .try_byte_to_char(start_byte)
                     .map_err(|e| format!("invalid byte offset {}: {}", start_byte, e))?;
-                let end_char = rope.try_byte_to_char(end_byte)
+                let end_char = rope
+                    .try_byte_to_char(end_byte)
                     .map_err(|e| format!("invalid byte offset {}: {}", end_byte, e))?;
-                
+
                 let rope_chars = rope.len_chars();
                 if start_char > rope_chars || end_char > rope_chars || start_char > end_char {
                     return Err(format!(
@@ -56,7 +58,7 @@ pub fn apply_changes(
                         start_char, end_char, rope_chars
                     ));
                 }
-                
+
                 rope.remove(start_char..end_char);
                 if !change.text.is_empty() {
                     rope.insert(start_char, &change.text);

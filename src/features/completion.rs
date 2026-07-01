@@ -99,7 +99,9 @@ fn analyze_context(rope: &ropey::Rope, offset: usize) -> CompletionContext {
     let offset_in_line_chars = offset_in_line.min(line_char_len);
 
     let mut char_idx = offset_in_line_chars;
-    while char_idx < line_char_len && (line_chars[char_idx].is_alphanumeric() || line_chars[char_idx] == '_') {
+    while char_idx < line_char_len
+        && (line_chars[char_idx].is_alphanumeric() || line_chars[char_idx] == '_')
+    {
         char_idx += 1;
     }
 
