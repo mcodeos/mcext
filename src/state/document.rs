@@ -30,19 +30,36 @@ pub fn apply_changes(
     for change in changes {
         match change.range {
             Some(range) => {
-                let start = position_to_offset(range.start, rope)
+                let start_byte = position_to_offset(range.start, rope)
                     .ok_or_else(|| format!("invalid range start: {:?}", range.start))?;
-                let end = position_to_offset(range.end, rope)
+                let end_byte = position_to_offset(range.end, rope)
                     .ok_or_else(|| format!("invalid range end: {:?}", range.end))?;
-                if start > end {
-                    return Err(format!("range start {start} > end {end}"));
+                
+                let rope_len = rope.len_bytes();
+                if start_byte > rope_len || end_byte > rope_len || start_byte > end_byte {
+                    return Err(format!(
+                        "invalid range [{}, {}) for rope len {}",
+                        start_byte, end_byte, rope_len
+                    ));
                 }
-                if end > rope.len_bytes() {
-                    return Err(format!("range end {} > rope len {}", end, rope.len_bytes()));
+                
+                // Convert byte offsets to char offsets (ropey remove/insert use char indices)
+                let start_char = rope.try_byte_to_char(start_byte)
+                    .map_err(|e| format!("invalid byte offset {}: {}", start_byte, e))?;
+                let end_char = rope.try_byte_to_char(end_byte)
+                    .map_err(|e| format!("invalid byte offset {}: {}", end_byte, e))?;
+                
+                let rope_chars = rope.len_chars();
+                if start_char > rope_chars || end_char > rope_chars || start_char > end_char {
+                    return Err(format!(
+                        "invalid char range [{}, {}) for rope char len {}",
+                        start_char, end_char, rope_chars
+                    ));
                 }
-                rope.remove(start..end);
+                
+                rope.remove(start_char..end_char);
                 if !change.text.is_empty() {
-                    rope.insert(start, &change.text);
+                    rope.insert(start_char, &change.text);
                 }
             }
             None => {

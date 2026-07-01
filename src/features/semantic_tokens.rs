@@ -77,7 +77,23 @@ fn emit_single_token(
     last_start: &mut u32,
     out: &mut Vec<SemanticToken>,
 ) {
-    let line = match rope.try_byte_to_line(position as usize) {
+    // Skip invalid tokens
+    if position < 0 || length <= 0 {
+        return;
+    }
+    
+    let pos = position as usize;
+    let len = length as usize;
+    let rope_len = rope.len_bytes();
+    
+    // Skip tokens that are clearly out of bounds
+    if pos >= rope_len || pos.saturating_add(len) > rope_len {
+        return;
+    }
+    
+    let end = pos.saturating_add(len);
+    
+    let line = match rope.try_byte_to_line(pos) {
         Ok(l) => l as u32,
         Err(_) => return,
     };
@@ -85,7 +101,7 @@ fn emit_single_token(
         Ok(c) => c as u32,
         Err(_) => return,
     };
-    let current_char_pos = match rope.try_byte_to_char(position as usize) {
+    let current_char_pos = match rope.try_byte_to_char(pos) {
         Ok(c) => c as u32,
         Err(_) => return,
     };
@@ -103,9 +119,7 @@ fn emit_single_token(
 
     // Reclassify KEYWORD-typed identifiers: check if it's a real language keyword
     let final_type = if type_ == 13 {
-        let pos = position as usize;
-        let end = pos + length as usize;
-        if pos < rope.len_bytes() && end <= rope.len_bytes() {
+        if end <= rope.len_bytes() {
             let text = rope.byte_slice(pos..end).to_string();
             if is_mcode_keyword(&text) {
                 13 // KEYWORD
@@ -315,9 +329,23 @@ fn emit_multiline_comment(
     last_start: &mut u32,
     out: &mut Vec<SemanticToken>,
 ) {
+    // Skip invalid tokens
+    if start_byte < 0 || length <= 0 {
+        return;
+    }
+    
     let start = start_byte as usize;
-    let end = start.saturating_add(length as usize);
-    if end > rope.len_bytes() {
+    let len = length as usize;
+    let rope_len = rope.len_bytes();
+    
+    // Skip tokens that are clearly out of bounds
+    if start >= rope_len || start.saturating_add(len) > rope_len {
+        return;
+    }
+    
+    // Clamp end to rope boundaries
+    let end = (start + len).min(rope_len);
+    if end <= start {
         return;
     }
 
@@ -325,12 +353,18 @@ fn emit_multiline_comment(
         Ok(l) => l,
         Err(_) => return,
     };
-    let end_line = match rope.try_byte_to_line(end) {
+    // Clamp end_line to valid range
+    let end_line = match rope.try_byte_to_line(end.saturating_sub(1)) {
         Ok(l) => l,
         Err(_) => return,
     };
 
     for line_idx in start_line..=end_line {
+        // Defensive: skip if line_idx is out of bounds
+        if line_idx >= rope.len_lines() {
+            break;
+        }
+        
         let line_u32 = line_idx as u32;
         let line_start_char = match rope.try_line_to_char(line_idx) {
             Ok(c) => c as u32,

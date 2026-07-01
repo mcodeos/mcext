@@ -10,10 +10,16 @@ use tower_lsp::lsp_types::Position;
 /// Byte offset → LSP Position.
 ///
 /// Returns `None` on out-of-bounds, doesn't panic.
-pub fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
-    let line = rope.try_char_to_line(offset).ok()?;
+pub fn offset_to_position(byte_offset: usize, rope: &Rope) -> Option<Position> {
+    // Convert byte offset to char offset
+    let rope_len = rope.len_bytes();
+    if byte_offset > rope_len {
+        return None;
+    }
+    let char_offset = rope.try_byte_to_char(byte_offset).ok()?;
+    let line = rope.try_char_to_line(char_offset).ok()?;
     let first_char_of_line = rope.try_line_to_char(line).ok()?;
-    let column = offset - first_char_of_line;
+    let column = char_offset - first_char_of_line;
     Some(Position::new(line as u32, column as u32))
 }
 
@@ -36,14 +42,24 @@ pub fn position_to_offset(position: Position, rope: &Rope) -> Option<usize> {
     let line_content_len = line_end.saturating_sub(line_char_offset);
     let col = (position.character as usize).min(line_content_len);
     let target_offset = line_char_offset + col;
+    
+    // Clamp target_offset to rope char length to prevent panic
+    let rope_len_chars = rope.len_chars();
+    if target_offset > rope_len_chars {
+        return None;
+    }
+    
     // Use document-level slice to get absolute offset
-    let slice = rope.get_slice(0..target_offset)?;
+    // Clamp to rope boundaries to prevent panic
+    let slice_end = target_offset.min(rope_len_chars);
+    let slice = rope.get_slice(0..slice_end)?;
     Some(slice.len_bytes())
 }
 
 /// Byte offset → line number (1-based, line number consistent with mcc::Location.row)
-pub fn offset_to_line(offset: usize, rope: &Rope) -> Option<u32> {
-    let line = rope.try_char_to_line(offset).ok()?;
+pub fn offset_to_line(byte_offset: usize, rope: &Rope) -> Option<u32> {
+    let char_offset = rope.try_byte_to_char(byte_offset).ok()?;
+    let line = rope.try_char_to_line(char_offset).ok()?;
     Some(line as u32 + 1)
 }
 

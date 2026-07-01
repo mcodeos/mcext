@@ -74,7 +74,11 @@ pub fn format_range(
     let start_offset = position_to_offset(range.start, rope)?;
     let end_offset = position_to_offset(range.end, rope)?;
 
-    let text = rope.slice(start_offset..end_offset).to_string();
+    // Convert byte offsets to char offsets for rope.slice
+    let start_char = rope.try_byte_to_char(start_offset).ok()?;
+    let end_char = rope.try_byte_to_char(end_offset).ok()?;
+
+    let text = rope.slice(start_char..end_char).to_string();
     let formatted = format_text(&text, &options)?;
 
     // If no change, return None
