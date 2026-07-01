@@ -13,10 +13,60 @@ pub use scheduler::ReparseScheduler;
 pub use tokens::TokensState;
 
 use crate::index::IndexWorkerHandle;
+use crate::rpc::{CrossFileTarget, GlobalSymbols, LapperEntry, LocalReference, SymbolEntry};
 use dashmap::DashMap;
-use mcc::{McSemSymbolsArcCell, McSemTokensArcCell, McURI};
 use ropey::Rope;
+use std::sync::{Arc, Mutex};
 use tower_lsp::lsp_types::Url;
+
+/// ★ Cached project-wide symbols for completion
+#[derive(Debug, Clone, Default)]
+pub struct ProjectSymbolsCache {
+    pub components: Vec<SymbolEntry>,
+    pub interfaces: Vec<SymbolEntry>,
+    pub enums: Vec<SymbolEntry>,
+    pub modules: Vec<SymbolEntry>,
+}
+
+/// ★ RPC-based semantic symbols (replaces McSemSymbolsArcCell)
+/// This structure holds data received from mcc via RPC, not direct mcc library types.
+#[derive(Debug, Clone, Default)]
+pub struct RpcSemSymbols {
+    /// Token type classification intervals (for semantic highlighting)
+    pub lapper: Vec<LapperEntry>,
+    /// Local declarations: span info for definitions in this file
+    pub local_declares: Vec<LocalDeclareSpan>,
+    /// Local references: span info for usages in this file
+    pub local_references: Vec<LocalReference>,
+    /// Global declarations from this file
+    pub global_declares: Vec<GlobalDeclareSpan>,
+    /// Global references from this file  
+    pub global_references: Vec<GlobalReferenceSpan>,
+    /// Cross-file goto targets: ref_id -> (target_uri, span)
+    pub cross_file_targets: Vec<CrossFileTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalDeclareSpan {
+    pub id: u32,
+    pub span: [usize; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalDeclareSpan {
+    pub id: u32,
+    pub uri: String,
+    pub span: [usize; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalReferenceSpan {
+    pub id: u32,
+    pub uri: String,
+    pub span: [usize; 2],
+}
+
+pub type RpcSemSymbolsArcCell = Arc<Mutex<RpcSemSymbols>>;
 
 /// Global workspace state
 pub struct WorkspaceState {
@@ -24,13 +74,13 @@ pub struct WorkspaceState {
     pub documents: DashMap<Url, DocumentEntry>,
 
     /// Document → semantic token ArcCell (from mcc)
-    pub sem_tokens: DashMap<Url, McSemTokensArcCell>,
+    pub sem_tokens: DashMap<Url, mcc::McSemTokensArcCell>,
 
-    /// Document → semantic symbol ArcCell (from mcc)
-    pub sem_symbols: DashMap<Url, McSemSymbolsArcCell>,
+    /// Document → RPC semantic symbols (replaces McSemSymbolsArcCell)
+    pub sem_symbols: DashMap<Url, RpcSemSymbolsArcCell>,
 
     /// Registered McURI (from LSP path normalization)
-    pub registered_uris: DashMap<Url, McURI>,
+    pub registered_uris: DashMap<Url, mcc::McURI>,
 
     /// Semantic tokens result_id management
     pub tokens: TokensState,
@@ -40,6 +90,9 @@ pub struct WorkspaceState {
 
     /// Parse debounce scheduler
     pub scheduler: ReparseScheduler,
+
+    /// ★ Cached project-wide symbols for completion
+    pub project_symbols: Arc<Mutex<ProjectSymbolsCache>>,
 }
 
 impl WorkspaceState {
@@ -55,6 +108,7 @@ impl WorkspaceState {
             tokens: TokensState::new(),
             index: IndexWorkerHandle::inactive(),
             scheduler: ReparseScheduler::new(std::time::Duration::from_millis(150)),
+            project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
         }
     }
 
@@ -68,6 +122,7 @@ impl WorkspaceState {
             tokens: TokensState::new(),
             index: IndexWorkerHandle::spawn(),
             scheduler: ReparseScheduler::new(std::time::Duration::from_millis(150)),
+            project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
         }
     }
 
@@ -96,12 +151,13 @@ impl WorkspaceState {
     }
 
     /// Write mcc parse result (ArcCell reference)
+    #[allow(dead_code)]
     pub fn insert_parse(
         &self,
         uri: Url,
-        tokens: McSemTokensArcCell,
-        symbols: McSemSymbolsArcCell,
-        uri_native: McURI,
+        tokens: mcc::McSemTokensArcCell,
+        symbols: RpcSemSymbolsArcCell,
+        uri_native: mcc::McURI,
     ) {
         self.sem_tokens.insert(uri.clone(), tokens);
         self.sem_symbols.insert(uri.clone(), symbols);

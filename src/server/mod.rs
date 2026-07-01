@@ -241,26 +241,26 @@ async fn parse_and_publish(
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(tokens)));
     state.registered_uris.insert(uri.clone(), mc_uri.clone());
 
-    // ★ Fix: Store sem_symbols for goto_definition and other features
-    // Call mcc_query to get the full McSemSymbols with symbol_lapper
-    tracing::info!("parse_and_publish: calling mcc_query for {}", mc_uri);
-    match mcc::mcc_query(&mc_uri) {
-        Some(result) => {
-            let lapper_len = result
-                .sem_symbols
-                .lock()
-                .map(|s| s.symbol_lapper.len())
-                .unwrap_or(0);
-            state.sem_symbols.insert(uri.clone(), result.sem_symbols);
-            tracing::info!(
-                "Stored sem_symbols for goto_definition, lapper_len={}",
-                lapper_len
-            );
-        }
-        None => {
-            tracing::warn!("parse_and_publish: mcc_query returned None for {}", mc_uri);
-        }
-    }
+    // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
+    let rpc_symbols = crate::state::RpcSemSymbols {
+        lapper: sem.symbols.lapper.clone(),
+        local_declares: sem.symbols.local.declares.iter().map(|d| {
+            crate::state::LocalDeclareSpan { id: d.id, span: d.span }
+        }).collect(),
+        local_references: sem.symbols.local.references.clone(),
+        global_declares: sem.symbols.global.declares.iter().map(|d| {
+            crate::state::GlobalDeclareSpan { id: d.id, uri: d.uri.clone(), span: d.span }
+        }).collect(),
+        global_references: sem.symbols.global.references.iter().map(|r| {
+            crate::state::GlobalReferenceSpan { id: r.id, uri: r.uri.clone(), span: r.span }
+        }).collect(),
+        cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
+    };
+    state.sem_symbols.insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
+    tracing::info!(
+        "Stored RPC sem_symbols for goto_definition, lapper_len={}",
+        sem.symbols.lapper.len()
+    );
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
@@ -347,6 +347,26 @@ impl LanguageServer for Backend {
                 root.display()
             );
         }
+
+        // ★ Fetch project symbols for completion and update cache
+        let state_clone = self.state.clone();
+        let mcc_server_clone = self.mcc_server.clone();
+        tokio::spawn(async move {
+            let server_guard = mcc_server_clone.read().await;
+            if let Some(server) = server_guard.as_ref() {
+                if let Some(client) = server.client() {
+                    if let Ok(resp) = client.project_symbols().await {
+                        if let Ok(mut cache) = state_clone.project_symbols.lock() {
+                            cache.components = resp.components;
+                            cache.interfaces = resp.interfaces;
+                            cache.enums = resp.enums;
+                            cache.modules = resp.modules;
+                            info!("Updated project symbols cache for completion");
+                        }
+                    }
+                }
+            }
+        });
 
         self.config.insert("current".to_string(), cfg);
 
