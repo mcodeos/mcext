@@ -337,6 +337,9 @@ impl LanguageServer for Backend {
                                     .await;
                             }
 
+                            // Initialize mcc
+                            let _ = client.init().await;
+
                             // Set project root
                             if let Some(ref root) = project_root_clone {
                                 let root_str = root.to_string_lossy();
@@ -375,7 +378,6 @@ impl LanguageServer for Backend {
                                     }
                                 }
                             }
-                            let _ = client.init().await;
                         }
                     }
                     Err(e) => {
