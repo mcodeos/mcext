@@ -13,7 +13,7 @@ pub use scheduler::ReparseScheduler;
 pub use tokens::TokensState;
 
 use crate::index::IndexWorkerHandle;
-use crate::rpc::{CrossFileTarget, GlobalSymbols, LapperEntry, LocalReference, SymbolEntry};
+use crate::rpc::{CrossFileTarget, LapperEntry, LocalReference, SymbolEntry};
 use dashmap::DashMap;
 use ropey::Rope;
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,21 @@ pub struct ProjectSymbolsCache {
     pub enums: Vec<SymbolEntry>,
     pub modules: Vec<SymbolEntry>,
 }
+
+/// ★ RPC-based semantic tokens (replaces McSemTokensArcCell)
+#[derive(Debug, Clone, Default)]
+pub struct RpcSemTokens {
+    pub tokens: Vec<SemTokenEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemTokenEntry {
+    pub type_: i16,
+    pub position: i32,
+    pub length: i32,
+}
+
+pub type RpcSemTokensArcCell = Arc<Mutex<RpcSemTokens>>;
 
 /// ★ RPC-based semantic symbols (replaces McSemSymbolsArcCell)
 /// This structure holds data received from mcc via RPC, not direct mcc library types.
@@ -73,14 +88,14 @@ pub struct WorkspaceState {
     /// Document storage
     pub documents: DashMap<Url, DocumentEntry>,
 
-    /// Document → semantic token ArcCell (from mcc)
-    pub sem_tokens: DashMap<Url, mcc::McSemTokensArcCell>,
+    /// Document → RPC semantic tokens (replaces McSemTokensArcCell)
+    pub sem_tokens: DashMap<Url, RpcSemTokensArcCell>,
 
     /// Document → RPC semantic symbols (replaces McSemSymbolsArcCell)
     pub sem_symbols: DashMap<Url, RpcSemSymbolsArcCell>,
 
-    /// Registered McURI (from LSP path normalization)
-    pub registered_uris: DashMap<Url, mcc::McURI>,
+    /// Registered McURI strings (from LSP path normalization)
+    pub registered_uris: DashMap<Url, String>,
 
     /// Semantic tokens result_id management
     pub tokens: TokensState,
@@ -148,20 +163,6 @@ impl WorkspaceState {
         self.sem_tokens.remove(uri);
         self.sem_symbols.remove(uri);
         self.registered_uris.remove(uri);
-    }
-
-    /// Write mcc parse result (ArcCell reference)
-    #[allow(dead_code)]
-    pub fn insert_parse(
-        &self,
-        uri: Url,
-        tokens: mcc::McSemTokensArcCell,
-        symbols: RpcSemSymbolsArcCell,
-        uri_native: mcc::McURI,
-    ) {
-        self.sem_tokens.insert(uri.clone(), tokens);
-        self.sem_symbols.insert(uri.clone(), symbols);
-        self.registered_uris.insert(uri, uri_native);
     }
 }
 

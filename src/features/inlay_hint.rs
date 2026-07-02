@@ -34,9 +34,8 @@ pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<In
         }
 
         // Use declaration span for positioning
-        let start_offset = decl.span[0];
         let end_offset = decl.span[1];
-        
+
         let end_pos = offset_to_position(end_offset, &rope)?;
 
         // Generate type hint (using id as placeholder)
