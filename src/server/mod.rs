@@ -13,13 +13,13 @@ use crate::index::IndexCommand;
 use crate::mcc_server::MccServer;
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
+// Note: McURI is just String, no need to import mcc
 use ropey::Rope;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// mcode LSP server
 pub struct Backend {
@@ -29,8 +29,6 @@ pub struct Backend {
     pub config: Arc<DashMap<String, ServerConfig>>,
     /// MCC server subprocess manager (for RPC mode)
     pub mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
-    /// Whether mcc server is fully initialized and ready to handle parse requests
-    pub mcc_ready: Arc<AtomicBool>,
 }
 
 impl Backend {
@@ -39,8 +37,8 @@ impl Backend {
             client,
             state: Arc::new(WorkspaceState::with_worker()),
             config: Arc::new(DashMap::new()),
+            // Create mcc_server with default config, will be started in initialize()
             mcc_server: Arc::new(tokio::sync::RwLock::new(Some(MccServer::new()))),
-            mcc_ready: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -66,6 +64,44 @@ impl Backend {
             ));
         });
     }
+
+    /// Incremental path for did_change: apply changes + schedule debounced reparse
+    async fn on_change_incremental(
+        &self,
+        uri: Url,
+        changes: &[TextDocumentContentChangeEvent],
+        version: Option<i32>,
+    ) {
+        debug!("on_change_incremental: {}", uri.path());
+
+        // Get Rope, apply changes
+        let mut rope = self
+            .state
+            .document_rope(&uri)
+            .unwrap_or_else(|| Rope::from_str(""));
+        if let Err(e) = crate::state::apply_changes(&mut rope, changes) {
+            debug!("apply_changes failed: {e}");
+            return;
+        }
+
+        let ver = version.unwrap_or(-1);
+        self.state.insert_document(uri.clone(), rope, ver);
+
+        // Schedule debounced reparse
+        let state = Arc::clone(&self.state);
+        let mcc_server = Arc::clone(&self.mcc_server);
+        let client = self.client.clone();
+        let uri_for_task = uri.clone();
+        self.state.scheduler.schedule(uri, move || {
+            tokio::spawn(parse_and_publish(
+                state,
+                mcc_server,
+                client,
+                uri_for_task,
+                version,
+            ));
+        });
+    }
 }
 
 /// Parse + publish diagnostics (executed in debounced task)
@@ -79,14 +115,8 @@ async fn parse_and_publish(
     let span = tracing::info_span!("parse_and_publish", uri = %uri.path(), ?version);
     let _guard = span.enter();
 
-    trace!("enter");
-    warn!(
-        "parse_and_publish: START uri={} version={:?}",
-        uri.path(),
-        version
-    );
-    let mc_uri = // McURI is just String
-String::from(uri.path());
+    trace!("parse_and_publish: uri={}", uri.path());
+    let mc_uri = String::from(uri.path());
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
     let text = state
@@ -104,22 +134,20 @@ String::from(uri.path());
     // RPC mode: call mcc server via RPC
     let server_guard = mcc_server.read().await;
     let Some(server) = server_guard.as_ref() else {
-        warn!("mcc server not available for {uri}");
+        debug!("mcc server not available for {uri}");
         return;
     };
 
     if !server.is_connected() {
-        warn!("mcc server not connected for {uri}, waiting...");
-        // Wait for connection
+        // Wait briefly for connection
         for _ in 0..10 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if server.is_connected() {
-                info!("mcc server connected after wait");
                 break;
             }
         }
         if !server.is_connected() {
-            warn!("mcc server still not connected for {uri}");
+            debug!("mcc server still not connected for {uri}");
             return;
         }
     }
@@ -128,14 +156,7 @@ String::from(uri.path());
     // Pass current document text so mcc parses live content (not stale disk file)
     let content_for_rpc: Option<&str> = Some(&text);
     let sem = match server.sem(uri_str, content_for_rpc).await {
-        Ok(sem) => {
-            debug!(
-                "sem RPC succeeded for {uri}, tokens={} symbols={}",
-                sem.tokens.len(),
-                sem.symbols.lapper.len()
-            );
-            sem
-        }
+        Ok(sem) => sem,
         Err(e) => {
             debug!("sem RPC failed for {uri}: {e}");
             return;
@@ -146,24 +167,9 @@ String::from(uri.path());
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
-            info!(
-                "diagnostics RPC returned {} diagnostics for {}",
-                resp.diagnostics.len(),
-                uri
-            );
             let rope = state
                 .document_rope(&uri)
-                .unwrap_or_else(|| ropey::Rope::new());
-            for d in &resp.diagnostics {
-                info!(
-                    "diagnostic: code={} pos={} len={} msg={}",
-                    d.code, d.location.pos, d.location.len, d.message
-                );
-            }
-            // NOTE: We intentionally do NOT filter out pos=0 diagnostics.
-            // A diagnostic at pos=0 is valid — it means the error spans the whole file
-            // (e.g. duplicate component error). offset_to_position(0) correctly returns
-            // Position { line: 0, character: 0 }.
+                .unwrap_or_else(ropey::Rope::new);
             for d in resp.diagnostics {
                 let start = match crate::common::position::offset_to_position(
                     d.location.pos as usize,
@@ -203,26 +209,6 @@ String::from(uri.path());
     }
 
     drop(server_guard);
-
-    // Store tokens in state so semantic_tokens_full can read them
-    // Log raw token types for debugging
-    let raw_types: Vec<i16> = sem.tokens.iter().map(|t| t.token_type).collect();
-    // Count occurrences of each type
-    use std::collections::HashMap;
-    let mut counts: HashMap<i16, usize> = HashMap::new();
-    for &t in &raw_types {
-        *counts.entry(t).or_insert(0) += 1;
-    }
-    let count_str: String = counts
-        .iter()
-        .map(|(k, v)| format!("{k}:{v}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    warn!(
-        "parse_and_publish: RPC tokens={} type_counts=[{}]",
-        sem.tokens.len(),
-        count_str
-    );
 
     let rpc_tokens = crate::state::RpcSemTokens {
         tokens: sem
@@ -281,10 +267,6 @@ String::from(uri.path());
     state
         .sem_symbols
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
-    tracing::info!(
-        "Stored RPC sem_symbols for goto_definition, lapper_len={}",
-        sem.symbols.lapper.len()
-    );
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
@@ -298,23 +280,16 @@ String::from(uri.path());
     // Trigger semantic tokens refresh so VSCode re-requests after parse
     client.semantic_tokens_refresh().await.ok();
 
-    // NOTE: We intentionally do NOT check version staleness here.
-    // The version guard was meant to filter out stale results from out-of-order
-    // parse responses, but with our cascade-waits-await pattern, results are
-    // ordered. Removing this check fixes the bug where cascade publishes were
-    // silently dropped when the document version had advanced.
-
-    let diag_count = diagnostics.len();
+    let current_version = state.document_version(&uri);
+    if let (Some(sent), Some(curr)) = (version, current_version) {
+        if sent < curr {
+            debug!("stale diagnostics for {uri}, sent={sent} < curr={curr}");
+            return;
+        }
+    }
     client
         .publish_diagnostics(uri.clone(), diagnostics, version)
         .await;
-
-    info!(
-        "publish_diagnostics: published {} diagnostics for {} version={:?}",
-        diag_count,
-        uri.path(),
-        version
-    );
 }
 
 #[tower_lsp::async_trait]
@@ -351,22 +326,18 @@ impl LanguageServer for Backend {
             if let Some(ref mut server) = *server_guard {
                 match server.start().await {
                     Ok(_) => {
-                        info!("mcc server subprocess started successfully");
-                        // Initialize mcc via RPC
+                        debug!("mcc server subprocess started");
                         if let Some(client) = server.client() {
-                            // Set system root if provided
                             if let Some(ref sys_root) = cfg_system_root {
                                 let _ = client
                                     .set_project_root(sys_root.to_str().unwrap_or(""))
                                     .await;
                             }
-                            // Set project root and initialize
                             if let Some(ref root) = project_root_clone {
                                 let root_str = root.to_string_lossy();
                                 let _ = client.set_project_root(&root_str).await;
                             }
                             let _ = client.init().await;
-                            info!("mcc initialized via RPC");
                         }
                     }
                     Err(e) => {
@@ -378,6 +349,27 @@ impl LanguageServer for Backend {
                 }
             }
         });
+
+        // NOTE: `initialized` is called BEFORE VS Code sends `did_open` notifications.
+        // So at this point, `documents` is empty. The real parse scheduling
+        // is done in `did_open` where all files are properly cascade-parsed.
+        // We only parse what VS Code already reported as open at this moment.
+        let docs: Vec<_> = self
+            .state
+            .documents
+            .iter()
+            .map(|e| (e.key().clone(), e.value().version))
+            .collect();
+        for (uri, version) in docs {
+            let s = Arc::clone(&self.state);
+            let mc = Arc::clone(&self.mcc_server);
+            let cl = self.client.clone();
+            let u = uri.clone();
+            let v = version;
+            self.state.scheduler.fire_immediately(uri, move || {
+                tokio::spawn(parse_and_publish(s, mc, cl, u, Some(v)));
+            });
+        }
 
         // Trigger project index
         if let Some(root) = project_root {
@@ -401,7 +393,7 @@ impl LanguageServer for Backend {
                             cache.interfaces = resp.interfaces;
                             cache.enums = resp.enums;
                             cache.modules = resp.modules;
-                            info!("Updated project symbols cache for completion");
+                            debug!("Updated project symbols cache for completion");
                         }
                     }
                 }
@@ -485,59 +477,8 @@ impl LanguageServer for Backend {
         })
     }
 
-    async fn initialized(&self, _params: InitializedParams) {
-        info!("initialized!");
-
-        // Wait for mcc server to be ready, set mcc_ready flag, then parse all pending documents.
-        let mcc_server = Arc::clone(&self.mcc_server);
-        let mcc_ready = Arc::clone(&self.mcc_ready);
-        let state = Arc::clone(&self.state);
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            // Wait up to 10 seconds for mcc server to be ready
-            let mut connected = false;
-            for i in 0..100 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let server_guard = mcc_server.read().await;
-                if let Some(server) = server_guard.as_ref() {
-                    if server.is_connected() {
-                        info!("mcc server ready after {}ms", i * 100);
-                        connected = true;
-                        break;
-                    }
-                }
-            }
-            if !connected {
-                warn!("mcc server did not connect within timeout");
-            }
-
-            // Mark mcc as ready — from now on, did_open/did_change will parse immediately
-            mcc_ready.store(true, Ordering::SeqCst);
-            info!("mcc_ready flag set, parsing {} pending documents", state.documents.len());
-
-            // Parse all documents that were opened before mcc was ready.
-            // Parse sequentially with cascade so that mcc builds up cross-file context incrementally.
-            let docs: Vec<_> = state
-                .documents
-                .iter()
-                .map(|e| (e.key().clone(), e.value().version))
-                .collect();
-            if docs.is_empty() {
-                return;
-            }
-
-            // Parse each file sequentially, waiting for each to complete before moving to the next.
-            // This builds up mcc's cross-file symbol context incrementally.
-            for (idx, (uri, version)) in docs.iter().enumerate() {
-                info!("  parsing pending [{}]: {}", idx + 1, uri.path());
-                let s = Arc::clone(&state);
-                let mc = Arc::clone(&mcc_server);
-                let cl = client.clone();
-                let u = uri.clone();
-                let handle = tokio::spawn(parse_and_publish(s, mc, cl, u, Some(*version)));
-                let _ = handle.await;
-            }
-        });
+    async fn initialized(&self, _: InitializedParams) {
+        debug!("initialized!");
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -546,91 +487,38 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        info!("did_open: {}", uri.path());
+        debug!("did_open: {}", uri.path());
 
-        // Always store the document (even if mcc is not ready)
-        let rope = Rope::from_str(&params.text_document.text);
-        self.state
-            .insert_document(uri.clone(), rope, params.text_document.version);
-        self.state
-            .registered_uris
-            .insert(uri.clone(), String::from(uri.path()));
+        // Store document and schedule parse immediately
+        self.on_change_full(
+            uri.clone(),
+            &params.text_document.text,
+            Some(params.text_document.version),
+        )
+        .await;
 
         // Notify index worker
-        let _ = self.state.index.send(IndexCommand::AddFile(String::from(uri.path())));
-
-        // Only parse if mcc server is ready
-        if self.mcc_ready.load(Ordering::SeqCst) {
-            let state = Arc::clone(&self.state);
-            let mcc_server = Arc::clone(&self.mcc_server);
-            let client = self.client.clone();
-            let version = Some(params.text_document.version);
-            let uri_for_task = uri.clone();
-
-            // Parse all open files sequentially, waiting for each to complete.
-            // This builds up mcc's cross-file symbol context incrementally:
-            // - When a new file is opened, ALL files (including the current one)
-            //   need re-parse because the new file may provide symbols they depend on.
-            // - The scheduler's 150ms debounce is bypassed via fire_immediately.
-            let docs: Vec<_> = self
-                .state
-                .documents
-                .iter()
-                .map(|e| (e.key().clone(), e.value().version))
-                .collect();
-            for (uri, version) in docs {
-                let state = Arc::clone(&self.state);
-                let mcc_server = Arc::clone(&self.mcc_server);
-                let client = self.client.clone();
-                let uri_for_task = uri.clone();
-                self.state.scheduler.fire_immediately(uri, move || {
-                    tokio::spawn(parse_and_publish(
-                        state,
-                        mcc_server,
-                        client,
-                        uri_for_task,
-                        Some(version),
-                    ));
-                });
-            }
-        } else {
-            info!("  mcc not ready, deferred: {}", uri.path());
-        }
+        let mc_uri = String::from(uri.path());
+        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        debug!("did_change: {}", params.text_document.uri.path());
         let uri = params.text_document.uri.clone();
-        let version = Some(params.text_document.version);
-
-        // Always apply incremental changes to the stored document
-        let mut rope = self
-            .state
-            .document_rope(&uri)
-            .unwrap_or_else(|| Rope::from_str(""));
-        if let Err(e) = crate::state::apply_changes(&mut rope, &params.content_changes) {
-            debug!("apply_changes failed for {}: {e}", uri.path());
-            return;
-        }
-        self.state
-            .insert_document(uri.clone(), rope, params.text_document.version);
-
+        // Phase 2: INCREMENTAL processing
+        self.on_change_incremental(
+            uri.clone(),
+            &params.content_changes,
+            Some(params.text_document.version),
+        )
+        .await;
         // Notify index worker
-        let _ = self.state.index.send(IndexCommand::AddFile(String::from(uri.path())));
-
-        // Only schedule parse if mcc server is ready
-        if self.mcc_ready.load(Ordering::SeqCst) {
-            let state = Arc::clone(&self.state);
-            let mcc_server = Arc::clone(&self.mcc_server);
-            let client = self.client.clone();
-            let uri_for_task = uri.clone();
-            self.state.scheduler.schedule(uri, move || {
-                tokio::spawn(parse_and_publish(state, mcc_server, client, uri_for_task, version));
-            });
-        }
+        let mc_uri = String::from(uri.path());
+        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        // Always parse on explicit save
+        debug!("did_save: {}", params.text_document.uri.path());
         if let Some(text) = params.text {
             self.on_change_full(params.text_document.uri, &text, None)
                 .await;
@@ -642,10 +530,8 @@ impl LanguageServer for Backend {
         debug!("did_close: {}", params.text_document.uri.path());
         self.state.remove_document(&params.text_document.uri);
         self.state.scheduler.remove(&params.text_document.uri);
-        let _ = self
-            .state
-            .index
-            .send(IndexCommand::RemoveFile(String::from(params.text_document.uri.path())));
+        let mc_uri = String::from(params.text_document.uri.path());
+        let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -779,44 +665,13 @@ impl LanguageServer for Backend {
         let span =
             tracing::debug_span!("semantic_tokens_full", uri = %params.text_document.uri.path());
         let _guard = span.enter();
-        debug!("");
         let uri = params.text_document.uri;
 
-        // Check if tokens are in state before calling compute
-        let has_tokens = self.state.sem_tokens.get(&uri).is_some();
         let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
         let tokens = tokens.unwrap_or_default();
         let result_id = self.state.tokens.next_id();
-        self.state
-            .tokens
-            .store(uri.clone(), result_id, tokens.clone());
-        use std::collections::HashMap;
-        let mut counts: HashMap<u32, usize> = HashMap::new();
-        for t in &tokens {
-            *counts.entry(t.token_type).or_insert(0) += 1;
-        }
-        let count_str: String = counts
-            .iter()
-            .map(|(k, v)| format!("{k}:{v}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        warn!(
-            "semantic_tokens_full: uri={} tokens={} has_state={} type_counts=[{}]",
-            uri.path(),
-            tokens.len(),
-            has_tokens,
-            count_str
-        );
+        self.state.tokens.store(uri.clone(), result_id, tokens.clone());
 
-        // Also log first few tokens to verify position/length
-        if !tokens.is_empty() {
-            let sample: Vec<(u32, u32, u32)> = tokens
-                .iter()
-                .take(5)
-                .map(|t| (t.delta_line, t.delta_start, t.token_type))
-                .collect();
-            warn!("semantic_tokens_full: first_tokens={:?}", sample);
-        }
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: Some(result_id.to_string()),
             data: tokens,
@@ -830,7 +685,6 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensFullDeltaResult>> {
         let span = tracing::debug_span!("semantic_tokens_full_delta", uri = %params.text_document.uri.path(), prev_id = %params.previous_result_id);
         let _guard = span.enter();
-        debug!("");
         let uri = params.text_document.uri;
 
         let curr = crate::features::semantic_tokens::compute(&self.state, &uri);
