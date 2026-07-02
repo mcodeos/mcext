@@ -11,6 +11,7 @@
 use crate::common::ServerConfig;
 use crate::index::IndexCommand;
 use crate::mcc_server::MccServer;
+use crate::project::ProjectConfig;
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
 // Note: McURI is just String, no need to import mcc
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// mcode LSP server
 pub struct Backend {
@@ -328,14 +329,51 @@ impl LanguageServer for Backend {
                     Ok(_) => {
                         debug!("mcc server subprocess started");
                         if let Some(client) = server.client() {
+                            // Only set system_root if explicitly configured
                             if let Some(ref sys_root) = cfg_system_root {
+                                info!("Setting system root: {}", sys_root.display());
                                 let _ = client
-                                    .set_project_root(sys_root.to_str().unwrap_or(""))
+                                    .set_system_root(sys_root.to_str().unwrap_or(""))
                                     .await;
                             }
+
+                            // Set project root
                             if let Some(ref root) = project_root_clone {
                                 let root_str = root.to_string_lossy();
                                 let _ = client.set_project_root(&root_str).await;
+
+                                // Load project.toml and auto-load dependencies
+                                if let Some(config) = ProjectConfig::load_from(&root) {
+                                    info!("Auto-loading {} dependencies from project.toml...", config.dependency_names().len());
+                                    // Load each dependency
+                                    for lib_name in config.dependency_names() {
+                                        info!("Calling lib.load for: {}", lib_name);
+                                        let lib_result = client.lib_load(lib_name).await;
+                                        if lib_result.is_ok() {
+                                            info!("Successfully loaded lib: {}", lib_name);
+                                        } else {
+                                            warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
+                                        }
+                                        // Debug: show library info
+                                        match client.lib_show(lib_name).await {
+                                            Ok(info) => {
+                                                info!("Lib info: name={} symbols={} modules={} components={} interfaces={}", 
+                                                    info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
+                                            }
+                                            Err(e) => {
+                                                warn!("lib_show failed: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                    // Load project entry
+                                    let entry = config.entry_path(&root);
+                                    info!("Calling load_project for entry: {}", entry);
+                                    if let Err(e) = client.load_project(&entry).await {
+                                        warn!("Failed to load project '{}': {:?}", entry, e);
+                                    } else {
+                                        info!("Successfully loaded project entry: {}", entry);
+                                    }
+                                }
                             }
                             let _ = client.init().await;
                         }
@@ -758,14 +796,41 @@ impl LanguageServer for Backend {
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
         debug!("did_change_workspace_folders: {:?}", params.event);
-        // Project root changed -> re-index
+        // Project root changed -> re-index and load dependencies
         if let Some(root) = params
             .event
             .added
             .first()
             .and_then(|f| f.uri.to_file_path().ok())
         {
-            let _ = self.state.index.send(IndexCommand::ParseAll(root));
+            let _ = self.state.index.send(IndexCommand::ParseAll(root.clone()));
+
+            // Auto-load project dependencies from project.toml
+            let mcc_server = self.mcc_server.clone();
+            let root_clone = root.clone();
+            tokio::spawn(async move {
+                // Wait for mcc server to be ready
+                let max_wait = 50; // 5 seconds max
+                for _ in 0..max_wait {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let server_guard = mcc_server.read().await;
+                    if let Some(server) = server_guard.as_ref() {
+                        if server.is_connected() {
+                            if let Some(client) = server.client() {
+                                if let Some(config) = ProjectConfig::load_from(&root_clone) {
+                                    debug!("Auto-loading {} dependencies...", config.dependency_names().len());
+                                    for lib_name in config.dependency_names() {
+                                        let _ = client.lib_load(lib_name).await;
+                                    }
+                                    let entry = config.entry_path(&root_clone);
+                                    let _ = client.load_project(&entry).await;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
         }
     }
 

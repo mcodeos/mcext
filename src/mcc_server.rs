@@ -327,6 +327,24 @@ impl Default for MccServer {
     }
 }
 
+impl MccServer {
+    /// Get the path for mcc server log file
+    fn get_mcc_log_path() -> PathBuf {
+        // Put log file next to mcext log
+        let mcext_log = std::env::var("MCEXT_LOG").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{}/work/mo/mcext/mcc_server.log", home)
+        });
+        let path = PathBuf::from(&mcext_log);
+        // Replace filename with mcc_server.log
+        if let Some(parent) = path.parent() {
+            parent.join("mcc_server.log")
+        } else {
+            PathBuf::from("mcc_server.log")
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum MccServerError {
     Spawn(String),

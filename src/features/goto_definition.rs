@@ -127,6 +127,8 @@ pub fn resolve(
             "interface_ref" | "interface_reference" => {
                 info!("goto_def: interface_ref id={}", interval.id);
                 // Try cross-file targets
+                let targets_count = symbols.cross_file_targets.len();
+                info!("goto_def: cross_file_targets count={}", targets_count);
                 for target in &symbols.cross_file_targets {
                     info!(
                         "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
@@ -142,6 +144,7 @@ pub fn resolve(
                         );
                     }
                 }
+                info!("goto_def: no cross_file target found for interface_ref id={}", interval.id);
             }
             "instance_ref" | "instance_reference" => {
                 // instance_ref points to a declaration with the same id
