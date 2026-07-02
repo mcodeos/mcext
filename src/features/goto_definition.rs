@@ -4,8 +4,7 @@
 //! Data source: RpcSemSymbols from sem RPC
 
 use crate::common::position::{offset_to_position, position_to_offset};
-use crate::rpc::CrossFileTarget;
-use crate::state::{RpcSemSymbols, WorkspaceState};
+use crate::state::WorkspaceState;
 use ropey::Rope;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
 use tracing::info;
