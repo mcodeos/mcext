@@ -39,6 +39,7 @@ pnpm run compile
 pnpm run watch
 
 # Run extension
+# Make sure you select "Debug VSCode Extension" in VSCode's Run and Debug window (Ctrl + Shift + D)
 F5 (in VSCode with Rust Analyzer)
 ```
 
