@@ -352,15 +352,15 @@ pub fn resolve_item(item: CompletionItem) -> CompletionItem {
 //     use ropey::Rope;
 //     use std::sync::Arc;
 //     use tower_lsp::lsp_types::Position;
-// 
+//
 //     fn fake_state(text: &str) -> (WorkspaceState, Url) {
 //         let state = WorkspaceState::new();
 //         let uri = Url::parse("file:///test.mc").unwrap();
 //         state.insert_document(uri.clone(), Rope::from_str(text), 1);
-// 
+//
 //         let mc_uri = McURI::from("/test.mc");
 //         mcc::mcc_load_from_string(&mc_uri, text);
-// 
+//
 //         if let Some(result) = mcc::mcc_query(&mc_uri) {
 //             state.insert_parse(
 //                 uri.clone(),
@@ -369,10 +369,10 @@ pub fn resolve_item(item: CompletionItem) -> CompletionItem {
 //                 mc_uri,
 //             );
 //         }
-// 
+//
 //         (state, uri)
 //     }
-// 
+//
 //     #[test]
 //     fn resolve_returns_completions() {
 //         let (state, uri) = fake_state("component X { pins = [1] }\n");
@@ -383,7 +383,7 @@ pub fn resolve_item(item: CompletionItem) -> CompletionItem {
 //         let result = resolve(&state, &params);
 //         assert!(result.is_some());
 //     }
-// 
+//
 //     #[test]
 //     fn keywords_contain_common_keywords() {
 //         let (state, uri) = fake_state("comp");
@@ -400,7 +400,7 @@ pub fn resolve_item(item: CompletionItem) -> CompletionItem {
 //         // 应该包含 component
 //         assert!(items.iter().any(|i| i.label == "component"));
 //     }
-// 
+//
 //     #[test]
 //     fn analyze_context_in_component_body() {
 //         let rope = Rope::from_str("component X {\n    pins");

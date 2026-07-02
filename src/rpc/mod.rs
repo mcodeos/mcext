@@ -84,7 +84,7 @@ impl MccRpcClient {
         self.call("parse", json!({"entry": entry, "include_system": true}))
             .await
     }
-    
+
     /// Get diagnostics for a file
     pub async fn diagnostics(&self, uri: &str) -> Result<DiagnosticsResponse, RpcError> {
         let result = self.call("diagnostics", json!({"uri": uri})).await?;
@@ -95,6 +95,36 @@ impl MccRpcClient {
     pub async fn project_symbols(&self) -> Result<ProjectSymbolsResponse, RpcError> {
         let result = self.call("project_symbols", json!({})).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
+    /// Set project root
+    pub async fn set_project_root(&self, path: &str) -> Result<(), RpcError> {
+        self.call("set_project_root", json!({"path": path})).await?;
+        Ok(())
+    }
+
+    /// Initialize mcc system
+    pub async fn init(&self) -> Result<(), RpcError> {
+        self.call("init", json!({})).await?;
+        Ok(())
+    }
+
+    /// Load project
+    pub async fn load_project(&self, entry: &str) -> Result<(), RpcError> {
+        self.call("load_project", json!({"entry": entry})).await?;
+        Ok(())
+    }
+
+    /// Add file to project
+    pub async fn add_file(&self, uri: &str) -> Result<(), RpcError> {
+        self.call("add_file", json!({"uri": uri})).await?;
+        Ok(())
+    }
+
+    /// Remove file from project
+    pub async fn remove_file(&self, uri: &str) -> Result<(), RpcError> {
+        self.call("remove_file", json!({"uri": uri})).await?;
+        Ok(())
     }
 }
 

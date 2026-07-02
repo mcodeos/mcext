@@ -13,13 +13,13 @@ use crate::index::IndexCommand;
 use crate::mcc_server::MccServer;
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
-use mcc::McURI;
+// Note: McURI is just String, no need to import mcc
 use ropey::Rope;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// mcode LSP server
 pub struct Backend {
@@ -121,7 +121,8 @@ async fn parse_and_publish(
         uri.path(),
         version
     );
-    let mc_uri = McURI::from(uri.path());
+    let mc_uri = // McURI is just String
+String::from(uri.path());
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
     let text = state
@@ -144,8 +145,19 @@ async fn parse_and_publish(
     };
 
     if !server.is_connected() {
-        warn!("mcc server not connected for {uri}");
-        return;
+        warn!("mcc server not connected for {uri}, waiting...");
+        // Wait for connection
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if server.is_connected() {
+                info!("mcc server connected after wait");
+                break;
+            }
+        }
+        if !server.is_connected() {
+            warn!("mcc server still not connected for {uri}");
+            return;
+        }
     }
 
     let uri_str = uri.path();
@@ -170,13 +182,33 @@ async fn parse_and_publish(
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
-            let rope = state.document_rope(&uri).unwrap_or_else(|| ropey::Rope::new());
-            for d in resp.diagnostics {
-                let start = match crate::common::position::offset_to_position(d.location.pos as usize, &rope) {
+            info!(
+                "diagnostics RPC returned {} diagnostics for {}",
+                resp.diagnostics.len(),
+                uri
+            );
+            let rope = state
+                .document_rope(&uri)
+                .unwrap_or_else(|| ropey::Rope::new());
+            for d in &resp.diagnostics {
+                info!(
+                    "diagnostic: code={} pos={} len={} msg={}",
+                    d.code, d.location.pos, d.location.len, d.message
+                );
+            }
+            // Filter out diagnostics with invalid position (pos=0 likely indicates AST node position bug)
+            for d in resp.diagnostics.into_iter().filter(|d| d.location.pos > 0) {
+                let start = match crate::common::position::offset_to_position(
+                    d.location.pos as usize,
+                    &rope,
+                ) {
                     Some(s) => s,
                     None => continue,
                 };
-                let end = match crate::common::position::offset_to_position((d.location.pos + d.location.len) as usize, &rope) {
+                let end = match crate::common::position::offset_to_position(
+                    (d.location.pos + d.location.len) as usize,
+                    &rope,
+                ) {
                     Some(e) => e,
                     None => continue,
                 };
@@ -225,11 +257,11 @@ async fn parse_and_publish(
         count_str
     );
 
-    let tokens = mcc::McSemTokens {
+    let rpc_tokens = crate::state::RpcSemTokens {
         tokens: sem
             .tokens
             .into_iter()
-            .map(|t| mcc::McSemToken {
+            .map(|t| crate::state::SemTokenEntry {
                 type_: t.token_type,
                 position: t.position,
                 length: t.length,
@@ -238,25 +270,50 @@ async fn parse_and_publish(
     };
     state
         .sem_tokens
-        .insert(uri.clone(), Arc::new(std::sync::Mutex::new(tokens)));
+        .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_tokens)));
     state.registered_uris.insert(uri.clone(), mc_uri.clone());
 
     // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
     let rpc_symbols = crate::state::RpcSemSymbols {
         lapper: sem.symbols.lapper.clone(),
-        local_declares: sem.symbols.local.declares.iter().map(|d| {
-            crate::state::LocalDeclareSpan { id: d.id, span: d.span }
-        }).collect(),
+        local_declares: sem
+            .symbols
+            .local
+            .declares
+            .iter()
+            .map(|d| crate::state::LocalDeclareSpan {
+                id: d.id,
+                span: d.span,
+            })
+            .collect(),
         local_references: sem.symbols.local.references.clone(),
-        global_declares: sem.symbols.global.declares.iter().map(|d| {
-            crate::state::GlobalDeclareSpan { id: d.id, uri: d.uri.clone(), span: d.span }
-        }).collect(),
-        global_references: sem.symbols.global.references.iter().map(|r| {
-            crate::state::GlobalReferenceSpan { id: r.id, uri: r.uri.clone(), span: r.span }
-        }).collect(),
+        global_declares: sem
+            .symbols
+            .global
+            .declares
+            .iter()
+            .map(|d| crate::state::GlobalDeclareSpan {
+                id: d.id,
+                uri: d.uri.clone(),
+                span: d.span,
+            })
+            .collect(),
+        global_references: sem
+            .symbols
+            .global
+            .references
+            .iter()
+            .map(|r| crate::state::GlobalReferenceSpan {
+                id: r.id,
+                uri: r.uri.clone(),
+                span: r.span,
+            })
+            .collect(),
         cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
     };
-    state.sem_symbols.insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
+    state
+        .sem_symbols
+        .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
     tracing::info!(
         "Stored RPC sem_symbols for goto_definition, lapper_len={}",
         sem.symbols.lapper.len()
@@ -281,9 +338,17 @@ async fn parse_and_publish(
             return;
         }
     }
+    let diag_count = diagnostics.len();
     client
         .publish_diagnostics(uri.clone(), diagnostics, version)
         .await;
+
+    info!(
+        "publish_diagnostics: published {} diagnostics for {} version={:?}",
+        diag_count,
+        uri.path(),
+        version
+    );
 }
 
 #[tower_lsp::async_trait]
@@ -295,11 +360,7 @@ impl LanguageServer for Backend {
             .map(ServerConfig::from_initialization_options)
             .unwrap_or_default();
 
-        // Initialize mcc system/project root
-        if let Some(root) = &cfg.system_root {
-            mcc::mcc_set_project_root(root);
-        }
-        // Infer project root: cfg.project_root > first workspace folder
+        // Initialize mcc system/project root via RPC after server starts
         let project_root = cfg
             .project_root
             .clone()
@@ -312,22 +373,35 @@ impl LanguageServer for Backend {
             })
             .or_else(|| std::env::current_dir().ok());
 
-        if let Some(root) = &project_root {
-            mcc::mcc_set_project_root(root);
-        }
-        mcc::mcc_init_no_lib();
-
         // Try to start mcc server subprocess for RPC mode
         // This provides:
         // 1. Separate log output (visible in LSP terminal)
         // 2. Crash isolation (mcc crash won't kill LSP)
         let mcc_server = self.mcc_server.clone();
+        let project_root_clone = project_root.clone();
+        let cfg_system_root = cfg.system_root.clone();
         tokio::spawn(async move {
             let mut server_guard = mcc_server.write().await;
             if let Some(ref mut server) = *server_guard {
                 match server.start().await {
                     Ok(_) => {
                         info!("mcc server subprocess started successfully");
+                        // Initialize mcc via RPC
+                        if let Some(client) = server.client() {
+                            // Set system root if provided
+                            if let Some(ref sys_root) = cfg_system_root {
+                                let _ = client
+                                    .set_project_root(sys_root.to_str().unwrap_or(""))
+                                    .await;
+                            }
+                            // Set project root and initialize
+                            if let Some(ref root) = project_root_clone {
+                                let root_str = root.to_string_lossy();
+                                let _ = client.set_project_root(&root_str).await;
+                            }
+                            let _ = client.init().await;
+                            info!("mcc initialized via RPC");
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -464,7 +538,7 @@ impl LanguageServer for Backend {
         )
         .await;
         // Notify index worker
-        let mc_uri = McURI::from(uri.path());
+        let mc_uri = String::from(uri.path());
         let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
     }
 
@@ -479,7 +553,7 @@ impl LanguageServer for Backend {
         )
         .await;
         // Notify index worker
-        let mc_uri = McURI::from(uri.path());
+        let mc_uri = String::from(uri.path());
         let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
     }
 
@@ -496,14 +570,14 @@ impl LanguageServer for Backend {
         debug!("did_close: {}", params.text_document.uri.path());
         self.state.remove_document(&params.text_document.uri);
         self.state.scheduler.remove(&params.text_document.uri);
-        let mc_uri = McURI::from(params.text_document.uri.path());
+        let mc_uri = String::from(params.text_document.uri.path());
         let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         debug!("did_change_watched_files: {} changes", params.changes.len());
         for change in &params.changes {
-            let mc_uri = McURI::from(change.uri.path());
+            let mc_uri = String::from(change.uri.path());
             match change.typ {
                 FileChangeType::DELETED => {
                     let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));

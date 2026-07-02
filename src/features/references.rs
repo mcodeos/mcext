@@ -24,7 +24,9 @@ pub fn resolve(
     let symbols = symbols_ref.lock().ok()?;
 
     // Find symbol at cursor position
-    let intervals: Vec<_> = symbols.lapper.iter()
+    let intervals: Vec<_> = symbols
+        .lapper
+        .iter()
         .filter(|i| offset >= i.start && offset < i.stop)
         .collect();
 

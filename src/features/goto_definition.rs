@@ -4,11 +4,11 @@
 //! Data source: RpcSemSymbols from sem RPC
 
 use crate::common::position::{offset_to_position, position_to_offset};
-use crate::rpc::{CrossFileTarget, LapperEntry, LocalDeclare, LocalReference};
-use crate::state::{LocalDeclareSpan, RpcSemSymbols, WorkspaceState};
+use crate::rpc::CrossFileTarget;
+use crate::state::{RpcSemSymbols, WorkspaceState};
 use ropey::Rope;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
-use tracing::{info, trace, warn};
+use tracing::info;
 
 /// Compute goto definition response.
 pub fn resolve(
@@ -24,24 +24,94 @@ pub fn resolve(
     let symbols_ref = state.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
-    info!("goto_def: lapper_len={}, offset={}", symbols.lapper.len(), offset);
+    info!(
+        "goto_def: lapper_len={}, offset={}",
+        symbols.lapper.len(),
+        offset
+    );
+
+    // Debug: log all lapper intervals
+    for i in &symbols.lapper {
+        info!(
+            "goto_def: lapper: kind={}, id={}, start={}, stop={}",
+            i.kind, i.id, i.start, i.stop
+        );
+    }
 
     // Find symbol at cursor position using lapper
-    let intervals: Vec<_> = symbols.lapper.iter()
+    let intervals: Vec<_> = symbols
+        .lapper
+        .iter()
         .filter(|i| offset >= i.start && offset < i.stop)
         .collect();
+
+    // Debug: log intervals at this position
+    for i in &intervals {
+        info!(
+            "goto_def: interval at offset {}: kind={}, id={}, start={}, stop={}",
+            offset, i.kind, i.id, i.start, i.stop
+        );
+    }
+
+    info!(
+        "goto_def: local_declares count={}",
+        symbols.local_declares.len()
+    );
+    for decl in &symbols.local_declares {
+        info!(
+            "goto_def: decl id={}, span=[{}, {}]",
+            decl.id, decl.span[0], decl.span[1]
+        );
+    }
+
+    info!(
+        "goto_def: local_references count={}",
+        symbols.local_references.len()
+    );
+    for ref_info in &symbols.local_references {
+        info!(
+            "goto_def: ref id={}, declare_id={:?}, span=[{}, {}]",
+            ref_info.id, ref_info.declare_id, ref_info.span[0], ref_info.span[1]
+        );
+    }
 
     if intervals.is_empty() {
         info!("goto_def: no symbol found at offset {}", offset);
         return None;
     }
 
-    // For simplicity, handle class_definition and declare_instance
-    // More complex symbol types need additional mapping
     for interval in &intervals {
         match interval.kind.as_str() {
             "class_definition" => {
                 // Find declaration for this class
+                for decl in &symbols.local_declares {
+                    if decl.id == interval.id {
+                        return local_response(uri, decl.span, &rope);
+                    }
+                }
+            }
+            "declare_class" => {
+                info!(
+                    "goto_def: declare_class id={} trying cross_file_targets",
+                    interval.id
+                );
+                // Cross-file: find target in cross_file_targets
+                for target in &symbols.cross_file_targets {
+                    info!(
+                        "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
+                        target.ref_id, target.target_uri, target.span[0], target.span[1]
+                    );
+                    if target.ref_id == interval.id {
+                        return cross_file_response(
+                            state,
+                            &target.target_uri,
+                            target.span,
+                            &rope,
+                            uri,
+                        );
+                    }
+                }
+                // Also check local declares
                 for decl in &symbols.local_declares {
                     if decl.id == interval.id {
                         return local_response(uri, decl.span, &rope);
@@ -55,8 +125,28 @@ pub fn resolve(
                     }
                 }
             }
-            "instance_reference" => {
-                // Find declaration this references
+            "interface_ref" | "interface_reference" => {
+                info!("goto_def: interface_ref id={}", interval.id);
+                // Try cross-file targets
+                for target in &symbols.cross_file_targets {
+                    info!(
+                        "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
+                        target.ref_id, target.target_uri, target.span[0], target.span[1]
+                    );
+                    if target.ref_id == interval.id {
+                        return cross_file_response(
+                            state,
+                            &target.target_uri,
+                            target.span,
+                            &rope,
+                            uri,
+                        );
+                    }
+                }
+            }
+            "instance_ref" | "instance_reference" => {
+                // instance_ref points to a declaration with the same id
+                // Find the declaration
                 for decl in &symbols.local_declares {
                     if decl.id == interval.id {
                         return local_response(uri, decl.span, &rope);
@@ -65,7 +155,13 @@ pub fn resolve(
                 // Try cross-file targets
                 for target in &symbols.cross_file_targets {
                     if target.ref_id == interval.id {
-                        return cross_file_response(state, &target.target_uri, target.span, &rope, uri);
+                        return cross_file_response(
+                            state,
+                            &target.target_uri,
+                            target.span,
+                            &rope,
+                            uri,
+                        );
                     }
                 }
             }
@@ -95,7 +191,7 @@ fn cross_file_response(
     current_uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
     let target_url = Url::from_file_path(target_uri).ok()?;
-    
+
     // Try to get rope from state or disk
     let target_rope = if let Some(r) = state.document_rope(&target_url) {
         r
