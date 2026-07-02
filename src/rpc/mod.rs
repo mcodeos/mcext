@@ -103,6 +103,12 @@ impl MccRpcClient {
         Ok(())
     }
 
+    /// Set system root (for library resolution)
+    pub async fn set_system_root(&self, path: &str) -> Result<(), RpcError> {
+        self.call("set_system_root", json!({"path": path})).await?;
+        Ok(())
+    }
+
     /// Initialize mcc system
     pub async fn init(&self) -> Result<(), RpcError> {
         self.call("init", json!({})).await?;
@@ -126,12 +132,52 @@ impl MccRpcClient {
         self.call("remove_file", json!({"uri": uri})).await?;
         Ok(())
     }
+
+    /// Load a library by name
+    pub async fn lib_load(&self, name: &str) -> Result<(), RpcError> {
+        self.call("lib.load", json!({"name": name})).await?;
+        Ok(())
+    }
+
+    /// List loaded libraries
+    pub async fn lib_list(&self) -> Result<LibListResponse, RpcError> {
+        let result = self.call("library.list", json!({})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
+    /// Get library info
+    pub async fn lib_show(&self, name: &str) -> Result<LibShowResponse, RpcError> {
+        let result = self.call("library.show", json!({"name": name})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
 }
 
 /// Response from `diagnostics` RPC
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsResponse {
     pub diagnostics: Vec<DiagEntry>,
+}
+
+/// Response from `library.list` RPC
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibListResponse {
+    pub loaded: Vec<LibEntry>,
+    pub installed: Vec<LibEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibEntry {
+    pub name: String,
+}
+
+/// Response from `library.show` RPC
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibShowResponse {
+    pub name: String,
+    pub total_symbols: usize,
+    pub module_count: usize,
+    pub component_count: usize,
+    pub interface_count: usize,
 }
 
 /// Response from `project_symbols` RPC

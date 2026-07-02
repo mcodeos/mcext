@@ -27,6 +27,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # RPC client for mcc server
 reqwest = { version = "0.12", features = ["json"] }
 
+# TOML parsing for project.toml
+toml = "0.8"
+
 # tokio-console: async debugging tool (dev dependency only)
 [dev-dependencies]
 console-subscriber = "0.4"
