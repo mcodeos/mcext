@@ -170,20 +170,51 @@ async fn parse_and_publish(
         Ok(resp) => {
             let rope = state.document_rope(&uri).unwrap_or_else(ropey::Rope::new);
             for d in resp.diagnostics {
-                let start = match crate::common::position::offset_to_position(
-                    d.location.pos as usize,
-                    &rope,
-                ) {
-                    Some(s) => s,
-                    None => continue,
+                // DEBUG: log raw diagnostic data
+                // debug!(
+                //     "diag: code={} line={} col={} pos={} len={} msg={}",
+                //     d.code, d.location.line, d.location.column, d.location.pos, d.location.len, d.message
+                // );
+                
+                // Prefer RPC-provided line/column (from mcc's Location::new which computes them correctly)
+                // Fall back to pos-based conversion if line=0 (indicating pos_to_line_col failed)
+                let start = if d.location.line > 0 {
+                    // RPC provides 1-based line/column, LSP expects 0-based
+                    tower_lsp::lsp_types::Position::new(d.location.line - 1, d.location.column.saturating_sub(1))
+                } else {
+                    // Fallback: convert pos to position using rope
+                    match crate::common::position::offset_to_position(
+                        d.location.pos as usize,
+                        &rope,
+                    ) {
+                        Some(s) => s,
+                        None => continue,
+                    }
                 };
+                
+                // When using RPC-provided line/column, calculate end from pos+len but clamp to same line
+                // (the len is based on AST node size which may span multiple lines)
+                // When falling back to pos-based conversion, calculate end from pos+len
                 let end = match crate::common::position::offset_to_position(
                     (d.location.pos + d.location.len) as usize,
                     &rope,
                 ) {
-                    Some(e) => e,
-                    None => continue,
+                    Some(e) => {
+                        // Clamp end to same line as start to avoid multi-line spans
+                        if e.line > start.line {
+                            crate::common::position::line_end_position(start.line, &rope)
+                        } else {
+                            e
+                        }
+                    }
+                    None => {
+                        // If we can't calculate end, use line end
+                        crate::common::position::line_end_position(start.line, &rope)
+                    }
                 };
+                
+                // debug!("  -> start=({}, {}) end=({}, {})", start.line, start.character, end.line, end.character);
+                
                 let severity = match d.level.as_str() {
                     "error" => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
                     "warning" => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,

@@ -63,6 +63,18 @@ pub fn offset_to_line(byte_offset: usize, rope: &Rope) -> Option<u32> {
     Some(line as u32 + 1)
 }
 
+/// Get the end position of a line (0-based), clamped to the line content
+pub fn line_end_position(line: u32, rope: &Rope) -> Position {
+    let line_idx = line as usize;
+    if line_idx >= rope.len_lines() {
+        return Position::new(line, 0);
+    }
+    let line_start_char = rope.try_line_to_char(line_idx).unwrap_or(0);
+    let line_end_char = rope.try_line_to_char(line_idx + 1).unwrap_or(rope.len_chars());
+    let line_len = line_end_char - line_start_char;
+    Position::new(line, line_len as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
