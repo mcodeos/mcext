@@ -177,6 +177,10 @@ pub fn resolve(
                     }
                 }
             }
+            "port_definition" => {
+                // Port definitions point to themselves
+                return local_response(uri, [interval.start, interval.stop], &rope);
+            }
             _ => {}
         }
     }
