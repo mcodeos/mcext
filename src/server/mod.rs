@@ -177,8 +177,12 @@ async fn parse_and_publish(
                 // );
                 
                 // Prefer RPC-provided line/column (from mcc's Location::new which computes them correctly)
-                // Fall back to pos-based conversion if line=0 (indicating pos_to_line_col failed)
-                let start = if d.location.line > 0 {
+                // Fall back to pos-based conversion if line=0 OR if line=1,col=1 but pos indicates
+                // a later position (pos_to_line_col failed silently, returned default)
+                let rpc_pos_ok = d.location.line > 1
+                    || d.location.column > 1
+                    || (d.location.line == 1 && d.location.column == 1 && d.location.pos == 0);
+                let start = if rpc_pos_ok && d.location.line > 0 {
                     // RPC provides 1-based line/column, LSP expects 0-based
                     tower_lsp::lsp_types::Position::new(d.location.line - 1, d.location.column.saturating_sub(1))
                 } else {
