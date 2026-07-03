@@ -7,7 +7,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::mcc_lock::MCC_LOCK;
+//! use crate::mcclock::MCC_LOCK;
 //!
 //! let _guard = MCC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 //! mcc::mcc_add(&uri);  // <- now safe

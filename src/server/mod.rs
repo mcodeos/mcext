@@ -10,7 +10,7 @@
 
 use crate::common::ServerConfig;
 use crate::index::IndexCommand;
-use crate::mcc_server::MccServer;
+use crate::mccsrv::MccServer;
 use crate::project::ProjectConfig;
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
@@ -168,9 +168,7 @@ async fn parse_and_publish(
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
-            let rope = state
-                .document_rope(&uri)
-                .unwrap_or_else(ropey::Rope::new);
+            let rope = state.document_rope(&uri).unwrap_or_else(ropey::Rope::new);
             for d in resp.diagnostics {
                 let start = match crate::common::position::offset_to_position(
                     d.location.pos as usize,
@@ -271,8 +269,7 @@ async fn parse_and_publish(
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
-        let lsp_tokens =
-            crate::features::semantic_tokens::compute(&state, &uri).unwrap_or_default();
+        let lsp_tokens = crate::features::semtok::compute(&state, &uri).unwrap_or_default();
         state
             .tokens
             .store_with_result_id(uri.clone(), rid, lsp_tokens);
@@ -347,7 +344,10 @@ impl LanguageServer for Backend {
 
                                 // Load project.toml and auto-load dependencies
                                 if let Some(config) = ProjectConfig::load_from(&root) {
-                                    info!("Auto-loading {} dependencies from project.toml...", config.dependency_names().len());
+                                    info!(
+                                        "Auto-loading {} dependencies from project.toml...",
+                                        config.dependency_names().len()
+                                    );
                                     // Load each dependency
                                     for lib_name in config.dependency_names() {
                                         info!("Calling lib.load for: {}", lib_name);
@@ -355,7 +355,11 @@ impl LanguageServer for Backend {
                                         if lib_result.is_ok() {
                                             info!("Successfully loaded lib: {}", lib_name);
                                         } else {
-                                            warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
+                                            warn!(
+                                                "Failed to load lib '{}': {:?}",
+                                                lib_name,
+                                                lib_result.err()
+                                            );
                                         }
                                         // Debug: show library info
                                         match client.lib_show(lib_name).await {
@@ -597,7 +601,7 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let span = tracing::debug_span!("completion", uri = %params.text_document_position.text_document.uri.path());
         let _guard = span.enter();
-        Ok(crate::features::completion::resolve(
+        Ok(crate::features::comp::resolve(
             &self.state,
             &params.text_document_position,
         ))
@@ -605,7 +609,7 @@ impl LanguageServer for Backend {
 
     // Phase 4: completionItem/resolve additional info
     async fn completion_resolve(&self, params: CompletionItem) -> Result<CompletionItem> {
-        Ok(crate::features::completion::resolve_item(params))
+        Ok(crate::features::comp::resolve_item(params))
     }
 
     // Phase 4.2: full document formatting
@@ -619,8 +623,8 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let options = crate::features::formatting::FormatOptions::new();
-        Ok(crate::features::formatting::format_document(
+        let options = crate::features::fmt::FormatOptions::new();
+        Ok(crate::features::fmt::format_document(
             &uri,
             &rope,
             Some(options),
@@ -641,8 +645,8 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let options = crate::features::formatting::FormatOptions::new();
-        Ok(crate::features::formatting::format_range(
+        let options = crate::features::fmt::FormatOptions::new();
+        Ok(crate::features::fmt::format_range(
             &uri,
             &rope,
             params.range,
@@ -661,7 +665,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        Ok(crate::features::inlay_hint::compute(
+        Ok(crate::features::inhint::compute(
             &self.state,
             &uri,
             params.range,
@@ -680,11 +684,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         let span = tracing::debug_span!("goto_definition", uri = %uri.path(), line = pos.line, col = pos.character);
         let _guard = span.enter();
-        Ok(crate::features::goto_definition::resolve(
-            &self.state,
-            &uri,
-            pos,
-        ))
+        Ok(crate::features::gotodef::resolve(&self.state, &uri, pos))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -693,7 +693,7 @@ impl LanguageServer for Backend {
         let include_decl = params.context.include_declaration;
         let span = tracing::debug_span!("references", uri = %uri.path(), line = pos.line, col = pos.character, include_decl);
         let _guard = span.enter();
-        Ok(crate::features::references::resolve(
+        Ok(crate::features::refs::resolve(
             &self.state,
             &uri,
             pos,
@@ -710,10 +710,12 @@ impl LanguageServer for Backend {
         let _guard = span.enter();
         let uri = params.text_document.uri;
 
-        let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let tokens = crate::features::semtok::compute(&self.state, &uri);
         let tokens = tokens.unwrap_or_default();
         let result_id = self.state.tokens.next_id();
-        self.state.tokens.store(uri.clone(), result_id, tokens.clone());
+        self.state
+            .tokens
+            .store(uri.clone(), result_id, tokens.clone());
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: Some(result_id.to_string()),
@@ -730,7 +732,7 @@ impl LanguageServer for Backend {
         let _guard = span.enter();
         let uri = params.text_document.uri;
 
-        let curr = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let curr = crate::features::semtok::compute(&self.state, &uri);
         let curr = curr.unwrap_or_default();
 
         // Try incremental: check last tokens
@@ -739,9 +741,7 @@ impl LanguageServer for Backend {
         if let Some((stored_id, prev_tokens)) = prev_tokens {
             if stored_id == prev_id_str {
                 // id matches, try diff
-                if let Some(delta) =
-                    crate::features::semantic_tokens::compute_delta(&prev_tokens, &curr)
-                {
+                if let Some(delta) = crate::features::semtok::compute_delta(&prev_tokens, &curr) {
                     let new_id = prev_id_str.clone();
                     self.state
                         .tokens
@@ -787,7 +787,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensRangeResult>> {
         debug!("semantic_tokens_range: {}", params.text_document.uri.path());
         let uri = params.text_document.uri;
-        let tokens = crate::features::semantic_tokens::compute(&self.state, &uri);
+        let tokens = crate::features::semtok::compute(&self.state, &uri);
         let tokens = tokens.unwrap_or_default();
         Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
             result_id: None,
@@ -823,7 +823,10 @@ impl LanguageServer for Backend {
                         if server.is_connected() {
                             if let Some(client) = server.client() {
                                 if let Some(config) = ProjectConfig::load_from(&root_clone) {
-                                    debug!("Auto-loading {} dependencies...", config.dependency_names().len());
+                                    debug!(
+                                        "Auto-loading {} dependencies...",
+                                        config.dependency_names().len()
+                                    );
                                     for lib_name in config.dependency_names() {
                                         let _ = client.lib_load(lib_name).await;
                                     }

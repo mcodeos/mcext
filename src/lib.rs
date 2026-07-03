@@ -6,8 +6,8 @@
 pub mod common;
 pub mod features;
 pub mod index;
-pub mod mcc_lock;
-pub mod mcc_server;
+pub mod mcclock;
+pub mod mccsrv;
 pub mod project;
 pub mod rpc;
 pub mod server;
