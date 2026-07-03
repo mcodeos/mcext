@@ -512,6 +512,9 @@ impl LanguageServer for Backend {
                 document_range_formatting_provider: Some(OneOf::Left(true)),
                 // Phase 4.3: inline hints
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                // Note: document_link_provider disabled to avoid underlines on use statements
+                // Use F12 (goto definition) to navigate to use targets instead
+                // document_link_provider: Some(DocumentLinkOptions { ... }),
                 ..ServerCapabilities::default()
             },
         })
@@ -839,5 +842,22 @@ impl LanguageServer for Backend {
     async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
         debug!("execute_command");
         Ok(None)
+    }
+
+    // Phase 5: use file jump (document links)
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri.clone();
+        let span = tracing::debug_span!("document_link", uri = %uri.path());
+        let _guard = span.enter();
+
+        let rope = match self.state.document_rope(&uri) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        Ok(crate::features::usejump::resolve_document_links(
+            &uri,
+            &rope.to_string(),
+        ))
     }
 }

@@ -21,3 +21,4 @@ pub mod goto_definition;
 pub mod inlay_hint;
 pub mod references;
 pub mod semantic_tokens;
+pub mod usejump;
