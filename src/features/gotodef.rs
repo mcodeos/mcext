@@ -164,7 +164,14 @@ pub fn resolve(
             }
             "instance_ref" | "instance_reference" => {
                 // instance_ref points to a declaration with the same id
-                // Find the declaration
+                // First search lapper for declare_instance (self-contained span, avoids
+                // ID collision between port_definition and declare_instance in local_declares)
+                for entry in &symbols.lapper {
+                    if entry.kind == "declare_instance" && entry.id == interval.id {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // Fallback to local_declares
                 for decl in &symbols.local_declares {
                     if decl.id == interval.id {
                         return local_response(uri, decl.span, &rope);
