@@ -44,6 +44,12 @@ pub fn resolve(
         .filter(|i| offset >= i.start && offset < i.stop)
         .collect();
 
+    info!(
+        "goto_def: query: offset={}, lapper_count={}, matched_count={}",
+        offset,
+        symbols.lapper.len(),
+        intervals.len()
+    );
     // Debug: log intervals at this position
     for i in &intervals {
         info!(
