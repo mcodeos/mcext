@@ -312,6 +312,8 @@ pub struct LapperEntry {
     pub start: usize,
     pub stop: usize,
     pub id: u32,
+    #[serde(default)]
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

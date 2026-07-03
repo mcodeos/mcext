@@ -131,11 +131,8 @@ pub fn resolve(
                 }
             }
             "declare_instance" => {
-                for decl in &symbols.local_declares {
-                    if decl.id == interval.id {
-                        return local_response(uri, decl.span, &rope);
-                    }
-                }
+                // Use lapper span directly (self-contained, avoids ID collision in local_declares)
+                return local_response(uri, [interval.start, interval.stop], &rope);
             }
             "interface_ref" | "interface_reference" => {
                 info!("goto_def: interface_ref id={}", interval.id);
@@ -164,8 +161,20 @@ pub fn resolve(
             }
             "instance_ref" | "instance_reference" => {
                 // instance_ref points to a declaration with the same id
-                // First search lapper for declare_instance (self-contained span, avoids
-                // ID collision between port_definition and declare_instance in local_declares)
+                // ★ Scope-aware: match by (id, scope) to handle same-named instances
+                // in different modules/components within the same file
+                let ref_scope = &interval.scope;
+
+                // First try exact (id, scope) match
+                for entry in &symbols.lapper {
+                    if entry.kind == "declare_instance"
+                        && entry.id == interval.id
+                        && entry.scope == *ref_scope
+                    {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // Fallback: id-only match (backward compat for unscoped entries)
                 for entry in &symbols.lapper {
                     if entry.kind == "declare_instance" && entry.id == interval.id {
                         return local_response(uri, [entry.start, entry.stop], &rope);
