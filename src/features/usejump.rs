@@ -9,17 +9,14 @@ use tracing::{debug, info, warn};
 
 /// Resolve document links for a file.
 /// Returns links for all `use` statements that point to existing files.
-pub fn resolve_document_links(
-    uri: &Url,
-    text: &str,
-) -> Option<Vec<DocumentLink>> {
+pub fn resolve_document_links(uri: &Url, text: &str) -> Option<Vec<DocumentLink>> {
     info!("use_jump: resolving document links for {}", uri.path());
-    
+
     let current_dir = uri
         .to_file_path()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))?;
-    
+
     info!("use_jump: current_dir = {:?}", current_dir);
 
     let mut links = Vec::new();
@@ -27,12 +24,12 @@ pub fn resolve_document_links(
     for (line_num, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         info!("use_jump: line {}: {:?}", line_num, trimmed);
-        
+
         let Some(path) = strip_use_keyword(trimmed) else {
             debug!("use_jump: line {} not a use statement", line_num);
             continue;
         };
-        
+
         info!("use_jump: after strip_use_keyword: path = {:?}", path);
 
         // Parse prefix and path
@@ -40,24 +37,27 @@ pub fn resolve_document_links(
             debug!("use_jump: line {} has no valid prefix", line_num);
             continue;
         };
-        
+
         info!("use_jump: prefix = {:?}, use_path = {:?}", prefix, use_path);
 
         // Only handle relative paths we can resolve
         if prefix != "./" && prefix != "../" {
-            debug!("use_jump: line {} has unsupported prefix: {}", line_num, prefix);
+            debug!(
+                "use_jump: line {} has unsupported prefix: {}",
+                line_num, prefix
+            );
             continue;
         }
 
         // Find target file(s)
         let candidates = resolve_use_path(&current_dir, use_path);
         info!("use_jump: candidates = {:?}", candidates);
-        
+
         let Some(target) = candidates.iter().find(|p| p.exists()) else {
             warn!("use_jump: no existing file found for line {}", line_num);
             continue;
         };
-        
+
         info!("use_jump: found target = {:?}", target);
 
         // Calculate the range of the path part (after the prefix)
@@ -66,7 +66,10 @@ pub fn resolve_document_links(
         let path_str = format!("{}{}", prefix, use_path);
         let path_end_in_line = path_start_in_line + path_str.len();
 
-        info!("use_jump: range: start={}, end={}, path_str={}", path_start_in_line, path_end_in_line, path_str);
+        info!(
+            "use_jump: range: start={}, end={}, path_str={}",
+            path_start_in_line, path_end_in_line, path_str
+        );
 
         let range = Range::new(
             Position::new(line_num as u32, path_start_in_line as u32),
@@ -85,7 +88,7 @@ pub fn resolve_document_links(
     }
 
     info!("use_jump: total links = {}", links.len());
-    
+
     if links.is_empty() {
         None
     } else {
@@ -112,7 +115,7 @@ fn resolve_use_path(base: &Path, path: &str) -> Vec<PathBuf> {
     if path.ends_with(".mc") {
         return vec![base.join(path)];
     }
-    
+
     if path.contains('/') {
         // Multi-segment: directly add .mc
         vec![base.join(format!("{path}.mc"))]

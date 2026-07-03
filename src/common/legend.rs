@@ -42,7 +42,7 @@ pub const LEGEND_MODIFIER: &[SemanticTokenModifier] = &[
 
 /// mcode element → (legend_type_index, modifier_bitmap)
 ///
-/// These are **conventions**: in `features::semantic_tokens::convert`, map mcc's
+/// These are **conventions**: in `features::semtok::convert`, map mcc's
 /// `McSemToken.type_` field to the indices defined here.
 pub mod type_map {
     pub const T_STRING: u32 = 0;

@@ -5,8 +5,8 @@
 //! - Cross-file jump target URI + span comes from `global_table` (shared by all files)
 //!
 //! This module maintains a **ProjectIndex**: caches metadata of all registered files'
-//! `(uri, span, name)`, for `features::goto_definition` /
-//! `features::references` to query when current file misses.
+//! `(uri, span, name)`, for `features::gotodef` /
+//! `features::refs` to query when current file misses.
 //!
 //! ## Data flow
 //!
