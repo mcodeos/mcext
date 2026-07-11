@@ -80,13 +80,13 @@ pub fn resolve(
         );
     }
 
-    // First, try to resolve use statement jump (before or instead of symbol resolution)
-    if let Some(response) = resolve_use_jump(uri, offset, &rope) {
+    // First, try to resolve use statement jump
+    if let Some(response) = resolve_use_jump(uri, offset, &rope, state) {
         info!("goto_def: resolved use statement jump");
         return Some(response);
     }
 
-    // If no use statement, try symbol resolution
+    // Try symbol resolution
     if intervals.is_empty() {
         info!("goto_def: no symbol found at offset {}", offset);
         return None;
@@ -209,76 +209,43 @@ pub fn resolve(
 
     None
 }
-
 /// Resolve use statement jump - navigate to the target file when cursor is on a use path
-fn resolve_use_jump(uri: &Url, offset: usize, rope: &Rope) -> Option<GotoDefinitionResponse> {
-    // Get current line
+fn resolve_use_jump(uri: &Url, offset: usize, rope: &Rope, _state: &WorkspaceState) -> Option<GotoDefinitionResponse> {
     let line_idx = rope.try_byte_to_line(offset).ok()?;
-
-    // Get line text
     let line_text = rope.get_line(line_idx)?.to_string();
-    info!("goto_def: use_jump line_text = {:?}", line_text);
 
-    // Parse use statement
     let Some(path) = parse_use_path(&line_text) else {
-        info!("goto_def: use_jump parse_use_path returned None");
         return None;
     };
-    let (prefix, use_path) = path;
-    info!(
-        "goto_def: use_jump parsed: prefix={:?}, use_path={:?}",
-        prefix, use_path
-    );
+    let (_prefix, use_path) = path;
 
-    // Get current file directory
     let current_file = uri.to_file_path().ok()?;
     let current_dir = current_file.parent()?;
-    info!("goto_def: use_jump current_dir = {:?}", current_dir);
 
-    // Resolve target path
     let candidates = resolve_use_path(current_dir, use_path);
-    info!("goto_def: use_jump candidates = {:?}", candidates);
-
     let Some(target) = candidates.iter().find(|p| p.exists()) else {
-        info!("goto_def: use_jump: no existing file found");
         return None;
     };
-    info!("goto_def: use_jump target = {:?}", target);
-
-    // Calculate the range - use the path part without the ./ prefix for highlighting
-    // This avoids issues with VS Code's word separator on '.'
-    let path_only = use_path; // e.g., "power.mc"
-    let range_start_in_line = line_text.find(path_only)?;
 
     let target_url = Url::from_file_path(target).ok()?;
-    let range = Range::new(
-        Position::new(line_idx as u32, range_start_in_line as u32),
-        Position::new(
-            line_idx as u32,
-            (range_start_in_line + path_only.len()) as u32,
-        ),
-    );
+    // Jump to file start (0,0) — avoids Cmd+hover preview line for use statements
+    let target_range = Range::new(Position::new(0, 0), Position::new(0, 0));
 
-    info!("goto_def: use_jump SUCCESS: returning {:?}", target_url);
     Some(GotoDefinitionResponse::Scalar(Location::new(
-        target_url, range,
+        target_url, target_range,
     )))
 }
 
-/// Parse use path from line text, return (prefix, path) or None
 fn parse_use_path(line: &str) -> Option<(&'static str, &str)> {
     let trimmed = line.trim();
     let after_use = trimmed
         .strip_prefix("pub use")
         .or_else(|| trimmed.strip_prefix("use"))?
         .trim();
-
-    // Get first whitespace-separated token (the path, without trailing comments)
     let path = after_use.split_whitespace().next()?;
     if path.is_empty() {
         return None;
     }
-
     if let Some(p) = path.strip_prefix("./") {
         Some(("./", p))
     } else if let Some(p) = path.strip_prefix("../") {
@@ -288,13 +255,10 @@ fn parse_use_path(line: &str) -> Option<(&'static str, &str)> {
     }
 }
 
-/// Resolve use path to candidate file paths
 fn resolve_use_path(base: &std::path::Path, path: &str) -> Vec<std::path::PathBuf> {
-    // If path already has .mc extension, use it directly
     if path.ends_with(".mc") {
         return vec![base.join(path)];
     }
-
     if path.contains('/') {
         vec![base.join(format!("{path}.mc"))]
     } else {

@@ -551,6 +551,8 @@ impl LanguageServer for Backend {
                 document_range_formatting_provider: Some(OneOf::Left(true)),
                 // Phase 4.3: inline hints
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                // Phase 5: hover
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 // Note: document_link_provider disabled to avoid underlines on use statements
                 // Use F12 (goto definition) to navigate to use targets instead
                 // document_link_provider: Some(DocumentLinkOptions { ... }),
@@ -882,20 +884,15 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    // Phase 5: use file jump (document links)
-    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
-        let uri = params.text_document.uri.clone();
-        let span = tracing::debug_span!("document_link", uri = %uri.path());
+    // Phase 5: document links disabled — hover handles this now
+    async fn document_link(&self, _params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        Ok(None)
+    }
+
+    // Phase 5: hover
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let span = tracing::debug_span!("hover");
         let _guard = span.enter();
-
-        let rope = match self.state.document_rope(&uri) {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        Ok(crate::features::usejump::resolve_document_links(
-            &uri,
-            &rope.to_string(),
-        ))
+        Ok(crate::features::hover::resolve(&self.state, &params))
     }
 }
