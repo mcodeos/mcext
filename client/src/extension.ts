@@ -36,7 +36,7 @@ let client: LanguageClient;
 
 export async function activate(context: ExtensionContext) {
 
-  const traceOutputChannel = window.createOutputChannel("MCode Trace");
+  const traceOutputChannel = window.createOutputChannel("MCode");
   const command = process.env.SERVER_PATH || "mcodels";
   const run: Executable = {
     command,
@@ -66,7 +66,7 @@ export async function activate(context: ExtensionContext) {
   };
 
   // Create the language client and start the client.
-  client = new LanguageClient("mcodels", "MCode", serverOptions, clientOptions);
+  client = new LanguageClient("mcode", "MCode", serverOptions, clientOptions);
   // activateInlayHints(context);
   client.start();
 }

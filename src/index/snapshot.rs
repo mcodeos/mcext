@@ -36,6 +36,10 @@ pub struct ProjectIndex {
     /// Entry list indexed by (kind, name)
     by_name: HashMap<(IndexKind, String), Vec<IndexEntry>>,
 
+    /// Enum value rows indexed by (class_name, value_name). Stored separately
+    /// because the key is a tuple, not a single string.
+    enum_value_by_name: HashMap<(String, String), IndexEntry>,
+
     /// Files indexed by URI
     by_uri: HashMap<Url, ()>,
 }
@@ -57,6 +61,17 @@ impl ProjectIndex {
             .push(entry);
     }
 
+    /// Add an enum value row, keyed by (class_name, value_name).
+    pub fn add_enum_value(
+        &mut self,
+        class_name: impl Into<String>,
+        value_name: impl Into<String>,
+        entry: IndexEntry,
+    ) {
+        self.enum_value_by_name
+            .insert((class_name.into(), value_name.into()), entry);
+    }
+
     /// Mark file as existing
     pub fn add_file(&mut self, uri: Url) {
         if self.by_uri.insert(uri.clone(), ()).is_none() {
@@ -72,6 +87,8 @@ impl ProjectIndex {
             entries.retain(|e| &e.uri != uri);
         }
         self.by_name.retain(|_, v| !v.is_empty());
+        self.enum_value_by_name
+            .retain(|_, e| &e.uri != uri);
     }
 
     /// Lookup all entries for (kind, name)
@@ -80,6 +97,18 @@ impl ProjectIndex {
             .get(&(kind, name.to_string()))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Lookup an enum value row by (class, value). Returns the entry whose
+    /// span is the body row of the value inside the class — for F12 on
+    /// `PKG.SOP8`, jump to that span.
+    pub fn lookup_enum_value(
+        &self,
+        class_name: &str,
+        value_name: &str,
+    ) -> Option<&IndexEntry> {
+        self.enum_value_by_name
+            .get(&(class_name.to_string(), value_name.to_string()))
     }
 
     /// Lookup all entries for a file (across kinds)
@@ -97,7 +126,8 @@ impl ProjectIndex {
 
     /// Count number of entries (for testing)
     pub fn len(&self) -> usize {
-        self.by_name.values().map(|v| v.len()).sum()
+        self.by_name.values().map(|v| v.len()).sum::<usize>()
+            + self.enum_value_by_name.len()
     }
 }
 
@@ -108,6 +138,7 @@ pub fn build_from_mcb_iter(
     interfaces: Vec<(String, String)>,
     enums: Vec<(String, String)>,
     modules: Vec<(String, String)>,
+    enum_values: Vec<crate::rpc::EnumValueEntry>,
 ) -> ProjectIndex {
     let mut idx = ProjectIndex::new();
     idx.project_root = project_root;
@@ -159,6 +190,22 @@ pub fn build_from_mcb_iter(
                     uri: uri.clone(),
                     span: (0, 0),
                     name,
+                },
+            );
+            idx.add_file(uri);
+        }
+    }
+    for entry in enum_values {
+        if let Some(uri) = url_from_path(&entry.uri) {
+            let span = (entry.span[0], entry.span[1]);
+            let value_name = entry.name.clone();
+            idx.add_enum_value(
+                entry.class,
+                value_name.clone(),
+                IndexEntry {
+                    uri: uri.clone(),
+                    span,
+                    name: value_name,
                 },
             );
             idx.add_file(uri);
@@ -260,9 +307,42 @@ mod tests {
             vec![("Power".into(), "/proj/power.mc".into())],
             vec![],
             vec![],
+            vec![],
         );
         assert_eq!(idx.lookup(IndexKind::Component, "USB").len(), 1);
         assert_eq!(idx.lookup(IndexKind::Interface, "Power").len(), 1);
         assert!(idx.lookup(IndexKind::Component, "Nonexistent").is_empty());
+    }
+
+    #[test]
+    fn enum_value_lookup_by_class_and_value() {
+        use crate::rpc::EnumValueEntry;
+        let idx = build_from_mcb_iter(
+            Some(PathBuf::from("/proj")),
+            vec![],
+            vec![],
+            vec![("PKG".into(), "/proj/pkg.mc".into())],
+            vec![],
+            vec![
+                EnumValueEntry {
+                    class: "PKG".into(),
+                    name: "SOP8".into(),
+                    uri: "/proj/pkg.mc".into(),
+                    span: [10, 14],
+                },
+                EnumValueEntry {
+                    class: "PKG".into(),
+                    name: "QFN20".into(),
+                    uri: "/proj/pkg.mc".into(),
+                    span: [20, 25],
+                },
+            ],
+        );
+        let e = idx
+            .lookup_enum_value("PKG", "SOP8")
+            .expect("SOP8 row registered");
+        assert_eq!(e.span, (10, 14));
+        assert_eq!(e.name, "SOP8");
+        assert!(idx.lookup_enum_value("PKG", "Nonexistent").is_none());
     }
 }

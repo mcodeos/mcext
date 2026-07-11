@@ -187,12 +187,32 @@ pub struct ProjectSymbolsResponse {
     pub interfaces: Vec<SymbolEntry>,
     pub enums: Vec<SymbolEntry>,
     pub modules: Vec<SymbolEntry>,
+    /// ★ enum value rows: one per `enum Foo { VALUE }` body row.
+    /// Addresses this: jump-to-definition needs (class, value) -> span.
+    #[serde(default)]
+    pub enum_values: Vec<EnumValueEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SymbolEntry {
     pub name: String,
     pub uri: String,
+    /// Byte span [start, end) of the class head (e.g. `enum PKG { ... }`).
+    /// Older mcc servers may omit this — default to [0, 0] in that case.
+    #[serde(default)]
+    pub span: [usize; 2],
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnumValueEntry {
+    /// Owning enum class name (e.g. "PKG").
+    pub class: String,
+    /// Value name (e.g. "SOP8").
+    pub name: String,
+    pub uri: String,
+    /// Byte span [start, end) of the value row (e.g. `SOP8,` inside the body).
+    #[serde(default)]
+    pub span: [usize; 2],
 }
 
 #[derive(Debug, Clone, Deserialize)]

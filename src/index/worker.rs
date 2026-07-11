@@ -7,7 +7,7 @@
 //! Broadcasts new snapshots to LSP handlers via `watch::channel`.
 
 use super::snapshot::{build_from_mcb_iter, ProjectIndex};
-use crate::rpc::SymbolEntry;
+use crate::rpc::{EnumValueEntry, SymbolEntry};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -28,6 +28,9 @@ pub enum IndexCommand {
         interfaces: Vec<SymbolEntry>,
         enums: Vec<SymbolEntry>,
         modules: Vec<SymbolEntry>,
+        /// ★ enum value rows project-wide, fed by IndexWorker from the
+        ///   `project_symbols` RPC. Lets F12 jump on `PKG.SOP8`.
+        enum_values: Vec<EnumValueEntry>,
     },
 }
 
@@ -109,13 +112,15 @@ fn worker_loop(
                 interfaces,
                 enums,
                 modules,
+                enum_values,
             } => {
                 debug!(
-                    "worker: UpdateProjectSymbols components={} interfaces={} enums={} modules={}",
+                    "worker: UpdateProjectSymbols components={} interfaces={} enums={} modules={} enum_values={}",
                     components.len(),
                     interfaces.len(),
                     enums.len(),
-                    modules.len()
+                    modules.len(),
+                    enum_values.len()
                 );
                 let components_tuples: Vec<_> =
                     components.into_iter().map(|c| (c.name, c.uri)).collect();
@@ -130,6 +135,7 @@ fn worker_loop(
                     interfaces_tuples,
                     enums_tuples,
                     modules_tuples,
+                    enum_values,
                 );
                 let _ = snap_tx.send(current.clone());
             }

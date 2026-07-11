@@ -38,14 +38,14 @@
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
         // "${workspaceFolder}/../mcd/unitest/project"
-        // "${workspaceFolder}/../mcd/projects/hbl"
+        "${workspaceFolder}/../mcd/projects/hbl"
         // "${workspaceFolder}/../mcd/unitest/cases"
         // "${workspaceFolder}/../mcd/unitest/cases2"
         // "${workspaceFolder}/../mcd/unitest/data"
         // "${workspaceFolder}/../mcd/unitest/nets"
         // "${workspaceFolder}/../mcd/unitest/param"
         // "${workspaceFolder}/../mcd/unitest/project"
-        "${workspaceFolder}/../mcode"
+        // "${workspaceFolder}/../mcode"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "build: all",
