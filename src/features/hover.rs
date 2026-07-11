@@ -126,6 +126,7 @@ fn extract_all_signatures_from_text(content: &str) -> Vec<String> {
         if trimmed.starts_with("component ")
             || trimmed.starts_with("interface ")
             || trimmed.starts_with("module ")
+            || trimmed.starts_with("enum ")
         {
             // Start of a new definition
             if in_def {
