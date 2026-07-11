@@ -105,13 +105,13 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
         match c {
             '{' => {
                 if !line_start || result.ends_with(' ') {
-                    // 不在行首时不加空格
+                    // No space needed here
                 }
                 result.push('{');
                 indent_level += 1;
                 in_line = false;
 
-                // 检查下一行是否为空或只有注释
+                // Check if next line is empty or has only comments
                 skip_whitespace_and_comments(&mut chars);
                 if let Some(&'\n') = chars.peek() {
                     chars.next();
@@ -129,7 +129,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 result.push('}');
                 in_line = false;
 
-                // 检查是否需要换行
+                // Check if newline is needed
                 skip_whitespace_and_comments(&mut chars);
                 if let Some(&c) = chars.peek() {
                     if c == ',' || c == ';' {
@@ -150,17 +150,17 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
             }
             c if c.is_whitespace() => {
                 if in_line && c == ' ' && !line_start {
-                    // 行内空格保留
+                    // Preserve inline spaces
                     if !result.ends_with(' ') && !result.ends_with('\t') {
                         result.push(' ');
                     }
                 } else if c == '\t' {
-                    // 制表符转空格
+                    // Convert tabs to spaces
                     if !result.ends_with('\t') {
                         result.push(' ');
                     }
                 }
-                // 换行和行首空格已处理
+                // Newlines and line-start spaces handled above
                 if c != '\n' {
                     line_start = false;
                 }
@@ -170,7 +170,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 in_line = true;
                 skip_whitespace_and_comments(&mut chars);
                 if let Some(&'\n') = chars.peek() {
-                    // 不处理，让换行逻辑处理
+                    // Let newline logic handle it
                 } else {
                     result.push(' ');
                 }
@@ -181,9 +181,9 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 in_line = false;
                 skip_whitespace_and_comments(&mut chars);
                 if let Some(&'\n') = chars.peek() {
-                    // 不处理，让换行逻辑处理
+                    // Let newline logic handle it
                 } else if let Some(&'/') = chars.peek() {
-                    // 注释后面换行
+                    // Newline after comment
                 } else {
                     result.push('\n');
                     add_indent(&mut result, indent_level, options.indent_size);
@@ -191,9 +191,9 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 line_start = true;
             }
             '/' => {
-                // 检查是否是注释
+                // Check if this is a comment
                 if let Some(&'/') = chars.peek() {
-                    // 行注释
+                    // Line comment
                     while let Some(&c) = chars.peek() {
                         if c == '\n' {
                             break;
@@ -216,7 +216,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 line_start = false;
                 skip_whitespace_and_comments(&mut chars);
                 if let Some(&']') = chars.peek() {
-                    // 空数组
+                    // Empty array
                 } else if let Some(&c) = chars.peek() {
                     if !c.is_whitespace() {
                         // result.push(' ');
@@ -230,7 +230,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
             }
             _ => {
                 if line_start && !result.ends_with('\n') && !result.is_empty() {
-                    // 行首检查
+                    // Line start check
                 }
                 result.push(c);
                 in_line = true;
@@ -239,7 +239,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
         }
     }
 
-    // 清理末尾空行
+    // Clean up trailing empty lines
     while result.ends_with('\n') {
         result.pop();
     }
@@ -248,7 +248,7 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
     Some(result)
 }
 
-/// 跳过空白和注释
+/// Skip whitespace and comments
 fn skip_whitespace_and_comments(chars: &mut std::iter::Peekable<std::str::Chars>) {
     while let Some(&c) = chars.peek() {
         if c.is_whitespace() && c != '\n' {
@@ -263,7 +263,7 @@ fn skip_whitespace_and_comments(chars: &mut std::iter::Peekable<std::str::Chars>
                     chars.next();
                 }
             } else {
-                // 不是注释，把 / 放回去
+                // Not a comment, put back the '/'
                 break;
             }
         } else {
@@ -272,7 +272,7 @@ fn skip_whitespace_and_comments(chars: &mut std::iter::Peekable<std::str::Chars>
     }
 }
 
-/// 添加缩进
+/// Add indentation
 fn add_indent(result: &mut String, level: usize, indent_size: usize) {
     for _ in 0..level {
         for _ in 0..indent_size {
@@ -281,12 +281,12 @@ fn add_indent(result: &mut String, level: usize, indent_size: usize) {
     }
 }
 
-/// 计算两个文本之间的 diff edits
+/// Calculate diff edits between two texts
 pub fn diff_edits(rope: &Rope, new_text: &str) -> Vec<TextEdit> {
     use tower_lsp::lsp_types::Position;
 
-    // 简单的全量替换
-    // 后续可以优化为真正的 diff 算法
+    // Simple full replacement
+    // TODO: optimize to true diff algorithm
     let start = Position::new(0, 0);
     let end = if rope.len_lines() > 0 {
         let last_line_idx = rope.len_lines() - 1;
@@ -321,7 +321,7 @@ mod tests {
         let rope = Rope::from_str(text);
         let uri = Url::parse("file:///test.mc").unwrap();
         let result = format_document(&uri, &rope, None);
-        // 简单文本可能没有变化
+        // Simple text may have no changes
         assert!(result.is_none() || result.is_some());
     }
 
@@ -331,7 +331,7 @@ mod tests {
         let rope = Rope::from_str(text);
         let uri = Url::parse("file:///test.mc").unwrap();
         let result = format_document(&uri, &rope, None);
-        // 格式化结果可能 Some 或 None（取决于是否有变化）
+        // Result may be Some or None depending on whether changes were made
         assert!(result.is_some() || result.is_none());
     }
 
@@ -341,7 +341,7 @@ mod tests {
         let rope = Rope::from_str(text);
         let uri = Url::parse("file:///test.mc").unwrap();
 
-        // 格式化第二行
+        // Format second line
         let range = Range::new(Position::new(1, 0), Position::new(1, 15));
         let result = format_range(&uri, &rope, range, None);
         assert!(result.is_some());

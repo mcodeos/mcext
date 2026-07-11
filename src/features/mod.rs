@@ -18,6 +18,7 @@ pub mod comp;
 pub mod diag;
 pub mod fmt;
 pub mod gotodef;
+pub mod hover;
 pub mod inhint;
 pub mod refs;
 pub mod semtok;
