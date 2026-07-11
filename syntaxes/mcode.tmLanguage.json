@@ -17,6 +17,9 @@
       "include": "#numbers"
     },
     {
+      "include": "#constants"
+    },
+    {
       "include": "#identifiers"
     },
     {
@@ -41,7 +44,7 @@
       "patterns": [
         {
           "name": "keyword.control.mcode",
-          "match": "\\b(component|interface|enum|function|property|config|pins|meta|use|on|if|else|for|while|return|var|const|true|false|null)\\b"
+          "match": "\\b(component|interface|module|enum|func|define|pub|use|as|this|pins|role|in|out|io|ps|anl|nc|if|else|return|true|false|null)\\b"
         },
         {
           "name": "keyword.operator.mcode",
@@ -83,6 +86,18 @@
       "patterns": [
         {
           "match": "\\b(0x[0-9a-fA-F]+|[0-9]+\\.?[0-9]*([eE][+-]?[0-9]+)?)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.mcode",
+          "match": "\\b(HIGH|LOW|NC)\\b"
+        },
+        {
+          "name": "support.type.mcode",
+          "match": "\\b(UV\\.(VOLT|AMP|CAP|IND|TIME|LEN|WAT|OHM|TEMP|HZ|DB|PPM|PERCENT|BAUD|DATASIZE|SPS|SIEMENS|RESPONSIVITY|ANGLE|ANGULAR_RATE|ENERGY|EFIELD|HFIELD|FLUX|BFIELD|SLEW|NOISE))\\b"
         }
       ]
     },
