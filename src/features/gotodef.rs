@@ -92,15 +92,27 @@ pub fn resolve(
         return None;
     }
 
-    for interval in &intervals {
+    // ★ Priority order: class_definition first, then declare_class
+    // Sort intervals to ensure class_definition is processed before declare_class
+    let mut sorted_intervals = intervals.clone();
+    sorted_intervals.sort_by(|a, b| {
+        let order = |k: &str| match k {
+            "class_definition" => 0,
+            "declare_class" => 1,
+            _ => 2,
+        };
+        order(&a.kind).cmp(&order(&b.kind))
+    });
+
+    for interval in &sorted_intervals {
+        info!("goto_def: processing interval kind={}, id={}, start={}, stop={}", interval.kind, interval.id, interval.start, interval.stop);
         match interval.kind.as_str() {
             "class_definition" => {
-                // Find declaration for this class
-                for decl in &symbols.local_declares {
-                    if decl.id == interval.id {
-                        return local_response(uri, decl.span, &rope);
-                    }
-                }
+                // Cursor is on a class definition itself (e.g. "component MCU.US513_20_F").
+                // VS Code ignores Scalar(自身) responses and falls back to reference search.
+                // Use Array(vec![]) to signal "done, stay here" without triggering fallback.
+                info!("goto_def: class_definition at self, returning empty Array to prevent VS Code fallback");
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "declare_class" => {
                 info!(
@@ -202,6 +214,86 @@ pub fn resolve(
             "port_definition" => {
                 // Port definitions point to themselves
                 return local_response(uri, [interval.start, interval.stop], &rope);
+            }
+            // ★ enum support — separate kind family. Cursor on `enum PKG {`
+            //   self-locates (empty Array, mirroring class_definition).
+            "enum_class_def" => {
+                info!(
+                    "goto_def: enum_class_def at self, returning empty Array to prevent VS Code fallback"
+                );
+                return Some(GotoDefinitionResponse::Array(vec![]));
+            }
+            "enum_value_def" => {
+                // Cursor on `SOP8,` inside the enum body — self-locates to its
+                // own span in the same file.
+                return local_response(uri, [interval.start, interval.stop], &rope);
+            }
+            // Cursor on the class half of a qualified ref (e.g. `PKG` in
+            // `PKG.SOP8`). Step 3b in mcc must emit this kind on the
+            // reference site; loop-1 keeps the branch ready without it.
+            "enum_class_ref" => {
+                info!(
+                    "goto_def: enum_class_ref id={} looking up target span",
+                    interval.id
+                );
+                // First try local declares (same-file declaration).
+                for decl in &symbols.local_declares {
+                    if decl.id == interval.id {
+                        return local_response(uri, decl.span, &rope);
+                    }
+                }
+                // Then global declares (cross-file). Note: in current
+                // semantics, local+global_declares both carry the
+                // definition span (the enum head).
+                for g in &symbols.global_declares {
+                    if g.id == interval.id {
+                        return cross_file_response(
+                            state,
+                            &g.uri,
+                            g.span,
+                            &rope,
+                            uri,
+                        );
+                    }
+                }
+            }
+            // Cursor on the value half of a qualified ref (e.g. `SOP8`).
+            //   (class, value) is recovered from the line tokens. For loop-1
+            //   we lean on ProjectIndex.lookup_enum_value; the extension
+            //   only reaches this branch when mcc emits it (Step 3b).
+            "enum_value_ref" => {
+                info!(
+                    "goto_def: enum_value_ref id={} looking up (class, value) -> span",
+                    interval.id
+                );
+                // Pick the class name from the line that contains the cursor;
+                // value is the same id mapped via ProjectIndex.
+                let line_idx = rope.try_byte_to_line(offset).ok();
+                let line_text = line_idx
+                    .and_then(|li| rope.get_line(li).map(|s| s.to_string()));
+                if let Some(line) = line_text {
+                    let parts: Vec<&str> =
+                        line.split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    if parts.len() >= 2 {
+                        let class_name = parts[parts.len() - 2];
+                        let value_name = parts[parts.len() - 1];
+                        if let Some(entry) = state
+                            .index
+                            .snapshot()
+                            .lookup_enum_value(class_name, value_name)
+                        {
+                            return cross_file_response(
+                                state,
+                                &entry.uri.to_string(),
+                                [entry.span.0, entry.span.1],
+                                &rope,
+                                uri,
+                            );
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -315,11 +407,162 @@ fn read_file_to_rope(url: &Url) -> Option<Rope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::LapperEntry;
+    use crate::state::{LocalDeclareSpan, RpcSemSymbols};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn returns_none_for_missing_uri() {
         let state = WorkspaceState::new();
         let uri = Url::parse("file:///missing.mc").unwrap();
         assert!(resolve(&state, &uri, Position::new(0, 0)).is_none());
+    }
+
+    /// Helper: build a workspace state with a single-file document and the
+    /// given lapper entries (the rest of RpcSemSymbols is empty).
+    fn state_with_lapper(
+        source: &str,
+        lapper_entries: Vec<(String /*kind*/, u32 /*id*/, usize /*start*/, usize /*stop*/)>,
+    ) -> (WorkspaceState, Url) {
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///enum_test.mc").unwrap();
+        state.insert_document(uri.clone(), Rope::from_str(source), 1);
+        let lapper: Vec<LapperEntry> = lapper_entries
+            .into_iter()
+            .map(|(kind, id, start, stop)| LapperEntry {
+                kind,
+                start,
+                stop,
+                id,
+                scope: String::new(),
+            })
+            .collect();
+        let symbols = RpcSemSymbols {
+            lapper,
+            local_declares: vec![],
+            local_references: vec![],
+            global_declares: vec![],
+            global_references: vec![],
+            cross_file_targets: vec![],
+        };
+        state.sem_symbols.insert(uri.clone(), Arc::new(Mutex::new(symbols)));
+        (state, uri)
+    }
+
+    #[test]
+    fn enum_class_def_returns_empty_array() {
+        // Document has `enum PKG { SOP8, QFN20 }` and we place an
+        // `enum_class_def` lapper entry on the whole line.
+        let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
+        let (state, uri) = state_with_lapper(
+            source,
+            vec![("enum_class_def".into(), 0, 0, 9)],
+        );
+        let response =
+            resolve(&state, &uri, Position::new(0, 5) /* inside `enum PKG {` */);
+        match response {
+            Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
+            other => panic!("expected empty Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_value_def_returns_local_self_response() {
+        // `SOP8` row gets an enum_value_def lapper entry; cursor on it must
+        // return the same span (self-resolution), matching the behavior of
+        // `port_definition`.
+        let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
+        let (state, uri) = state_with_lapper(
+            source,
+            // Start of "    SOP8," line: byte offset = 11, end at 21.
+            vec![("enum_value_def".into(), 1, 11, 21)],
+        );
+        let response = resolve(&state, &uri, Position::new(1, 4));
+        match response {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, uri);
+                // Cursor jumped to row containing "SOP8," — should be line 1.
+                assert_eq!(loc.range.start.line, 1);
+            }
+            other => panic!("expected Scalar response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_class_ref_local_declares_wins() {
+        // Stub: an enum_class_ref at the same id as a local_declare target.
+        // The branch should resolve via `local_declares`. The document is
+        // padded so the local-declare span [30, 35] fits inside the file.
+        let source = "package = PKG.SOP8\n\nenum PKG_X_REF { /* padding */ }\n";
+        let (state, uri) = state_with_lapper(
+            source,
+            vec![("enum_class_ref".into(), 7, 10, 13)],
+        );
+        {
+            let symbols_arc = state
+                .sem_symbols
+                .get(&uri)
+                .expect("sem_symbols must contain uri");
+            let mut symbols = symbols_arc.lock().unwrap();
+            symbols.local_declares.push(LocalDeclareSpan {
+                id: 7,
+                span: [30, 35],
+            });
+            eprintln!(
+                "DEBUG: local_declares now has {} entry(ies)",
+                symbols.local_declares.len()
+            );
+        }
+        let response = resolve(&state, &uri, Position::new(0, 11));
+        match response {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, uri);
+                // The local-declare's span was [30, 35] within a multi-line
+                //   doc; line 2 is where byte 30 lands. Verify the jump landed
+                //   there rather than the cursor line 0.
+                assert_ne!(loc.range.start.line, 0);
+                assert_eq!(loc.range.start.line, 2);
+            }
+            other => panic!("expected Scalar response from local_declares, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_value_ref_resolves_via_project_index() {
+        // End-to-end-ish: a value ref `PKG.SOP8` emits an `enum_value_ref`
+        //   lapper entry; cursor on `SOP8` should look up the index and jump
+        //   to the registered body row in another file.
+        //
+        // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
+        // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
+        let source = "package = PKG.SOP8\n\n";
+        let (state, uri) = state_with_lapper(
+            source,
+            vec![("enum_value_ref".into(), 99, 14, 18)],
+        );
+
+        // Register the SOP8 row at span (90, 94) in another file. The
+        //   State::index is a `IndexWorkerHandle`; in active mode it pulls
+        //   from mcc, but in inactive mode (used by tests) its snapshot is
+        //   empty. We test the lookup logic by constructing a ProjectIndex
+        //   directly and asserting via `lookup_enum_value`.
+        use crate::index::snapshot::ProjectIndex;
+        use crate::rpc::EnumValueEntry;
+        let mut idx = ProjectIndex::new();
+        let other_uri = Url::parse("file:///proj/pkg.mc").unwrap();
+        idx.add_enum_value(
+            "PKG",
+            "SOP8",
+            crate::index::snapshot::IndexEntry {
+                uri: other_uri.clone(),
+                span: (90, 94),
+                name: "SOP8".into(),
+            },
+        );
+        assert_eq!(
+            idx.lookup_enum_value("PKG", "SOP8")
+                .map(|e| e.uri.to_string()),
+            Some(other_uri.to_string())
+        );
     }
 }

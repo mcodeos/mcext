@@ -142,6 +142,7 @@ fn find_first_definition_in_text(content: &str) -> (u32, u32) {
         if trimmed.starts_with("component ")
             || trimmed.starts_with("interface ")
             || trimmed.starts_with("module ")
+            || trimmed.starts_with("enum ")
         {
             // Find the start of the identifier
             let after_keyword = trimmed

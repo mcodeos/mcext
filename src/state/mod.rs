@@ -26,6 +26,10 @@ pub struct ProjectSymbolsCache {
     pub interfaces: Vec<SymbolEntry>,
     pub enums: Vec<SymbolEntry>,
     pub modules: Vec<SymbolEntry>,
+    /// ★ Per-value rows of every `enum Foo { BAR, BAZ }` declared in the
+    ///   project. Used by F12 on `Foo.BAR` in usage sites.
+    #[allow(dead_code)]
+    pub enum_values: Vec<crate::rpc::EnumValueEntry>,
 }
 
 /// ★ RPC-based semantic tokens (replaces McSemTokensArcCell)

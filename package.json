@@ -1,10 +1,10 @@
 {
-	"name": "mcodels",
-	"displayName": "MCode Language Server",
+	"name": "mcode",
+	"displayName": "MCode",
 	"description": "mcode language server",
-	"publisher": "mcodels",
+	"publisher": "MCode",
 	"license": "MIT",
-	"version": "0.1.0",
+	"version": "0.5.1",
 	"categories": [
 		"Programming Languages"
 	],

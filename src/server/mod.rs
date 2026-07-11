@@ -467,13 +467,54 @@ impl LanguageServer for Backend {
             if let Some(server) = server_guard.as_ref() {
                 if let Some(client) = server.client() {
                     if let Ok(resp) = client.project_symbols().await {
+                        // Clone the enum lists once so the cache fill and the
+                        // index-worker push don't fight over ownership.
+                        let enum_class_entries = resp.enums.clone();
+                        let enum_value_entries = resp.enum_values.clone();
                         if let Ok(mut cache) = state_clone.project_symbols.lock() {
                             cache.components = resp.components;
                             cache.interfaces = resp.interfaces;
-                            cache.enums = resp.enums;
+                            cache.enums = enum_class_entries.clone();
                             cache.modules = resp.modules;
+                            cache.enum_values = enum_value_entries.clone();
                             debug!("Updated project symbols cache for completion");
                         }
+                        // ★ Push enum class+value entries into the index worker
+                        //   so F12 on `PKG.SOP8` has the (class, value) -> span
+                        //   target loaded.
+                        let state_for_index = state_clone.clone();
+                        tokio::spawn(async move {
+                            // Reuse the existing UpdateProjectSymbols command to
+                            // refresh the whole snapshot — keeps enum values in
+                            // sync with components/interfaces/enums/modules.
+                            let components = if let Ok(c) = state_for_index.project_symbols.lock()
+                            {
+                                c.components.clone()
+                            } else {
+                                vec![]
+                            };
+                            let interfaces = if let Ok(c) = state_for_index.project_symbols.lock()
+                            {
+                                c.interfaces.clone()
+                            } else {
+                                vec![]
+                            };
+                            let modules = if let Ok(c) = state_for_index.project_symbols.lock()
+                            {
+                                c.modules.clone()
+                            } else {
+                                vec![]
+                            };
+                            let _ = state_for_index.index.send(
+                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
+                                    components,
+                                    interfaces,
+                                    enums: enum_class_entries,
+                                    modules,
+                                    enum_values: enum_value_entries,
+                                },
+                            );
+                        });
                     }
                 }
             }
