@@ -129,6 +129,11 @@ impl ProjectIndex {
         self.by_name.values().map(|v| v.len()).sum::<usize>()
             + self.enum_value_by_name.len()
     }
+
+    /// Number of enum-value entries in the project index.
+    pub fn enum_value_len(&self) -> usize {
+        self.enum_value_by_name.len()
+    }
 }
 
 /// Build ProjectIndex from mcc iterators
@@ -136,7 +141,7 @@ pub fn build_from_mcb_iter(
     project_root: Option<PathBuf>,
     components: Vec<(String, String)>,
     interfaces: Vec<(String, String)>,
-    enums: Vec<(String, String)>,
+    enums: Vec<(String, String, [usize; 2])>,
     modules: Vec<(String, String)>,
     enum_values: Vec<crate::rpc::EnumValueEntry>,
 ) -> ProjectIndex {
@@ -169,13 +174,13 @@ pub fn build_from_mcb_iter(
             idx.add_file(uri);
         }
     }
-    for (name, uri_str) in enums {
+    for (name, uri_str, span) in enums {
         if let Some(uri) = url_from_path(&uri_str) {
             idx.add(
                 IndexKind::Enum,
                 IndexEntry {
                     uri: uri.clone(),
-                    span: (0, 0),
+                    span: (span[0], span[1]),
                     name,
                 },
             );
@@ -321,7 +326,7 @@ mod tests {
             Some(PathBuf::from("/proj")),
             vec![],
             vec![],
-            vec![("PKG".into(), "/proj/pkg.mc".into())],
+            vec![("PKG".into(), "/proj/pkg.mc".into(), [0, 0])],
             vec![],
             vec![
                 EnumValueEntry {
