@@ -354,6 +354,7 @@ impl LanguageServer for Backend {
         let mcc_server = self.mcc_server.clone();
         let project_root_clone = project_root.clone();
         let cfg_system_root = cfg.system_root.clone();
+        let state_for_init = self.state.clone();
         tokio::spawn(async move {
             let mut server_guard = mcc_server.write().await;
             if let Some(ref mut server) = *server_guard {
@@ -415,6 +416,38 @@ impl LanguageServer for Backend {
                                     } else {
                                         info!("Successfully loaded project entry: {}", entry);
                                     }
+
+                                    // ★ Fetch project symbols AFTER load_project
+                                    //    so the index (incl. enum values) is ready
+                                    //    before any F12 / goto-def request.
+                                    info!("Fetching project_symbols for index...");
+                                    if let Ok(resp) = client.project_symbols().await {
+                                        let ec = resp.enums.clone();
+                                        let ev = resp.enum_values.clone();
+                                        if let Ok(mut cache) = state_for_init.project_symbols.lock() {
+                                            cache.components = resp.components;
+                                            cache.interfaces = resp.interfaces;
+                                            cache.enums = ec.clone();
+                                            cache.modules = resp.modules;
+                                            cache.enum_values = ev.clone();
+                                        }
+                                        // Read back from cache to avoid
+                                        // partial-move issues with resp.
+                                        if let Ok(cache) = state_for_init.project_symbols.lock() {
+                                            let _ = state_for_init.index.send(
+                                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
+                                                    components: cache.components.clone(),
+                                                    interfaces: cache.interfaces.clone(),
+                                                    enums: cache.enums.clone(),
+                                                    modules: cache.modules.clone(),
+                                                    enum_values: cache.enum_values.clone(),
+                                                },
+                                            );
+                                        }
+                                        info!("project_symbols done → worker updated");
+                                    } else {
+                                        warn!("project_symbols RPC failed");
+                                    }
                                 }
                             }
                         }
@@ -458,67 +491,6 @@ impl LanguageServer for Backend {
                 root.display()
             );
         }
-
-        // ★ Fetch project symbols for completion and update cache
-        let state_clone = self.state.clone();
-        let mcc_server_clone = self.mcc_server.clone();
-        tokio::spawn(async move {
-            let server_guard = mcc_server_clone.read().await;
-            if let Some(server) = server_guard.as_ref() {
-                if let Some(client) = server.client() {
-                    if let Ok(resp) = client.project_symbols().await {
-                        // Clone the enum lists once so the cache fill and the
-                        // index-worker push don't fight over ownership.
-                        let enum_class_entries = resp.enums.clone();
-                        let enum_value_entries = resp.enum_values.clone();
-                        if let Ok(mut cache) = state_clone.project_symbols.lock() {
-                            cache.components = resp.components;
-                            cache.interfaces = resp.interfaces;
-                            cache.enums = enum_class_entries.clone();
-                            cache.modules = resp.modules;
-                            cache.enum_values = enum_value_entries.clone();
-                            debug!("Updated project symbols cache for completion");
-                        }
-                        // ★ Push enum class+value entries into the index worker
-                        //   so F12 on `PKG.SOP8` has the (class, value) -> span
-                        //   target loaded.
-                        let state_for_index = state_clone.clone();
-                        tokio::spawn(async move {
-                            // Reuse the existing UpdateProjectSymbols command to
-                            // refresh the whole snapshot — keeps enum values in
-                            // sync with components/interfaces/enums/modules.
-                            let components = if let Ok(c) = state_for_index.project_symbols.lock()
-                            {
-                                c.components.clone()
-                            } else {
-                                vec![]
-                            };
-                            let interfaces = if let Ok(c) = state_for_index.project_symbols.lock()
-                            {
-                                c.interfaces.clone()
-                            } else {
-                                vec![]
-                            };
-                            let modules = if let Ok(c) = state_for_index.project_symbols.lock()
-                            {
-                                c.modules.clone()
-                            } else {
-                                vec![]
-                            };
-                            let _ = state_for_index.index.send(
-                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
-                                    components,
-                                    interfaces,
-                                    enums: enum_class_entries,
-                                    modules,
-                                    enum_values: enum_value_entries,
-                                },
-                            );
-                        });
-                    }
-                }
-            }
-        });
 
         self.config.insert("current".to_string(), cfg);
 

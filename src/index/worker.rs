@@ -11,7 +11,7 @@ use crate::rpc::{EnumValueEntry, SymbolEntry};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Index worker commands
 #[derive(Debug, Clone)]
@@ -114,7 +114,7 @@ fn worker_loop(
                 modules,
                 enum_values,
             } => {
-                debug!(
+                info!(
                     "worker: UpdateProjectSymbols components={} interfaces={} enums={} modules={} enum_values={}",
                     components.len(),
                     interfaces.len(),
@@ -126,7 +126,8 @@ fn worker_loop(
                     components.into_iter().map(|c| (c.name, c.uri)).collect();
                 let interfaces_tuples: Vec<_> =
                     interfaces.into_iter().map(|i| (i.name, i.uri)).collect();
-                let enums_tuples: Vec<_> = enums.into_iter().map(|e| (e.name, e.uri)).collect();
+                let enums_tuples: Vec<_> =
+                    enums.into_iter().map(|e| (e.name, e.uri, e.span)).collect();
                 let modules_tuples: Vec<_> = modules.into_iter().map(|m| (m.name, m.uri)).collect();
 
                 current = build_from_mcb_iter(

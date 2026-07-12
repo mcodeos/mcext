@@ -37,11 +37,15 @@ pub fn resolve(
         );
     }
 
-    // Find symbol at cursor position using lapper
+    // Find symbol at cursor position using lapper.
+    // Use an inclusive upper bound (`offset <= stop`) so that placing the caret
+    // at the trailing edge of a token still resolves it. Identifier tokens are
+    // separated by non-identifier characters (`.`, whitespace, etc.), so the
+    // inclusive bound does not cause a caret to match an adjacent token.
     let intervals: Vec<_> = symbols
         .lapper
         .iter()
-        .filter(|i| offset >= i.start && offset < i.stop)
+        .filter(|i| offset >= i.start && offset <= i.stop)
         .collect();
 
     info!(
@@ -236,21 +240,22 @@ pub fn resolve(
                     "goto_def: enum_class_ref id={} looking up target span",
                     interval.id
                 );
-                // First try local declares (same-file declaration).
-                for decl in &symbols.local_declares {
-                    if decl.id == interval.id {
-                        return local_response(uri, decl.span, &rope);
-                    }
-                }
-                // Then global declares (cross-file). Note: in current
-                // semantics, local+global_declares both carry the
-                // definition span (the enum head).
-                for g in &symbols.global_declares {
-                    if g.id == interval.id {
+                // For system-library enums (e.g. `PKG` from mcode), the
+                // enum_class_ref id is a best-effort placeholder that can
+                // collide with unrelated local declares (e.g. a port_definition
+                // at id=0).  Always resolve via the project index.
+                let class_name = rope
+                    .byte_slice(interval.start..interval.stop)
+                    .to_string();
+                if !class_name.is_empty() {
+                    let snap = state.index.snapshot();
+                    let entries = snap
+                        .lookup(crate::index::snapshot::IndexKind::Enum, &class_name);
+                    if let Some(entry) = entries.first() {
                         return cross_file_response(
                             state,
-                            &g.uri,
-                            g.span,
+                            &entry.uri.to_string(),
+                            [entry.span.0, entry.span.1],
                             &rope,
                             uri,
                         );
@@ -266,33 +271,53 @@ pub fn resolve(
                     "goto_def: enum_value_ref id={} looking up (class, value) -> span",
                     interval.id
                 );
-                // Pick the class name from the line that contains the cursor;
-                // value is the same id mapped via ProjectIndex.
-                let line_idx = rope.try_byte_to_line(offset).ok();
-                let line_text = line_idx
-                    .and_then(|li| rope.get_line(li).map(|s| s.to_string()));
-                if let Some(line) = line_text {
-                    let parts: Vec<&str> =
-                        line.split(|c: char| !c.is_alphanumeric() && c != '_')
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    if parts.len() >= 2 {
-                        let class_name = parts[parts.len() - 2];
-                        let value_name = parts[parts.len() - 1];
-                        if let Some(entry) = state
-                            .index
-                            .snapshot()
-                            .lookup_enum_value(class_name, value_name)
-                        {
-                            return cross_file_response(
-                                state,
-                                &entry.uri.to_string(),
-                                [entry.span.0, entry.span.1],
-                                &rope,
-                                uri,
-                            );
-                        }
+                // Extract class + value names directly from the rope using
+                // the interval positions emitted by mcc. The enum_class_ref
+                // span covers the class name (e.g. "PKG") and sits immediately
+                // before the dot; the enum_value_ref span covers the member
+                // name (e.g. "QFN20").
+                //
+                // Previously we parsed the whole line by splitting on
+                // non-is_alphanumeric characters, but that breaks when there
+                // are CJK comments on the same line because is_alphanumeric()
+                // returns false for Chinese characters.
+                let value_name = rope
+                    .byte_slice(interval.start..interval.stop)
+                    .to_string();
+                let value_name_opt = if value_name.is_empty() {
+                    None
+                } else {
+                    Some(value_name)
+                };
+                let class_name = symbols
+                    .lapper
+                    .iter()
+                    .find(|i| i.kind == "enum_class_ref" && i.stop + 1 == interval.start)
+                    .map(|i| rope.byte_slice(i.start..i.stop).to_string())
+                    .and_then(|s| if s.is_empty() { None } else { Some(s) });
+                if let (Some(ref class_name), Some(ref value_name)) = (class_name, value_name_opt) {
+                    info!(
+                        "goto_def: enum_value_ref class={} value={}",
+                        class_name, value_name
+                    );
+                    if let Some(entry) = state
+                        .index
+                        .snapshot()
+                        .lookup_enum_value(&class_name, &value_name)
+                    {
+                        return cross_file_response(
+                            state,
+                            &entry.uri.to_string(),
+                            [entry.span.0, entry.span.1],
+                            &rope,
+                            uri,
+                        );
                     }
+                    info!(
+                        "goto_def: enum_value_ref lookup FAILED for {}.{} (snapshot enum_values={})",
+                        class_name, value_name,
+                        state.index.snapshot().enum_value_len()
+                    );
                 }
             }
             _ => {}
@@ -379,7 +404,7 @@ fn cross_file_response(
     current_rope: &Rope,
     current_uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
-    let target_url = Url::from_file_path(target_uri).ok()?;
+    let target_url = Url::parse(target_uri).ok()?;
 
     // Try to get rope from state or disk
     let target_rope = if let Some(r) = state.document_rope(&target_url) {
