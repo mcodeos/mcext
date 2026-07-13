@@ -141,13 +141,13 @@ impl MccRpcClient {
 
     /// List loaded libraries
     pub async fn lib_list(&self) -> Result<LibListResponse, RpcError> {
-        let result = self.call("library.list", json!({})).await?;
+        let result = self.call("lib.list", json!({})).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
     /// Get library info
     pub async fn lib_show(&self, name: &str) -> Result<LibShowResponse, RpcError> {
-        let result = self.call("library.show", json!({"name": name})).await?;
+        let result = self.call("lib.info", json!({"name": name})).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 }
