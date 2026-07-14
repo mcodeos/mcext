@@ -101,8 +101,8 @@ pub fn resolve(
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| {
         let order = |k: &str| match k {
-            "class_definition" => 0,
-            "declare_class" => 1,
+            "class_definition" | "function_definition" | "define_definition" | "role_definition" => 0,
+            "declare_class" | "class_ref" => 1,
             _ => 2,
         };
         order(&a.kind).cmp(&order(&b.kind))
@@ -120,10 +120,17 @@ pub fn resolve(
             }
             "declare_class" => {
                 info!(
-                    "goto_def: declare_class id={} trying cross_file_targets",
+                    "goto_def: declare_class id={} — looking for class_definition in lapper",
                     interval.id
                 );
-                // Cross-file: find target in cross_file_targets
+                // For same-file classes, the lapper has a `class_definition`
+                // with the same id at the true definition site.
+                for entry in &symbols.lapper {
+                    if entry.kind == "class_definition" && entry.id == interval.id {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // Fall back to cross_file_targets for system-library classes
                 for target in &symbols.cross_file_targets {
                     info!(
                         "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
@@ -139,15 +146,11 @@ pub fn resolve(
                         );
                     }
                 }
-                // Also check local declares
-                for decl in &symbols.local_declares {
-                    if decl.id == interval.id {
-                        return local_response(uri, decl.span, &rope);
-                    }
-                }
             }
             "declare_instance" => {
-                // Use lapper span directly (self-contained, avoids ID collision in local_declares)
+                // Instance declarations (e.g. `cap`, `uC`) are the definition
+                // site themselves. Point back to own span.
+                info!("goto_def: declare_instance id={} — self-locate", interval.id);
                 return local_response(uri, [interval.start, interval.stop], &rope);
             }
             "interface_ref" | "interface_reference" => {
@@ -320,6 +323,34 @@ pub fn resolve(
                     );
                 }
             }
+            // ── M6 gaps: new SymbolType variants ──
+            "function_definition" | "define_definition" | "role_definition" => {
+                // Self-locate: cursor on definition itself → stay
+                return Some(GotoDefinitionResponse::Array(vec![]));
+            }
+            "pin_name_definition" => {
+                // Self-locate via local_response
+                return local_response(uri, [interval.start, interval.stop], &rope);
+            }
+            "function_ref" | "method_ref" | "class_ref" | "pin_name_ref" => {
+                // Jump to definition via cross_file_targets
+                for target in &symbols.cross_file_targets {
+                    if target.ref_id == interval.id {
+                        return cross_file_response(
+                            state,
+                            &target.target_uri,
+                            [target.span[0], target.span[1]],
+                            &rope, uri,
+                        );
+                    }
+                }
+                // Fallback: search lapper for matching definition
+                for entry in &symbols.lapper {
+                    if entry.id == interval.id && entry.kind != interval.kind {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -404,7 +435,13 @@ fn cross_file_response(
     current_rope: &Rope,
     current_uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
-    let target_url = Url::parse(target_uri).ok()?;
+    // target_uri may be a `file://` URL (from enum/project index) or a bare
+    // path (from mcc cross_file_targets). Handle both forms.
+    let target_url = if target_uri.starts_with("file://") || target_uri.starts_with("untitled:") {
+        Url::parse(target_uri).ok()?
+    } else {
+        Url::from_file_path(target_uri).ok()?
+    };
 
     // Try to get rope from state or disk
     let target_rope = if let Some(r) = state.document_rope(&target_url) {

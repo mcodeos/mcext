@@ -734,6 +734,41 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         let span = tracing::debug_span!("goto_definition", uri = %uri.path(), line = pos.line, col = pos.character);
         let _guard = span.enter();
+
+        // If sem_symbols cache is missing (e.g. file was opened before mcc was
+        // ready), do an on-the-fly sem call to populate it.
+        if self.state.sem_symbols.get(&uri).is_none() {
+            if let Some(rope) = self.state.document_rope(&uri) {
+                let server_guard = self.mcc_server.read().await;
+                if let Some(server) = server_guard.as_ref() {
+                    if server.is_connected() {
+                        let text: String = rope.to_string();
+                        if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
+                            let rpc_symbols = crate::state::RpcSemSymbols {
+                                lapper: sem.symbols.lapper.clone(),
+                                local_declares: sem.symbols.local.declares.iter().map(|d| {
+                                    crate::state::LocalDeclareSpan { id: d.id, span: d.span }
+                                }).collect(),
+                                local_references: sem.symbols.local.references.clone(),
+                                global_declares: sem.symbols.global.declares.iter().map(|d| {
+                                    crate::state::GlobalDeclareSpan { id: d.id, uri: d.uri.clone(), span: d.span }
+                                }).collect(),
+                                global_references: sem.symbols.global.references.iter().map(|r| {
+                                    crate::state::GlobalReferenceSpan { id: r.id, uri: r.uri.clone(), span: r.span }
+                                }).collect(),
+                                cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
+                            };
+                            info!("goto_definition: on-the-fly sem populated for {}", uri.path());
+                            self.state.sem_symbols.insert(
+                                uri.clone(),
+                                Arc::new(std::sync::Mutex::new(rpc_symbols)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(crate::features::gotodef::resolve(&self.state, &uri, pos))
     }
 
