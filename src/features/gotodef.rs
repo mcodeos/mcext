@@ -101,7 +101,10 @@ pub fn resolve(
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| {
         let order = |k: &str| match k {
-            "class_definition" | "function_definition" | "define_definition" | "role_definition" => 0,
+            "class_definition"
+            | "function_definition"
+            | "define_definition"
+            | "role_definition" => 0,
             "declare_class" | "class_ref" => 1,
             _ => 2,
         };
@@ -109,7 +112,10 @@ pub fn resolve(
     });
 
     for interval in &sorted_intervals {
-        info!("goto_def: processing interval kind={}, id={}, start={}, stop={}", interval.kind, interval.id, interval.start, interval.stop);
+        info!(
+            "goto_def: processing interval kind={}, id={}, start={}, stop={}",
+            interval.kind, interval.id, interval.start, interval.stop
+        );
         match interval.kind.as_str() {
             "class_definition" => {
                 // Cursor is on a class definition itself (e.g. "component MCU.US513_20_F").
@@ -150,7 +156,10 @@ pub fn resolve(
             "declare_instance" => {
                 // Instance declarations (e.g. `cap`, `uC`) are the definition
                 // site themselves. Point back to own span.
-                info!("goto_def: declare_instance id={} — self-locate", interval.id);
+                info!(
+                    "goto_def: declare_instance id={} — self-locate",
+                    interval.id
+                );
                 return local_response(uri, [interval.start, interval.stop], &rope);
             }
             "interface_ref" | "interface_reference" => {
@@ -184,7 +193,7 @@ pub fn resolve(
                 // in different modules/components within the same file
                 let ref_scope = &interval.scope;
 
-                // First try exact (id, scope) match
+                // First try exact (id, scope) match for declare_instance
                 for entry in &symbols.lapper {
                     if entry.kind == "declare_instance"
                         && entry.id == interval.id
@@ -193,9 +202,25 @@ pub fn resolve(
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
-                // Fallback: id-only match (backward compat for unscoped entries)
+                // Fallback: id-only match for declare_instance
                 for entry in &symbols.lapper {
                     if entry.kind == "declare_instance" && entry.id == interval.id {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // ★ Component param ref → port_definition
+                // (e.g. `spec.value = rs` where rs is a component parameter)
+                for entry in &symbols.lapper {
+                    if entry.kind == "port_definition"
+                        && entry.id == interval.id
+                        && entry.scope == *ref_scope
+                    {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // id-only fallback for port_definition
+                for entry in &symbols.lapper {
+                    if entry.kind == "port_definition" && entry.id == interval.id {
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
@@ -247,13 +272,10 @@ pub fn resolve(
                 // enum_class_ref id is a best-effort placeholder that can
                 // collide with unrelated local declares (e.g. a port_definition
                 // at id=0).  Always resolve via the project index.
-                let class_name = rope
-                    .byte_slice(interval.start..interval.stop)
-                    .to_string();
+                let class_name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if !class_name.is_empty() {
                     let snap = state.index.snapshot();
-                    let entries = snap
-                        .lookup(crate::index::snapshot::IndexKind::Enum, &class_name);
+                    let entries = snap.lookup(crate::index::snapshot::IndexKind::Enum, &class_name);
                     if let Some(entry) = entries.first() {
                         return cross_file_response(
                             state,
@@ -284,9 +306,7 @@ pub fn resolve(
                 // non-is_alphanumeric characters, but that breaks when there
                 // are CJK comments on the same line because is_alphanumeric()
                 // returns false for Chinese characters.
-                let value_name = rope
-                    .byte_slice(interval.start..interval.stop)
-                    .to_string();
+                let value_name = rope.byte_slice(interval.start..interval.stop).to_string();
                 let value_name_opt = if value_name.is_empty() {
                     None
                 } else {
@@ -340,7 +360,8 @@ pub fn resolve(
                             state,
                             &target.target_uri,
                             [target.span[0], target.span[1]],
-                            &rope, uri,
+                            &rope,
+                            uri,
                         );
                     }
                 }
@@ -358,7 +379,12 @@ pub fn resolve(
     None
 }
 /// Resolve use statement jump - navigate to the target file when cursor is on a use path
-fn resolve_use_jump(uri: &Url, offset: usize, rope: &Rope, _state: &WorkspaceState) -> Option<GotoDefinitionResponse> {
+fn resolve_use_jump(
+    uri: &Url,
+    offset: usize,
+    rope: &Rope,
+    _state: &WorkspaceState,
+) -> Option<GotoDefinitionResponse> {
     let line_idx = rope.try_byte_to_line(offset).ok()?;
     let line_text = rope.get_line(line_idx)?.to_string();
 
@@ -380,7 +406,8 @@ fn resolve_use_jump(uri: &Url, offset: usize, rope: &Rope, _state: &WorkspaceSta
     let target_range = Range::new(Position::new(0, 0), Position::new(0, 0));
 
     Some(GotoDefinitionResponse::Scalar(Location::new(
-        target_url, target_range,
+        target_url,
+        target_range,
     )))
 }
 
@@ -484,7 +511,12 @@ mod tests {
     /// given lapper entries (the rest of RpcSemSymbols is empty).
     fn state_with_lapper(
         source: &str,
-        lapper_entries: Vec<(String /*kind*/, u32 /*id*/, usize /*start*/, usize /*stop*/)>,
+        lapper_entries: Vec<(
+            String, /*kind*/
+            u32,    /*id*/
+            usize,  /*start*/
+            usize,  /*stop*/
+        )>,
     ) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();
         let uri = Url::parse("file:///enum_test.mc").unwrap();
@@ -507,7 +539,9 @@ mod tests {
             global_references: vec![],
             cross_file_targets: vec![],
         };
-        state.sem_symbols.insert(uri.clone(), Arc::new(Mutex::new(symbols)));
+        state
+            .sem_symbols
+            .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
         (state, uri)
     }
 
@@ -516,12 +550,12 @@ mod tests {
         // Document has `enum PKG { SOP8, QFN20 }` and we place an
         // `enum_class_def` lapper entry on the whole line.
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(
-            source,
-            vec![("enum_class_def".into(), 0, 0, 9)],
+        let (state, uri) = state_with_lapper(source, vec![("enum_class_def".into(), 0, 0, 9)]);
+        let response = resolve(
+            &state,
+            &uri,
+            Position::new(0, 5), /* inside `enum PKG {` */
         );
-        let response =
-            resolve(&state, &uri, Position::new(0, 5) /* inside `enum PKG {` */);
         match response {
             Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
             other => panic!("expected empty Array, got {other:?}"),
@@ -556,10 +590,7 @@ mod tests {
         // The branch should resolve via `local_declares`. The document is
         // padded so the local-declare span [30, 35] fits inside the file.
         let source = "package = PKG.SOP8\n\nenum PKG_X_REF { /* padding */ }\n";
-        let (state, uri) = state_with_lapper(
-            source,
-            vec![("enum_class_ref".into(), 7, 10, 13)],
-        );
+        let (state, uri) = state_with_lapper(source, vec![("enum_class_ref".into(), 7, 10, 13)]);
         {
             let symbols_arc = state
                 .sem_symbols
@@ -598,10 +629,7 @@ mod tests {
         // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
         // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
         let source = "package = PKG.SOP8\n\n";
-        let (state, uri) = state_with_lapper(
-            source,
-            vec![("enum_value_ref".into(), 99, 14, 18)],
-        );
+        let (state, uri) = state_with_lapper(source, vec![("enum_value_ref".into(), 99, 14, 18)]);
 
         // Register the SOP8 row at span (90, 94) in another file. The
         //   State::index is a `IndexWorkerHandle`; in active mode it pulls
