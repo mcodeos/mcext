@@ -91,7 +91,7 @@ impl ProjectIndex {
             .retain(|_, e| &e.uri != uri);
     }
 
-    /// Lookup all entries for (kind, name)
+    /// Lookup all entries for (kind, name). Exact case match.
     pub fn lookup(&self, kind: IndexKind, name: &str) -> &[IndexEntry] {
         self.by_name
             .get(&(kind, name.to_string()))
