@@ -168,7 +168,12 @@ async fn parse_and_publish(
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
+            debug!("diagnostics from mcc for {}: {} diags", uri_str, resp.diagnostics.len());
             let rope = state.document_rope(&uri).unwrap_or_else(ropey::Rope::new);
+            for d in &resp.diagnostics {
+                debug!("  diag: code={} line={} col={} pos={} len={} msg={}",
+                    d.code, d.location.line, d.location.column, d.location.pos, d.location.len, d.message);
+            }
             for d in resp.diagnostics {
                 // DEBUG: log raw diagnostic data
                 // debug!(
@@ -313,15 +318,10 @@ async fn parse_and_publish(
     // Trigger semantic tokens refresh so VSCode re-requests after parse
     client.semantic_tokens_refresh().await.ok();
 
-    let current_version = state.document_version(&uri);
-    if let (Some(sent), Some(curr)) = (version, current_version) {
-        if sent < curr {
-            debug!("stale diagnostics for {uri}, sent={sent} < curr={curr}");
-            return;
-        }
-    }
+    // Always publish diagnostics (with current version) so old errors get cleared.
+    // The diagnostics vector contains results from the latest mcc parse for this document.
     client
-        .publish_diagnostics(uri.clone(), diagnostics, version)
+        .publish_diagnostics(uri.clone(), diagnostics, state.document_version(&uri))
         .await;
 }
 
