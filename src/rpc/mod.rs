@@ -91,6 +91,12 @@ impl MccRpcClient {
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
+    /// Get smart parameter diagnostics (unused / untyped params)
+    pub async fn params_diag(&self) -> Result<ParamsDiagResponse, RpcError> {
+        let result = self.call("params.diag", json!({})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
     /// Get project-wide symbols (components, interfaces, enums, modules)
     pub async fn project_symbols(&self) -> Result<ProjectSymbolsResponse, RpcError> {
         let result = self.call("project_symbols", json!({})).await?;
@@ -156,6 +162,21 @@ impl MccRpcClient {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsResponse {
     pub diagnostics: Vec<DiagEntry>,
+}
+
+/// Response from `params.diag` RPC — smart parameter diagnostics
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParamsDiagResponse {
+    pub count: usize,
+    pub diagnostics: Vec<ParamsDiagEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParamsDiagEntry {
+    pub severity: String, // "unused" | "untyped" | "unknown"
+    pub message: String,
+    pub pos: usize,
+    pub len: usize,
 }
 
 /// Response from `library.list` RPC

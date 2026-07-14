@@ -10,10 +10,7 @@ use tower_lsp::lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, Mar
 const MAX_DEFINITIONS: usize = 7;
 
 /// Resolve hover information for a position.
-pub fn resolve(
-    state: &WorkspaceState,
-    params: &HoverParams,
-) -> Option<Hover> {
+pub fn resolve(state: &WorkspaceState, params: &HoverParams) -> Option<Hover> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
@@ -147,8 +144,7 @@ fn extract_all_signatures_from_text(content: &str) -> Vec<String> {
             current_def.push_str(trimmed);
 
             // Stop when we hit `{` or `)`, whichever comes first
-            if trimmed.contains('{') || trimmed.ends_with(')') || trimmed.ends_with(")\n")
-            {
+            if trimmed.contains('{') || trimmed.ends_with(')') || trimmed.ends_with(")\n") {
                 push_def(&mut defs, &current_def);
                 current_def.clear();
                 in_def = false;

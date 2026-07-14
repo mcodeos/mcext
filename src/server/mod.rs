@@ -168,11 +168,22 @@ async fn parse_and_publish(
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
-            debug!("diagnostics from mcc for {}: {} diags", uri_str, resp.diagnostics.len());
+            debug!(
+                "diagnostics from mcc for {}: {} diags",
+                uri_str,
+                resp.diagnostics.len()
+            );
             let rope = state.document_rope(&uri).unwrap_or_else(ropey::Rope::new);
             for d in &resp.diagnostics {
-                debug!("  diag: code={} line={} col={} pos={} len={} msg={}",
-                    d.code, d.location.line, d.location.column, d.location.pos, d.location.len, d.message);
+                debug!(
+                    "  diag: code={} line={} col={} pos={} len={} msg={}",
+                    d.code,
+                    d.location.line,
+                    d.location.column,
+                    d.location.pos,
+                    d.location.len,
+                    d.message
+                );
             }
             for d in resp.diagnostics {
                 // DEBUG: log raw diagnostic data
@@ -180,7 +191,7 @@ async fn parse_and_publish(
                 //     "diag: code={} line={} col={} pos={} len={} msg={}",
                 //     d.code, d.location.line, d.location.column, d.location.pos, d.location.len, d.message
                 // );
-                
+
                 // Prefer RPC-provided line/column (from mcc's Location::new which computes them correctly)
                 // Fall back to pos-based conversion if line=0 OR if line=1,col=1 but pos indicates
                 // a later position (pos_to_line_col failed silently, returned default)
@@ -189,7 +200,10 @@ async fn parse_and_publish(
                     || (d.location.line == 1 && d.location.column == 1 && d.location.pos == 0);
                 let start = if rpc_pos_ok && d.location.line > 0 {
                     // RPC provides 1-based line/column, LSP expects 0-based
-                    tower_lsp::lsp_types::Position::new(d.location.line - 1, d.location.column.saturating_sub(1))
+                    tower_lsp::lsp_types::Position::new(
+                        d.location.line - 1,
+                        d.location.column.saturating_sub(1),
+                    )
                 } else {
                     // Fallback: convert pos to position using rope
                     match crate::common::position::offset_to_position(
@@ -200,7 +214,7 @@ async fn parse_and_publish(
                         None => continue,
                     }
                 };
-                
+
                 // When using RPC-provided line/column, calculate end from pos+len but clamp to same line
                 // (the len is based on AST node size which may span multiple lines)
                 // When falling back to pos-based conversion, calculate end from pos+len
@@ -221,9 +235,9 @@ async fn parse_and_publish(
                         crate::common::position::line_end_position(start.line, &rope)
                     }
                 };
-                
+
                 // debug!("  -> start=({}, {}) end=({}, {})", start.line, start.character, end.line, end.character);
-                
+
                 let severity = match d.level.as_str() {
                     "error" => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
                     "warning" => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
@@ -244,6 +258,56 @@ async fn parse_and_publish(
         }
         Err(e) => {
             debug!("diagnostics RPC failed for {uri}: {e}");
+        }
+    }
+
+    // ★ Smart Param: fetch params.diag and merge as HINT diagnostics
+    {
+        let srv = mcc_server.read().await;
+        if let Some(server) = srv.as_ref() {
+            match server.params_diag().await {
+                Ok(resp) => {
+                    debug!("params.diag: {} smart param diagnostics", resp.count);
+                    for entry in &resp.diagnostics {
+                        let severity = match entry.severity.as_str() {
+                            "unused" => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
+                            "untyped" => tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION,
+                            _ => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
+                        };
+                        // Convert byte offset to line/col using the rope
+                        let rope = state.document_rope(&uri).unwrap_or_default();
+                        let start = if entry.pos > 0 {
+                            crate::common::position::offset_to_position(entry.pos, &rope)
+                                .unwrap_or(tower_lsp::lsp_types::Position::new(0, 0))
+                        } else {
+                            tower_lsp::lsp_types::Position::new(0, 0)
+                        };
+                        let end = if entry.len > 0 {
+                            crate::common::position::offset_to_position(
+                                entry.pos + entry.len,
+                                &rope,
+                            )
+                            .unwrap_or(tower_lsp::lsp_types::Position::new(0, 1))
+                        } else {
+                            tower_lsp::lsp_types::Position::new(0, 1)
+                        };
+                        diagnostics.push(tower_lsp::lsp_types::Diagnostic::new(
+                            tower_lsp::lsp_types::Range::new(start, end),
+                            Some(severity),
+                            Some(tower_lsp::lsp_types::NumberOrString::String(
+                                "smart-param".into(),
+                            )),
+                            Some("mcc".into()),
+                            format!("[smart-param] {}", entry.message),
+                            None,
+                            None,
+                        ));
+                    }
+                }
+                Err(e) => {
+                    debug!("params.diag RPC failed: {e}");
+                }
+            }
         }
     }
 
@@ -424,7 +488,8 @@ impl LanguageServer for Backend {
                                     if let Ok(resp) = client.project_symbols().await {
                                         let ec = resp.enums.clone();
                                         let ev = resp.enum_values.clone();
-                                        if let Ok(mut cache) = state_for_init.project_symbols.lock() {
+                                        if let Ok(mut cache) = state_for_init.project_symbols.lock()
+                                        {
                                             cache.components = resp.components;
                                             cache.interfaces = resp.interfaces;
                                             cache.enums = ec.clone();
@@ -746,23 +811,48 @@ impl LanguageServer for Backend {
                         if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
                             let rpc_symbols = crate::state::RpcSemSymbols {
                                 lapper: sem.symbols.lapper.clone(),
-                                local_declares: sem.symbols.local.declares.iter().map(|d| {
-                                    crate::state::LocalDeclareSpan { id: d.id, span: d.span }
-                                }).collect(),
+                                local_declares: sem
+                                    .symbols
+                                    .local
+                                    .declares
+                                    .iter()
+                                    .map(|d| crate::state::LocalDeclareSpan {
+                                        id: d.id,
+                                        span: d.span,
+                                    })
+                                    .collect(),
                                 local_references: sem.symbols.local.references.clone(),
-                                global_declares: sem.symbols.global.declares.iter().map(|d| {
-                                    crate::state::GlobalDeclareSpan { id: d.id, uri: d.uri.clone(), span: d.span }
-                                }).collect(),
-                                global_references: sem.symbols.global.references.iter().map(|r| {
-                                    crate::state::GlobalReferenceSpan { id: r.id, uri: r.uri.clone(), span: r.span }
-                                }).collect(),
+                                global_declares: sem
+                                    .symbols
+                                    .global
+                                    .declares
+                                    .iter()
+                                    .map(|d| crate::state::GlobalDeclareSpan {
+                                        id: d.id,
+                                        uri: d.uri.clone(),
+                                        span: d.span,
+                                    })
+                                    .collect(),
+                                global_references: sem
+                                    .symbols
+                                    .global
+                                    .references
+                                    .iter()
+                                    .map(|r| crate::state::GlobalReferenceSpan {
+                                        id: r.id,
+                                        uri: r.uri.clone(),
+                                        span: r.span,
+                                    })
+                                    .collect(),
                                 cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
                             };
-                            info!("goto_definition: on-the-fly sem populated for {}", uri.path());
-                            self.state.sem_symbols.insert(
-                                uri.clone(),
-                                Arc::new(std::sync::Mutex::new(rpc_symbols)),
+                            info!(
+                                "goto_definition: on-the-fly sem populated for {}",
+                                uri.path()
                             );
+                            self.state
+                                .sem_symbols
+                                .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
                         }
                     }
                 }
@@ -933,7 +1023,10 @@ impl LanguageServer for Backend {
     }
 
     // Phase 5: document links disabled — hover handles this now
-    async fn document_link(&self, _params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+    async fn document_link(
+        &self,
+        _params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>> {
         Ok(None)
     }
 

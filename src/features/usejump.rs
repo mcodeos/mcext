@@ -119,7 +119,11 @@ fn find_first_definition(state: &WorkspaceState, target_url: &Url) -> (u32, u32)
     };
 
     // Find the first definition (component/interface/module)
-    let first_span = match symbols.local_declares.iter().min_by_key(|decl| decl.span[0]) {
+    let first_span = match symbols
+        .local_declares
+        .iter()
+        .min_by_key(|decl| decl.span[0])
+    {
         Some(s) => s,
         None => return (0, 0),
     };
@@ -145,16 +149,12 @@ fn find_first_definition_in_text(content: &str) -> (u32, u32) {
             || trimmed.starts_with("enum ")
         {
             // Find the start of the identifier
-            let after_keyword = trimmed
-                .split_whitespace()
-                .skip(1)
-                .next()
-                .unwrap_or("");
+            let after_keyword = trimmed.split_whitespace().skip(1).next().unwrap_or("");
             let col = line.find(after_keyword).unwrap_or(0);
             return (line_idx as u32, col as u32);
         }
     }
-    (0, 0)  // Fallback to file start
+    (0, 0) // Fallback to file start
 }
 
 /// Parse the use path string, returning (prefix, path_without_prefix)

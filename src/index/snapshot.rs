@@ -87,8 +87,7 @@ impl ProjectIndex {
             entries.retain(|e| &e.uri != uri);
         }
         self.by_name.retain(|_, v| !v.is_empty());
-        self.enum_value_by_name
-            .retain(|_, e| &e.uri != uri);
+        self.enum_value_by_name.retain(|_, e| &e.uri != uri);
     }
 
     /// Lookup all entries for (kind, name). Exact case match.
@@ -102,11 +101,7 @@ impl ProjectIndex {
     /// Lookup an enum value row by (class, value). Returns the entry whose
     /// span is the body row of the value inside the class — for F12 on
     /// `PKG.SOP8`, jump to that span.
-    pub fn lookup_enum_value(
-        &self,
-        class_name: &str,
-        value_name: &str,
-    ) -> Option<&IndexEntry> {
+    pub fn lookup_enum_value(&self, class_name: &str, value_name: &str) -> Option<&IndexEntry> {
         self.enum_value_by_name
             .get(&(class_name.to_string(), value_name.to_string()))
     }
@@ -126,8 +121,7 @@ impl ProjectIndex {
 
     /// Count number of entries (for testing)
     pub fn len(&self) -> usize {
-        self.by_name.values().map(|v| v.len()).sum::<usize>()
-            + self.enum_value_by_name.len()
+        self.by_name.values().map(|v| v.len()).sum::<usize>() + self.enum_value_by_name.len()
     }
 
     /// Number of enum-value entries in the project index.
