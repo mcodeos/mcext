@@ -28,7 +28,7 @@ pub fn resolve(
     // at the trailing edge of a token still resolves it. Identifier tokens are
     // separated by non-identifier characters (`.`, whitespace, etc.), so the
     // inclusive bound does not cause a caret to match an adjacent token.
-    let intervals: Vec<_> = symbols
+    let mut intervals: Vec<_> = symbols
         .lapper
         .iter()
         .filter(|i| offset >= i.start && offset <= i.stop)
@@ -64,7 +64,7 @@ pub fn resolve(
 
     // Try symbol resolution
     if intervals.is_empty() {
-        info!("goto_def: no symbol found at offset {}", offset);
+        info!("goto_def: no symbol found at offset {offset}");
         return None;
     }
 
@@ -105,12 +105,21 @@ pub fn resolve(
                     "F12_DIAG declare_class id={} @{}:{} → searching",
                     interval.id, interval.start, interval.stop
                 );
-                // Try cross_file_targets FIRST: system-library classes won't
-                // have a class_definition in the local lapper, and a local
-                // class_definition with the same id (collision) would cause a
-                // wrong jump (e.g. RES id=0 matching RESA id=0).
+                // Priority: local file → use imports → library
+                //
+                // 1. Same-file class_definition (本文件定义)
+                for entry in &symbols.lapper {
+                    if entry.kind == "class_definition" && entry.id == interval.id {
+                        eprintln!(
+                            "F12_DIAG declare_class → local class_definition @{}:{}",
+                            entry.start, entry.stop
+                        );
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // 2. Cross-file targets (use 引入的文件)
                 for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id {
+                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
                         eprintln!(
                             "F12_DIAG declare_class → cross_file {} span={:?}",
                             target.target_uri, target.span
@@ -124,26 +133,23 @@ pub fn resolve(
                         );
                     }
                 }
-                // Fall back to local lapper for same-file classes
-                for entry in &symbols.lapper {
-                    if entry.kind == "class_definition" && entry.id == interval.id {
-                        eprintln!(
-                            "F12_DIAG declare_class → local class_definition @{}:{}",
-                            entry.start, entry.stop
-                        );
-                        return local_response(uri, [entry.start, entry.stop], &rope);
+                // 3. Project index (Component or Module)
+                let class_name = rope
+                    .byte_slice(interval.start..interval.stop)
+                    .to_string();
+                if !class_name.is_empty() {
+                    if let Some(resp) = lookup_index(state, &class_name, &rope, uri) {
+                        return Some(resp);
                     }
                 }
                 eprintln!("F12_DIAG declare_class id={} → NOT FOUND", interval.id);
             }
             "declare_instance" => {
-                // Self-locate: cursor is on the declaration itself.
-                // VS Code ignores Scalar(自身) and falls back to word search,
-                // which can jump to a different module's same-named instance.
-                // Use Array(vec![]) to signal "stay here" without fallback.
+                // Self-locate: cursor is on an instance name (e.g. "usbsocket").
+                // The class name gets a separate declare_class entry from mcc.
                 eprintln!(
-                    "F12_DIAG declare_instance id={} scope={} @{}:{} → stay (empty Array)",
-                    interval.id, interval.scope, interval.start, interval.stop
+                    "F12_DIAG declare_instance id={} @{}:{} → stay (empty Array)",
+                    interval.id, interval.start, interval.stop
                 );
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
@@ -157,7 +163,7 @@ pub fn resolve(
                         "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
                         target.ref_id, target.target_uri, target.span[0], target.span[1]
                     );
-                    if target.ref_id == interval.id {
+                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
                         return cross_file_response(
                             state,
                             &target.target_uri,
@@ -204,7 +210,7 @@ pub fn resolve(
                 }
                 // Try cross-file targets (e.g. jump to library definition)
                 for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id {
+                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
                         return cross_file_response(
                             state,
                             &target.target_uri,
@@ -324,9 +330,19 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "function_ref" | "method_ref" | "class_ref" | "pin_name_ref" => {
-                // Jump to definition via cross_file_targets
+                // Priority: local → use imports → library
+                // 1. Local lapper (same scope, different kind)
+                for entry in &symbols.lapper {
+                    if entry.id == interval.id
+                        && entry.kind != interval.kind
+                        && entry.scope == interval.scope
+                    {
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                // 2. Cross-file targets (use imports)
                 for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id {
+                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
                         return cross_file_response(
                             state,
                             &target.target_uri,
@@ -336,13 +352,13 @@ pub fn resolve(
                         );
                     }
                 }
-                // Fallback: search lapper for matching definition (same scope only)
-                for entry in &symbols.lapper {
-                    if entry.id == interval.id
-                        && entry.kind != interval.kind
-                        && entry.scope == interval.scope
-                    {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
+                // 3. Project index (Component or Module)
+                let class_name = rope
+                    .byte_slice(interval.start..interval.stop)
+                    .to_string();
+                if !class_name.is_empty() {
+                    if let Some(resp) = lookup_index(state, &class_name, &rope, uri) {
+                        return Some(resp);
                     }
                 }
             }
@@ -633,4 +649,33 @@ mod tests {
             Some(other_uri.to_string())
         );
     }
+}
+
+/// Look up a class name in the project index, trying Component then Module.
+fn lookup_index(
+    state: &WorkspaceState,
+    name: &str,
+    rope: &Rope,
+    uri: &Url,
+) -> Option<GotoDefinitionResponse> {
+    use crate::index::snapshot::IndexKind;
+    let snap = state.index.snapshot();
+    for kind in &[IndexKind::Component, IndexKind::Module] {
+        let entries = snap.lookup(*kind, name);
+        if let Some(entry) = entries.first() {
+            info!(
+                "lookup_index: found '{name}' as {kind:?} → {} span=[{},{}]",
+                entry.uri, entry.span.0, entry.span.1
+            );
+            return cross_file_response(
+                state,
+                &entry.uri.to_string(),
+                [entry.span.0, entry.span.1],
+                rope,
+                uri,
+            );
+        }
+    }
+    info!("lookup_index: '{name}' NOT FOUND in Component or Module");
+    None
 }

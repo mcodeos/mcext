@@ -123,12 +123,12 @@ fn worker_loop(
                     enum_values.len()
                 );
                 let components_tuples: Vec<_> =
-                    components.into_iter().map(|c| (c.name, c.uri)).collect();
+                    components.into_iter().map(|c| (c.name, c.uri, c.span)).collect();
                 let interfaces_tuples: Vec<_> =
-                    interfaces.into_iter().map(|i| (i.name, i.uri)).collect();
+                    interfaces.into_iter().map(|i| (i.name, i.uri, i.span)).collect();
                 let enums_tuples: Vec<_> =
                     enums.into_iter().map(|e| (e.name, e.uri, e.span)).collect();
-                let modules_tuples: Vec<_> = modules.into_iter().map(|m| (m.name, m.uri)).collect();
+                let modules_tuples: Vec<_> = modules.into_iter().map(|m| (m.name, m.uri, m.span)).collect();
 
                 current = build_from_mcb_iter(
                     None,
