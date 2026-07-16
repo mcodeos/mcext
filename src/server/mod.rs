@@ -836,12 +836,18 @@ impl LanguageServer for Backend {
 
         // If sem_symbols cache is missing (e.g. file was opened before mcc was
         // ready), do an on-the-fly sem call to populate it.
-        if self.state.sem_symbols.get(&uri).is_none() {
+        // Only do this AFTER init is complete — concurrent RPC during init
+        // (e.g. with Phase 2's load_project) will crash the single-threaded mcc.
+        if self.state.sem_symbols.get(&uri).is_none()
+            && self.state.init_done.load(std::sync::atomic::Ordering::Acquire)
+        {
             if let Some(rope) = self.state.document_rope(&uri) {
                 let server_guard = self.mcc_server.read().await;
                 if let Some(server) = server_guard.as_ref() {
                     if server.is_connected() {
                         let text: String = rope.to_string();
+                        // Serialize with other RPC calls (init, parse_and_publish)
+                        let _rpc_guard = self.state.rpc_lock.lock().await;
                         if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
                             let rpc_symbols = crate::state::RpcSemSymbols {
                                 lapper: sem.symbols.lapper.clone(),

@@ -133,35 +133,35 @@ impl ProjectIndex {
 /// Build ProjectIndex from mcc iterators
 pub fn build_from_mcb_iter(
     project_root: Option<PathBuf>,
-    components: Vec<(String, String)>,
-    interfaces: Vec<(String, String)>,
+    components: Vec<(String, String, [usize; 2])>,
+    interfaces: Vec<(String, String, [usize; 2])>,
     enums: Vec<(String, String, [usize; 2])>,
-    modules: Vec<(String, String)>,
+    modules: Vec<(String, String, [usize; 2])>,
     enum_values: Vec<crate::rpc::EnumValueEntry>,
 ) -> ProjectIndex {
     let mut idx = ProjectIndex::new();
     idx.project_root = project_root;
 
-    for (name, uri_str) in components {
+    for (name, uri_str, span) in components {
         if let Some(uri) = url_from_path(&uri_str) {
             idx.add(
                 IndexKind::Component,
                 IndexEntry {
                     uri: uri.clone(),
-                    span: (0, 0),
+                    span: (span[0], span[1]),
                     name,
                 },
             );
             idx.add_file(uri);
         }
     }
-    for (name, uri_str) in interfaces {
+    for (name, uri_str, span) in interfaces {
         if let Some(uri) = url_from_path(&uri_str) {
             idx.add(
                 IndexKind::Interface,
                 IndexEntry {
                     uri: uri.clone(),
-                    span: (0, 0),
+                    span: (span[0], span[1]),
                     name,
                 },
             );
@@ -181,13 +181,13 @@ pub fn build_from_mcb_iter(
             idx.add_file(uri);
         }
     }
-    for (name, uri_str) in modules {
+    for (name, uri_str, span) in modules {
         if let Some(uri) = url_from_path(&uri_str) {
             idx.add(
                 IndexKind::Module,
                 IndexEntry {
                     uri: uri.clone(),
-                    span: (0, 0),
+                    span: (span[0], span[1]),
                     name,
                 },
             );
@@ -302,8 +302,8 @@ mod tests {
     fn build_from_mcb_iter_test() {
         let idx = build_from_mcb_iter(
             Some(PathBuf::from("/proj")),
-            vec![("USB".into(), "/proj/usb.mc".into())],
-            vec![("Power".into(), "/proj/power.mc".into())],
+            vec![("USB".into(), "/proj/usb.mc".into(), [0, 0])],
+            vec![("Power".into(), "/proj/power.mc".into(), [0, 0])],
             vec![],
             vec![],
             vec![],
