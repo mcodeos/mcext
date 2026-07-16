@@ -265,56 +265,6 @@ async fn parse_and_publish(
         }
     }
 
-    // ★ Smart Param: fetch params.diag and merge as HINT diagnostics
-    {
-        let srv = mcc_server.read().await;
-        if let Some(server) = srv.as_ref() {
-            match server.params_diag().await {
-                Ok(resp) => {
-                    debug!("params.diag: {} smart param diagnostics", resp.count);
-                    for entry in &resp.diagnostics {
-                        let severity = match entry.severity.as_str() {
-                            "unused" => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
-                            "untyped" => tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION,
-                            _ => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
-                        };
-                        // Convert byte offset to line/col using the rope
-                        let rope = state.document_rope(&uri).unwrap_or_default();
-                        let start = if entry.pos > 0 {
-                            crate::common::position::offset_to_position(entry.pos, &rope)
-                                .unwrap_or(tower_lsp::lsp_types::Position::new(0, 0))
-                        } else {
-                            tower_lsp::lsp_types::Position::new(0, 0)
-                        };
-                        let end = if entry.len > 0 {
-                            crate::common::position::offset_to_position(
-                                entry.pos + entry.len,
-                                &rope,
-                            )
-                            .unwrap_or(tower_lsp::lsp_types::Position::new(0, 1))
-                        } else {
-                            tower_lsp::lsp_types::Position::new(0, 1)
-                        };
-                        diagnostics.push(tower_lsp::lsp_types::Diagnostic::new(
-                            tower_lsp::lsp_types::Range::new(start, end),
-                            Some(severity),
-                            Some(tower_lsp::lsp_types::NumberOrString::String(
-                                "smart-param".into(),
-                            )),
-                            Some("mcc".into()),
-                            format!("[smart-param] {}", entry.message),
-                            None,
-                            None,
-                        ));
-                    }
-                }
-                Err(e) => {
-                    debug!("params.diag RPC failed: {e}");
-                }
-            }
-        }
-    }
-
     drop(server_guard);
 
     let rpc_tokens = crate::state::RpcSemTokens {

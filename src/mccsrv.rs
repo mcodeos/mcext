@@ -297,15 +297,6 @@ impl MccServer {
             .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
-    /// Get smart parameter diagnostics
-    pub async fn params_diag(&self) -> Result<crate::rpc::ParamsDiagResponse, MccServerError> {
-        let client = self.client().ok_or(MccServerError::NotConnected)?;
-        client
-            .params_diag()
-            .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
-    }
-
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
         // Try common locations
