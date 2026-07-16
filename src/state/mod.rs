@@ -170,6 +170,75 @@ impl WorkspaceState {
     }
 }
 
+/// Adjust cached lapper entry offsets after incremental text changes so
+/// F12 goto-def stays accurate before the debounced reparse completes.
+///
+/// For each change (delete [old_start, old_end), insert `new_text`):
+///   - byte delta = new_text.len() - (old_end - old_start)
+///   - entries with start >= old_end are shifted by delta
+///   - entries inside the replaced range are dropped
+pub fn adjust_lapper_for_changes(
+    state: &WorkspaceState,
+    uri: &Url,
+    changes: &[tower_lsp::lsp_types::TextDocumentContentChangeEvent],
+    rope: &ropey::Rope,
+) {
+    use crate::common::position::position_to_offset;
+    use crate::rpc::LapperEntry;
+
+    let symbols_ref = match state.sem_symbols.get(uri) {
+        Some(s) => s,
+        None => return,
+    };
+    let mut symbols = match symbols_ref.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let mut entries: Vec<LapperEntry> = std::mem::take(&mut symbols.lapper);
+
+    for change in changes {
+        let range = match change.range {
+            Some(r) => r,
+            None => {
+                // Full replace — drop all entries; fresh data arrives via reparse
+                return;
+            }
+        };
+
+        let old_start = match position_to_offset(range.start, rope) {
+            Some(o) => o,
+            None => continue,
+        };
+        let old_end = match position_to_offset(range.end, rope) {
+            Some(o) => o,
+            None => continue,
+        };
+
+        let delta: i64 = change.text.len() as i64 - (old_end as i64 - old_start as i64);
+
+        entries = entries
+            .into_iter()
+            .filter_map(|mut e| {
+                if e.start >= old_end {
+                    // After the change: shift
+                    e.start = (e.start as i64 + delta).max(0) as usize;
+                    e.stop = (e.stop as i64 + delta).max(0) as usize;
+                    Some(e)
+                } else if e.start >= old_start {
+                    // Inside the replaced range: drop (stale)
+                    None
+                } else {
+                    // Before the change: unchanged
+                    Some(e)
+                }
+            })
+            .collect();
+    }
+
+    symbols.lapper = entries;
+}
+
 impl Default for WorkspaceState {
     fn default() -> Self {
         Self::new()

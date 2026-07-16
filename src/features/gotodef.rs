@@ -23,19 +23,6 @@ pub fn resolve(
     let symbols_ref = state.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
-    eprintln!(
-        "F12_DIAG offset={} lapper_len={}",
-        offset, symbols.lapper.len()
-    );
-
-    // Debug: log all lapper intervals
-    for i in &symbols.lapper {
-        info!(
-            "goto_def: lapper: kind={}, id={}, start={}, stop={}",
-            i.kind, i.id, i.start, i.stop
-        );
-    }
-
     // Find symbol at cursor position using lapper.
     // Use an inclusive upper bound (`offset <= stop`) so that placing the caret
     // at the trailing edge of a token still resolves it. Identifier tokens are
@@ -46,20 +33,6 @@ pub fn resolve(
         .iter()
         .filter(|i| offset >= i.start && offset <= i.stop)
         .collect();
-
-    info!(
-        "goto_def: query: offset={}, lapper_count={}, matched_count={}",
-        offset,
-        symbols.lapper.len(),
-        intervals.len()
-    );
-    // Debug: log intervals at this position
-    for i in &intervals {
-        info!(
-            "goto_def: interval at offset {}: kind={}, id={}, start={}, stop={}",
-            offset, i.kind, i.id, i.start, i.stop
-        );
-    }
 
     info!(
         "goto_def: local_declares count={}",
@@ -95,8 +68,10 @@ pub fn resolve(
         return None;
     }
 
-    // ★ Priority order: class_definition first, then declare_class
-    // Sort intervals to ensure class_definition is processed before declare_class
+    // ★ Priority order: instance_ref before pin_name_definition before others.
+    // pin_name_definition often has a large span covering constructor args
+    // (e.g. `[+, -]::DC(volt, Source)`), which would otherwise shadow
+    // instance_ref entries for the param references inside.
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| {
         let order = |k: &str| match k {
@@ -105,7 +80,9 @@ pub fn resolve(
             | "define_definition"
             | "role_definition" => 0,
             "declare_class" | "class_ref" => 1,
-            _ => 2,
+            "instance_ref" | "instance_reference" | "port_definition" => 2,
+            "pin_name_definition" => 3,
+            _ => 4,
         };
         order(&a.kind).cmp(&order(&b.kind))
     });
@@ -215,7 +192,7 @@ pub fn resolve(
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
-                eprintln!("F12_DIAG instance_ref id={} scope={}: no declare_instance match, trying port_definition/cross_file", interval.id, ref_scope);
+                eprintln!("F12_DIAG instance_ref id={} scope='{}': no declare_instance match, trying port_definition/cross_file", interval.id, ref_scope);
                 // Component param ref → port_definition (scope-aware)
                 for entry in &symbols.lapper {
                     if entry.kind == "port_definition"
