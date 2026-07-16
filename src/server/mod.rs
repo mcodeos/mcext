@@ -16,6 +16,7 @@ use crate::state::WorkspaceState;
 use dashmap::DashMap;
 // Note: McURI is just String, no need to import mcc
 use ropey::Rope;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -120,7 +121,7 @@ async fn parse_and_publish(
     let span = tracing::info_span!("parse_and_publish", uri = %uri.path(), ?version);
     let _guard = span.enter();
 
-    trace!("parse_and_publish: uri={}", uri.path());
+    debug!("parse_and_publish ENTER: uri={}", uri.path());
     let mc_uri = String::from(uri.path());
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
@@ -136,15 +137,38 @@ async fn parse_and_publish(
         warn!("use target missing for {uri}: {use_line} (tried: {candidates:?})");
     }
 
-    // RPC mode: call mcc server via RPC
+    // Wait for project initialization to complete before making RPC calls.
+    // Concurrent RPC calls during init can crash the single-threaded mcc server.
+    //
+    // Two-phase: AtomicBool for sticky check (fast path after init),
+    //            Notify for efficient wakeup (slow path during init).
+    if !state.init_done.load(Ordering::Acquire) {
+        // Slow path: wait for init_notify.  After waking, MUST re-check
+        // init_done because Notify is NOT sticky — if notify_waiters()
+        // was already consumed by earlier tasks, notified() would block
+        // forever.  The AtomicBool protects against this TOCTOU race.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            state.init_notify.notified(),
+        )
+        .await;
+        if !state.init_done.load(Ordering::Acquire) {
+            // Still not done after wake/timeout → truly not ready
+            info!("parse_and_publish: init not ready for {uri}, queuing for retry");
+            state.pending_diagnostics.insert(uri.clone(), version);
+            return;
+        }
+    }
+
     let server_guard = mcc_server.read().await;
     let Some(server) = server_guard.as_ref() else {
-        debug!("mcc server not available for {uri}");
+        debug!("mcc server not available for {uri}, queuing for retry");
+        state.pending_diagnostics.insert(uri.clone(), version);
         return;
     };
 
     if !server.is_connected() {
-        // Wait briefly for connection
+        // Wait briefly for connection (server may have crashed and be restarting)
         for _ in 0..10 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if server.is_connected() {
@@ -152,18 +176,21 @@ async fn parse_and_publish(
             }
         }
         if !server.is_connected() {
-            debug!("mcc server still not connected for {uri}");
+            debug!("mcc server still not connected for {uri}, queuing for retry");
+            state.pending_diagnostics.insert(uri.clone(), version);
             return;
         }
     }
 
     let uri_str = uri.path();
+    // Serialize RPC access: mcc is single-threaded, concurrent requests crash it.
+    let _rpc_guard = state.rpc_lock.lock().await;
     // Pass current document text so mcc parses live content (not stale disk file)
     let content_for_rpc: Option<&str> = Some(&text);
     let sem = match server.sem(uri_str, content_for_rpc).await {
         Ok(sem) => sem,
         Err(e) => {
-            debug!("sem RPC failed for {uri}: {e}");
+            debug!("sem RPC FAILED for {uri}: {e}");
             return;
         }
     };
@@ -173,7 +200,7 @@ async fn parse_and_publish(
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
             debug!(
-                "diagnostics from mcc for {}: {} diags",
+                "diagnostics RPC OK for {}: {} diags",
                 uri_str,
                 resp.diagnostics.len()
             );
@@ -261,7 +288,7 @@ async fn parse_and_publish(
             }
         }
         Err(e) => {
-            debug!("diagnostics RPC failed for {uri}: {e}");
+            debug!("diagnostics RPC FAILED for {uri}: {e}");
         }
     }
 
@@ -338,9 +365,18 @@ async fn parse_and_publish(
 
     // Always publish diagnostics (with current version) so old errors get cleared.
     // The diagnostics vector contains results from the latest mcc parse for this document.
+    let diag_count = diagnostics.len();
+    debug!("publish_diagnostics: {diag_count} diags for {}", uri.path());
     client
         .publish_diagnostics(uri.clone(), diagnostics, state.document_version(&uri))
         .await;
+
+    // Success — remove from pending retry set if it was there
+    state.pending_diagnostics.remove(&uri);
+    info!(
+        "parse_and_publish done for {}: {diag_count} diags",
+        uri.path()
+    );
 }
 
 #[tower_lsp::async_trait]
@@ -373,109 +409,153 @@ impl LanguageServer for Backend {
         let project_root_clone = project_root.clone();
         let cfg_system_root = cfg.system_root.clone();
         let state_for_init = self.state.clone();
+        let lsp_client = self.client.clone();
         tokio::spawn(async move {
-            let mut server_guard = mcc_server.write().await;
-            if let Some(ref mut server) = *server_guard {
-                match server.start().await {
-                    Ok(_) => {
-                        debug!("mcc server subprocess started");
-                        if let Some(client) = server.client() {
-                            // Only set system_root if explicitly configured
-                            if let Some(ref sys_root) = cfg_system_root {
-                                info!("Setting system root: {}", sys_root.display());
-                                let _ = client
-                                    .set_system_root(sys_root.to_str().unwrap_or(""))
-                                    .await;
+            // Phase 1: start mcc server with write lock, clone the RPC client,
+            //          then release the lock immediately so parse_and_publish
+            //          (which needs read lock) is not blocked.
+            let rpc_client: Option<crate::rpc::MccRpcClient> = {
+                let mut server_guard = mcc_server.write().await;
+                let Some(ref mut server) = *server_guard else {
+                    return;
+                };
+                if let Err(e) = server.start().await {
+                    warn!(
+                        "Failed to start mcc server, falling back to direct mode: {}",
+                        e
+                    );
+                    return;
+                }
+                debug!("mcc server subprocess started");
+                // Clone the RPC client so we can release the write lock.
+                // MccRpcClient wraps reqwest::Client (Arc-based), so cloning is cheap.
+                server.client().cloned()
+            }; // write lock released — parse_and_publish can now proceed
+
+            let Some(client) = rpc_client else {
+                warn!("mcc server started but RPC client is None");
+                return;
+            };
+
+            // Phase 2: initialize project WITHOUT holding any lock on mcc_server.
+            //          parse_and_publish runs concurrently via its own read lock.
+            // Only set system_root if explicitly configured
+            if let Some(ref sys_root) = cfg_system_root {
+                info!("Setting system root: {}", sys_root.display());
+                let _ = client
+                    .set_system_root(sys_root.to_str().unwrap_or(""))
+                    .await;
+            }
+
+            // Initialize mcc
+            let _ = client.init().await;
+
+            // Set project root
+            if let Some(ref root) = project_root_clone {
+                let root_str = root.to_string_lossy();
+                let _ = client.set_project_root(&root_str).await;
+
+                // Load project.toml and auto-load dependencies
+                if let Some(config) = ProjectConfig::load_from(&root) {
+                    info!(
+                        "Auto-loading {} dependencies from project.toml...",
+                        config.dependency_names().len()
+                    );
+                    // Load each dependency
+                    for lib_name in config.dependency_names() {
+                        info!("Calling lib.load for: {}", lib_name);
+                        let lib_result = client.lib_load(lib_name).await;
+                        if lib_result.is_ok() {
+                            info!("Successfully loaded lib: {}", lib_name);
+                        } else {
+                            warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
+                        }
+                        // Debug: show library info
+                        match client.lib_show(lib_name).await {
+                            Ok(info) => {
+                                info!("Lib info: name={} symbols={} modules={} components={} interfaces={}",
+                                    info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
                             }
-
-                            // Initialize mcc
-                            let _ = client.init().await;
-
-                            // Set project root
-                            if let Some(ref root) = project_root_clone {
-                                let root_str = root.to_string_lossy();
-                                let _ = client.set_project_root(&root_str).await;
-
-                                // Load project.toml and auto-load dependencies
-                                if let Some(config) = ProjectConfig::load_from(&root) {
-                                    info!(
-                                        "Auto-loading {} dependencies from project.toml...",
-                                        config.dependency_names().len()
-                                    );
-                                    // Load each dependency
-                                    for lib_name in config.dependency_names() {
-                                        info!("Calling lib.load for: {}", lib_name);
-                                        let lib_result = client.lib_load(lib_name).await;
-                                        if lib_result.is_ok() {
-                                            info!("Successfully loaded lib: {}", lib_name);
-                                        } else {
-                                            warn!(
-                                                "Failed to load lib '{}': {:?}",
-                                                lib_name,
-                                                lib_result.err()
-                                            );
-                                        }
-                                        // Debug: show library info
-                                        match client.lib_show(lib_name).await {
-                                            Ok(info) => {
-                                                info!("Lib info: name={} symbols={} modules={} components={} interfaces={}", 
-                                                    info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
-                                            }
-                                            Err(e) => {
-                                                warn!("lib_show failed: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                    // Load project entry
-                                    let entry = config.entry_path(&root);
-                                    info!("Calling load_project for entry: {}", entry);
-                                    if let Err(e) = client.load_project(&entry).await {
-                                        warn!("Failed to load project '{}': {:?}", entry, e);
-                                    } else {
-                                        info!("Successfully loaded project entry: {}", entry);
-                                    }
-
-                                    // ★ Fetch project symbols AFTER load_project
-                                    //    so the index (incl. enum values) is ready
-                                    //    before any F12 / goto-def request.
-                                    info!("Fetching project_symbols for index...");
-                                    if let Ok(resp) = client.project_symbols().await {
-                                        let ec = resp.enums.clone();
-                                        let ev = resp.enum_values.clone();
-                                        if let Ok(mut cache) = state_for_init.project_symbols.lock()
-                                        {
-                                            cache.components = resp.components;
-                                            cache.interfaces = resp.interfaces;
-                                            cache.enums = ec.clone();
-                                            cache.modules = resp.modules;
-                                            cache.enum_values = ev.clone();
-                                        }
-                                        // Read back from cache to avoid
-                                        // partial-move issues with resp.
-                                        if let Ok(cache) = state_for_init.project_symbols.lock() {
-                                            let _ = state_for_init.index.send(
-                                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
-                                                    components: cache.components.clone(),
-                                                    interfaces: cache.interfaces.clone(),
-                                                    enums: cache.enums.clone(),
-                                                    modules: cache.modules.clone(),
-                                                    enum_values: cache.enum_values.clone(),
-                                                },
-                                            );
-                                        }
-                                        info!("project_symbols done → worker updated");
-                                    } else {
-                                        warn!("project_symbols RPC failed");
-                                    }
-                                }
+                            Err(e) => {
+                                warn!("lib_show failed: {:?}", e);
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            "Failed to start mcc server, falling back to direct mode: {}",
-                            e
-                        );
+                    // Load project entry
+                    let entry = config.entry_path(&root);
+                    info!("Calling load_project for entry: {}", entry);
+                    if let Err(e) = client.load_project(&entry).await {
+                        warn!("Failed to load project '{}': {:?}", entry, e);
+                    } else {
+                        info!("Successfully loaded project entry: {}", entry);
+                    }
+
+                    // ★ Fetch project symbols AFTER load_project
+                    //    so the index (incl. enum values) is ready
+                    //    before any F12 / goto-def request.
+                    info!("Fetching project_symbols for index...");
+                    if let Ok(resp) = client.project_symbols().await {
+                        let ec = resp.enums.clone();
+                        let ev = resp.enum_values.clone();
+                        if let Ok(mut cache) = state_for_init.project_symbols.lock() {
+                            cache.components = resp.components;
+                            cache.interfaces = resp.interfaces;
+                            cache.enums = ec.clone();
+                            cache.modules = resp.modules;
+                            cache.enum_values = ev.clone();
+                        }
+                        // Read back from cache to avoid
+                        // partial-move issues with resp.
+                        if let Ok(cache) = state_for_init.project_symbols.lock() {
+                            let _ = state_for_init.index.send(
+                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
+                                    components: cache.components.clone(),
+                                    interfaces: cache.interfaces.clone(),
+                                    enums: cache.enums.clone(),
+                                    modules: cache.modules.clone(),
+                                    enum_values: cache.enum_values.clone(),
+                                },
+                            );
+                        }
+                        info!("project_symbols done → worker updated");
+                    } else {
+                        warn!("project_symbols RPC failed");
+                    }
+                }
+            }
+
+            // Signal that init is complete.
+            // Order matters: set the sticky flag FIRST, then notify.
+            // This ensures any task woken by notify_waiters() sees init_done == true.
+            state_for_init
+                .init_done
+                .store(true, Ordering::Release);
+            state_for_init.init_notify.notify_waiters();
+            info!("init_done = true — parse_and_publish can now make RPC calls");
+
+            // Phase 3: retry any files whose parse_and_publish failed during startup.
+            //          By now the server is connected, so retries will succeed.
+            let pending: Vec<(Url, Option<i32>)> = state_for_init
+                .pending_diagnostics
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect();
+            // Remove after collecting to avoid losing entries inserted concurrently.
+            for (uri, _) in &pending {
+                state_for_init.pending_diagnostics.remove(uri);
+            }
+            if !pending.is_empty() {
+                info!(
+                    "Retrying {} pending diagnostics after mcc server ready",
+                    pending.len()
+                );
+                // Serial retry: mcc is single-threaded, concurrent RPC calls crash it.
+                for (uri, version) in pending {
+                    if state_for_init.documents.contains_key(&uri) {
+                        let s = Arc::clone(&state_for_init);
+                        let mc = Arc::clone(&mcc_server);
+                        let cl = lsp_client.clone();
+                        parse_and_publish(s, mc, cl, uri, version).await;
                     }
                 }
             }

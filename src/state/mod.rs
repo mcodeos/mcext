@@ -16,7 +16,9 @@ use crate::index::IndexWorkerHandle;
 use crate::rpc::{CrossFileTarget, LapperEntry, LocalReference, SymbolEntry};
 use dashmap::DashMap;
 use ropey::Rope;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use tokio::sync::{Mutex as TokioMutex, Notify};
 use tower_lsp::lsp_types::Url;
 
 /// ★ Cached project-wide symbols for completion
@@ -112,6 +114,22 @@ pub struct WorkspaceState {
 
     /// ★ Cached project-wide symbols for completion
     pub project_symbols: Arc<Mutex<ProjectSymbolsCache>>,
+
+    /// URIs whose initial parse_and_publish failed (e.g. mcc not yet connected).
+    /// Retried once the server is ready. Key is the URI; value is the document version at open time.
+    pub pending_diagnostics: DashMap<Url, Option<i32>>,
+
+    /// Sticky flag: true after project initialization completes.
+    /// Used for fast-path check (no wait needed after init is done).
+    pub init_done: AtomicBool,
+
+    /// Wakeup signal for tasks waiting on initialization.
+    /// NOT sticky — only used to wake sleepers; always check init_done after waking.
+    pub init_notify: Notify,
+
+    /// Serializes RPC calls to mcc (single-threaded server).
+    /// Prevents concurrent sem/diagnostics requests from crashing mcc.
+    pub rpc_lock: TokioMutex<()>,
 }
 
 impl WorkspaceState {
@@ -128,6 +146,10 @@ impl WorkspaceState {
             index: IndexWorkerHandle::inactive(),
             scheduler: ReparseScheduler::new(std::time::Duration::from_millis(150)),
             project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
+            pending_diagnostics: DashMap::new(),
+            init_done: AtomicBool::new(false),
+            init_notify: Notify::new(),
+            rpc_lock: TokioMutex::new(()),
         }
     }
 
@@ -142,6 +164,10 @@ impl WorkspaceState {
             index: IndexWorkerHandle::spawn(),
             scheduler: ReparseScheduler::new(std::time::Duration::from_millis(150)),
             project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
+            pending_diagnostics: DashMap::new(),
+            init_done: AtomicBool::new(false),
+            init_notify: Notify::new(),
+            rpc_lock: TokioMutex::new(()),
         }
     }
 
