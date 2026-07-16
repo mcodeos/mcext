@@ -23,10 +23,9 @@ pub fn resolve(
     let symbols_ref = state.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
-    info!(
-        "goto_def: lapper_len={}, offset={}",
-        symbols.lapper.len(),
-        offset
+    eprintln!(
+        "F12_DIAG offset={} lapper_len={}",
+        offset, symbols.lapper.len()
     );
 
     // Debug: log all lapper intervals
@@ -125,24 +124,20 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "declare_class" => {
-                info!(
-                    "goto_def: declare_class id={} — looking for class_definition in lapper",
-                    interval.id
+                eprintln!(
+                    "F12_DIAG declare_class id={} @{}:{} → searching",
+                    interval.id, interval.start, interval.stop
                 );
-                // For same-file classes, the lapper has a `class_definition`
-                // with the same id at the true definition site.
-                for entry in &symbols.lapper {
-                    if entry.kind == "class_definition" && entry.id == interval.id {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // Fall back to cross_file_targets for system-library classes
+                // Try cross_file_targets FIRST: system-library classes won't
+                // have a class_definition in the local lapper, and a local
+                // class_definition with the same id (collision) would cause a
+                // wrong jump (e.g. RES id=0 matching RESA id=0).
                 for target in &symbols.cross_file_targets {
-                    info!(
-                        "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
-                        target.ref_id, target.target_uri, target.span[0], target.span[1]
-                    );
                     if target.ref_id == interval.id {
+                        eprintln!(
+                            "F12_DIAG declare_class → cross_file {} span={:?}",
+                            target.target_uri, target.span
+                        );
                         return cross_file_response(
                             state,
                             &target.target_uri,
@@ -152,15 +147,28 @@ pub fn resolve(
                         );
                     }
                 }
+                // Fall back to local lapper for same-file classes
+                for entry in &symbols.lapper {
+                    if entry.kind == "class_definition" && entry.id == interval.id {
+                        eprintln!(
+                            "F12_DIAG declare_class → local class_definition @{}:{}",
+                            entry.start, entry.stop
+                        );
+                        return local_response(uri, [entry.start, entry.stop], &rope);
+                    }
+                }
+                eprintln!("F12_DIAG declare_class id={} → NOT FOUND", interval.id);
             }
             "declare_instance" => {
-                // Instance declarations (e.g. `cap`, `uC`) are the definition
-                // site themselves. Point back to own span.
-                info!(
-                    "goto_def: declare_instance id={} — self-locate",
-                    interval.id
+                // Self-locate: cursor is on the declaration itself.
+                // VS Code ignores Scalar(自身) and falls back to word search,
+                // which can jump to a different module's same-named instance.
+                // Use Array(vec![]) to signal "stay here" without fallback.
+                eprintln!(
+                    "F12_DIAG declare_instance id={} scope={} @{}:{} → stay (empty Array)",
+                    interval.id, interval.scope, interval.start, interval.stop
                 );
-                return local_response(uri, [interval.start, interval.stop], &rope);
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "interface_ref" | "interface_reference" => {
                 info!("goto_def: interface_ref id={}", interval.id);
@@ -188,28 +196,27 @@ pub fn resolve(
                 );
             }
             "instance_ref" | "instance_reference" => {
-                // instance_ref points to a declaration with the same id
-                // ★ Scope-aware: match by (id, scope) to handle same-named instances
-                // in different modules/components within the same file
+                eprintln!(
+                    "F12_DIAG instance_ref id={} scope={} @{}:{} → searching declare_instance",
+                    interval.id, interval.scope, interval.start, interval.stop
+                );
                 let ref_scope = &interval.scope;
 
-                // First try exact (id, scope) match for declare_instance
+                // Exact (id, scope) match for declare_instance
                 for entry in &symbols.lapper {
                     if entry.kind == "declare_instance"
                         && entry.id == interval.id
                         && entry.scope == *ref_scope
                     {
+                        eprintln!(
+                            "F12_DIAG instance_ref MATCHED declare_instance id={} scope={} @{}:{}",
+                            entry.id, entry.scope, entry.start, entry.stop
+                        );
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
-                // Fallback: id-only match for declare_instance
-                for entry in &symbols.lapper {
-                    if entry.kind == "declare_instance" && entry.id == interval.id {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // ★ Component param ref → port_definition
-                // (e.g. `spec.value = rs` where rs is a component parameter)
+                eprintln!("F12_DIAG instance_ref id={} scope={}: no declare_instance match, trying port_definition/cross_file", interval.id, ref_scope);
+                // Component param ref → port_definition (scope-aware)
                 for entry in &symbols.lapper {
                     if entry.kind == "port_definition"
                         && entry.id == interval.id
@@ -218,19 +225,7 @@ pub fn resolve(
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
-                // id-only fallback for port_definition
-                for entry in &symbols.lapper {
-                    if entry.kind == "port_definition" && entry.id == interval.id {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // Fallback to local_declares
-                for decl in &symbols.local_declares {
-                    if decl.id == interval.id {
-                        return local_response(uri, decl.span, &rope);
-                    }
-                }
-                // Try cross-file targets
+                // Try cross-file targets (e.g. jump to library definition)
                 for target in &symbols.cross_file_targets {
                     if target.ref_id == interval.id {
                         return cross_file_response(
@@ -244,8 +239,8 @@ pub fn resolve(
                 }
             }
             "port_definition" => {
-                // Port definitions point to themselves
-                return local_response(uri, [interval.start, interval.stop], &rope);
+                // Self-locate — use empty Array to prevent VS Code word-search fallback
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             // ★ enum support — separate kind family. Cursor on `enum PKG {`
             //   self-locates (empty Array, mirroring class_definition).
@@ -256,9 +251,8 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "enum_value_def" => {
-                // Cursor on `SOP8,` inside the enum body — self-locates to its
-                // own span in the same file.
-                return local_response(uri, [interval.start, interval.stop], &rope);
+                // Self-locate — use empty Array to prevent VS Code word-search fallback
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             // Cursor on the class half of a qualified ref (e.g. `PKG` in
             // `PKG.SOP8`). Step 3b in mcc must emit this kind on the
@@ -349,8 +343,8 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "pin_name_definition" => {
-                // Self-locate via local_response
-                return local_response(uri, [interval.start, interval.stop], &rope);
+                // Self-locate — use empty Array to prevent VS Code word-search fallback
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "function_ref" | "method_ref" | "class_ref" | "pin_name_ref" => {
                 // Jump to definition via cross_file_targets
@@ -365,9 +359,12 @@ pub fn resolve(
                         );
                     }
                 }
-                // Fallback: search lapper for matching definition
+                // Fallback: search lapper for matching definition (same scope only)
                 for entry in &symbols.lapper {
-                    if entry.id == interval.id && entry.kind != interval.kind {
+                    if entry.id == interval.id
+                        && entry.kind != interval.kind
+                        && entry.scope == interval.scope
+                    {
                         return local_response(uri, [entry.start, entry.stop], &rope);
                     }
                 }
@@ -448,6 +445,10 @@ fn resolve_use_path(base: &std::path::Path, path: &str) -> Vec<std::path::PathBu
 fn local_response(uri: &Url, span: [usize; 2], rope: &Rope) -> Option<GotoDefinitionResponse> {
     let start = offset_to_position(span[0], rope)?;
     let end = offset_to_position(span[1], rope)?;
+    eprintln!(
+        "F12_DIAG local_response bytes[{}:{}] -> line{}col{}:line{}col{}",
+        span[0], span[1], start.line, start.character, end.line, end.character
+    );
     Some(GotoDefinitionResponse::Scalar(Location::new(
         uri.clone(),
         Range::new(start, end),
