@@ -85,6 +85,10 @@ impl Backend {
             return;
         }
 
+        // ★ Adjust cached lapper offsets so F12 is accurate before the
+        // debounced reparse completes.
+        crate::state::adjust_lapper_for_changes(&self.state, &uri, changes, &rope);
+
         let ver = version.unwrap_or(-1);
         self.state.insert_document(uri.clone(), rope, ver);
 
