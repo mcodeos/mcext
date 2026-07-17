@@ -527,9 +527,7 @@ impl LanguageServer for Backend {
             // Signal that init is complete.
             // Order matters: set the sticky flag FIRST, then notify.
             // This ensures any task woken by notify_waiters() sees init_done == true.
-            state_for_init
-                .init_done
-                .store(true, Ordering::Release);
+            state_for_init.init_done.store(true, Ordering::Release);
             state_for_init.init_notify.notify_waiters();
             info!("init_done = true — parse_and_publish can now make RPC calls");
 
@@ -839,7 +837,10 @@ impl LanguageServer for Backend {
         // Only do this AFTER init is complete — concurrent RPC during init
         // (e.g. with Phase 2's load_project) will crash the single-threaded mcc.
         if self.state.sem_symbols.get(&uri).is_none()
-            && self.state.init_done.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .state
+                .init_done
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             if let Some(rope) = self.state.document_rope(&uri) {
                 let server_guard = self.mcc_server.read().await;
