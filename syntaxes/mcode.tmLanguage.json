@@ -44,7 +44,7 @@
       "patterns": [
         {
           "name": "keyword.control.mcode",
-          "match": "\\b(component|interface|module|enum|func|define|pub|use|as|this|pins|role|in|out|io|ps|anl|nc|if|else|return|true|false|null)\\b"
+          "match": "\\b(component|interface|module|enum|func|define|pub|use|as|this|pins|role|in|out|io|ps|anl|nc|label|if|else|return|true|false|null)\\b"
         },
         {
           "name": "keyword.operator.mcode",

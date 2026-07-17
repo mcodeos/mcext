@@ -228,7 +228,12 @@ pub fn resolve(
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "enum_class_ref" | "pin_name_ref" => {
+            // ── Label support (scope design, step 7/9) ──
+            "label_def" => {
+                // Self-locate: cursor on label definition itself → stay
+                return Some(GotoDefinitionResponse::Array(vec![]));
+            }
+            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref" | "label_ref" => {
                 let name = rope
                     .byte_slice(interval.start..interval.stop)
                     .to_string();
@@ -649,7 +654,8 @@ fn resolve_ref_to_def(
     None
 }
 
-/// Look up a class name in the project index, trying Component then Module.
+/// Look up a class name using mcc's unified_lookup RPC (Tier 1-4 priority),
+/// falling back to project index.
 fn lookup_index(
     state: &WorkspaceState,
     name: &str,
