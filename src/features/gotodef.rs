@@ -28,7 +28,7 @@ pub fn resolve(
     // at the trailing edge of a token still resolves it. Identifier tokens are
     // separated by non-identifier characters (`.`, whitespace, etc.), so the
     // inclusive bound does not cause a caret to match an adjacent token.
-    let mut intervals: Vec<_> = symbols
+    let intervals: Vec<_> = symbols
         .lapper
         .iter()
         .filter(|i| offset >= i.start && offset <= i.stop)
@@ -75,9 +75,7 @@ pub fn resolve(
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| {
         let order = |k: &str| match k {
-            "class_def"
-            | "function_def"
-            | "role_definition" => 0,
+            "class_def" | "function_def" | "role_definition" => 0,
             "class_ref" => 1,
             "instance_ref" | "port_def" => 2,
             "pin_name_def" => 3,
@@ -96,26 +94,32 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "instance_def" | "declare_instance" => {
-                let name = rope
-                    .byte_slice(interval.start..interval.stop)
-                    .to_string();
+                let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
-                    state, &symbols, &rope, uri,
-                    interval.kind.as_str(), interval.id,
-                    &interval.scope, &name,
+                    state,
+                    &symbols,
+                    &rope,
+                    uri,
+                    interval.kind.as_str(),
+                    interval.id,
+                    &interval.scope,
+                    &name,
                 ) {
                     return Some(resp);
                 }
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "instance_ref" => {
-                let name = rope
-                    .byte_slice(interval.start..interval.stop)
-                    .to_string();
+                let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
-                    state, &symbols, &rope, uri,
-                    interval.kind.as_str(), interval.id,
-                    &interval.scope, &name,
+                    state,
+                    &symbols,
+                    &rope,
+                    uri,
+                    interval.kind.as_str(),
+                    interval.id,
+                    &interval.scope,
+                    &name,
                 ) {
                     return Some(resp);
                 }
@@ -233,14 +237,18 @@ pub fn resolve(
                 // Self-locate: cursor on label definition itself → stay
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref" | "label_ref" => {
-                let name = rope
-                    .byte_slice(interval.start..interval.stop)
-                    .to_string();
+            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref"
+            | "label_ref" => {
+                let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
-                    state, &symbols, &rope, uri,
-                    interval.kind.as_str(), interval.id,
-                    &interval.scope, &name,
+                    state,
+                    &symbols,
+                    &rope,
+                    uri,
+                    interval.kind.as_str(),
+                    interval.id,
+                    &interval.scope,
+                    &name,
                 ) {
                     return Some(resp);
                 }
@@ -339,7 +347,10 @@ fn cross_file_response(
     current_rope: &Rope,
     current_uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
-    info!("cross_file_response: ENTER target_uri={target_uri} span=[{},{}]", span[0], span[1]);
+    info!(
+        "cross_file_response: ENTER target_uri={target_uri} span=[{},{}]",
+        span[0], span[1]
+    );
     // target_uri may be a `file://` URL (from enum/project index) or a bare
     // path (from mcc cross_file_targets). Handle both forms.
     let target_url = if target_uri.starts_with("file://") || target_uri.starts_with("untitled:") {
@@ -364,9 +375,7 @@ fn cross_file_response(
     let end = offset_to_position(span[1], &target_rope)?;
     info!(
         "cross_file_response: uri={} span=[{},{}] → pos=({},{})..({},{})",
-        target_uri, span[0], span[1],
-        start.line, start.character,
-        end.line, end.character
+        target_uri, span[0], span[1], start.line, start.character, end.line, end.character
     );
     Some(GotoDefinitionResponse::Scalar(Location::new(
         target_url,
@@ -597,10 +606,7 @@ fn resolve_ref_to_def(
 ) -> Option<GotoDefinitionResponse> {
     // Level 1: cross_file_targets (kind + id → uri + span)
     for target in &symbols.cross_file_targets {
-        if target.kind == kind
-            && target.ref_id == id
-            && !target.target_uri.is_empty()
-        {
+        if target.kind == kind && target.ref_id == id && !target.target_uri.is_empty() {
             return cross_file_response(state, &target.target_uri, target.span, rope, uri);
         }
     }
@@ -609,9 +615,7 @@ fn resolve_ref_to_def(
     if !scope.is_empty() {
         for entry in &symbols.lapper {
             if entry.scope == scope && entry.id != id {
-                let entry_name = rope
-                    .byte_slice(entry.start..entry.stop)
-                    .to_string();
+                let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
                 if belongs_to(&entry_name, name) {
                     return local_response(uri, [entry.start, entry.stop], rope);
                 }
@@ -623,9 +627,7 @@ fn resolve_ref_to_def(
     let mut best: Option<(usize, usize)> = None;
     for entry in &symbols.lapper {
         if entry.id != id {
-            let entry_name = rope
-                .byte_slice(entry.start..entry.stop)
-                .to_string();
+            let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
             if belongs_to(&entry_name, name) {
                 let pos = entry.start;
                 if best.map_or(true, |(s, _)| pos < s) {
@@ -664,7 +666,12 @@ fn lookup_index(
 ) -> Option<GotoDefinitionResponse> {
     use crate::index::snapshot::IndexKind;
     let snap = state.index.snapshot();
-    for kind in &[IndexKind::Component, IndexKind::Module, IndexKind::Interface, IndexKind::Enum] {
+    for kind in &[
+        IndexKind::Component,
+        IndexKind::Module,
+        IndexKind::Interface,
+        IndexKind::Enum,
+    ] {
         let entries = snap.lookup(*kind, name);
         if let Some(entry) = entries.first() {
             info!(
