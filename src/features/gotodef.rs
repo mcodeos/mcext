@@ -68,20 +68,19 @@ pub fn resolve(
         return None;
     }
 
-    // ★ Priority order: instance_ref before pin_name_definition before others.
-    // pin_name_definition often has a large span covering constructor args
+    // ★ Priority order: instance_ref before pin_name_def before others.
+    // pin_name_def often has a large span covering constructor args
     // (e.g. `[+, -]::DC(volt, Source)`), which would otherwise shadow
     // instance_ref entries for the param references inside.
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| {
         let order = |k: &str| match k {
-            "class_definition"
-            | "function_definition"
-            | "define_definition"
+            "class_def"
+            | "function_def"
             | "role_definition" => 0,
-            "declare_class" | "class_ref" => 1,
-            "instance_ref" | "instance_reference" | "port_definition" => 2,
-            "pin_name_definition" => 3,
+            "class_ref" => 1,
+            "instance_ref" | "port_def" => 2,
+            "pin_name_def" => 3,
             _ => 4,
         };
         order(&a.kind).cmp(&order(&b.kind))
@@ -93,135 +92,35 @@ pub fn resolve(
             interval.kind, interval.id, interval.start, interval.stop
         );
         match interval.kind.as_str() {
-            "class_definition" => {
-                // Cursor is on a class definition itself (e.g. "component MCU.US513_20_F").
-                // VS Code ignores Scalar(自身) responses and falls back to reference search.
-                // Use Array(vec![]) to signal "done, stay here" without triggering fallback.
-                info!("goto_def: class_definition at self, returning empty Array to prevent VS Code fallback");
+            "class_def" | "class_definition" => {
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "declare_class" => {
-                eprintln!(
-                    "F12_DIAG declare_class id={} @{}:{} → searching",
-                    interval.id, interval.start, interval.stop
-                );
-                // Priority: local file → use imports → library
-                //
-                // 1. Same-file class_definition (本文件定义)
-                for entry in &symbols.lapper {
-                    if entry.kind == "class_definition" && entry.id == interval.id {
-                        eprintln!(
-                            "F12_DIAG declare_class → local class_definition @{}:{}",
-                            entry.start, entry.stop
-                        );
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // 2. Cross-file targets (use 引入的文件)
-                for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
-                        eprintln!(
-                            "F12_DIAG declare_class → cross_file {} span={:?}",
-                            target.target_uri, target.span
-                        );
-                        return cross_file_response(
-                            state,
-                            &target.target_uri,
-                            target.span,
-                            &rope,
-                            uri,
-                        );
-                    }
-                }
-                // 3. Project index (Component or Module)
-                let class_name = rope
+            "instance_def" | "declare_instance" => {
+                let name = rope
                     .byte_slice(interval.start..interval.stop)
                     .to_string();
-                if !class_name.is_empty() {
-                    if let Some(resp) = lookup_index(state, &class_name, &rope, uri) {
-                        return Some(resp);
-                    }
+                if let Some(resp) = resolve_ref_to_def(
+                    state, &symbols, &rope, uri,
+                    interval.kind.as_str(), interval.id,
+                    &interval.scope, &name,
+                ) {
+                    return Some(resp);
                 }
-                eprintln!("F12_DIAG declare_class id={} → NOT FOUND", interval.id);
-            }
-            "declare_instance" => {
-                // Self-locate: cursor is on an instance name (e.g. "usbsocket").
-                // The class name gets a separate declare_class entry from mcc.
-                eprintln!(
-                    "F12_DIAG declare_instance id={} @{}:{} → stay (empty Array)",
-                    interval.id, interval.start, interval.stop
-                );
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "interface_ref" | "interface_reference" => {
-                info!("goto_def: interface_ref id={}", interval.id);
-                // Try cross-file targets
-                let targets_count = symbols.cross_file_targets.len();
-                info!("goto_def: cross_file_targets count={}", targets_count);
-                for target in &symbols.cross_file_targets {
-                    info!(
-                        "goto_def: cross_file target ref_id={} target_uri={} span=[{}, {}]",
-                        target.ref_id, target.target_uri, target.span[0], target.span[1]
-                    );
-                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
-                        return cross_file_response(
-                            state,
-                            &target.target_uri,
-                            target.span,
-                            &rope,
-                            uri,
-                        );
-                    }
-                }
-                info!(
-                    "goto_def: no cross_file target found for interface_ref id={}",
-                    interval.id
-                );
-            }
-            "instance_ref" | "instance_reference" => {
-                eprintln!(
-                    "F12_DIAG instance_ref id={} scope={} @{}:{} → searching declare_instance",
-                    interval.id, interval.scope, interval.start, interval.stop
-                );
-                let ref_scope = &interval.scope;
-
-                // Exact (id, scope) match for declare_instance
-                for entry in &symbols.lapper {
-                    if entry.kind == "declare_instance"
-                        && entry.id == interval.id
-                        && entry.scope == *ref_scope
-                    {
-                        eprintln!(
-                            "F12_DIAG instance_ref MATCHED declare_instance id={} scope={} @{}:{}",
-                            entry.id, entry.scope, entry.start, entry.stop
-                        );
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                eprintln!("F12_DIAG instance_ref id={} scope='{}': no declare_instance match, trying port_definition/cross_file", interval.id, ref_scope);
-                // Component param ref → port_definition (scope-aware)
-                for entry in &symbols.lapper {
-                    if entry.kind == "port_definition"
-                        && entry.id == interval.id
-                        && entry.scope == *ref_scope
-                    {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // Try cross-file targets (e.g. jump to library definition)
-                for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
-                        return cross_file_response(
-                            state,
-                            &target.target_uri,
-                            target.span,
-                            &rope,
-                            uri,
-                        );
-                    }
+            "instance_ref" => {
+                let name = rope
+                    .byte_slice(interval.start..interval.stop)
+                    .to_string();
+                if let Some(resp) = resolve_ref_to_def(
+                    state, &symbols, &rope, uri,
+                    interval.kind.as_str(), interval.id,
+                    &interval.scope, &name,
+                ) {
+                    return Some(resp);
                 }
             }
-            "port_definition" => {
+            "port_def" => {
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
@@ -247,7 +146,7 @@ pub fn resolve(
                 );
                 // For system-library enums (e.g. `PKG` from mcode), the
                 // enum_class_ref id is a best-effort placeholder that can
-                // collide with unrelated local declares (e.g. a port_definition
+                // collide with unrelated local declares (e.g. a port_def
                 // at id=0).  Always resolve via the project index.
                 let class_name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if !class_name.is_empty() {
@@ -321,45 +220,24 @@ pub fn resolve(
                 }
             }
             // ── M6 gaps: new SymbolType variants ──
-            "function_definition" | "define_definition" | "role_definition" => {
+            "function_def" | "define_def" | "role_def" => {
                 // Self-locate: cursor on definition itself → stay
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "pin_name_definition" => {
+            "pin_name_def" => {
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "function_ref" | "method_ref" | "class_ref" | "pin_name_ref" => {
-                // Priority: local → use imports → library
-                // 1. Local lapper (same scope, different kind)
-                for entry in &symbols.lapper {
-                    if entry.id == interval.id
-                        && entry.kind != interval.kind
-                        && entry.scope == interval.scope
-                    {
-                        return local_response(uri, [entry.start, entry.stop], &rope);
-                    }
-                }
-                // 2. Cross-file targets (use imports)
-                for target in &symbols.cross_file_targets {
-                    if target.ref_id == interval.id && !target.target_uri.is_empty() {
-                        return cross_file_response(
-                            state,
-                            &target.target_uri,
-                            [target.span[0], target.span[1]],
-                            &rope,
-                            uri,
-                        );
-                    }
-                }
-                // 3. Project index (Component or Module)
-                let class_name = rope
+            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "enum_class_ref" | "pin_name_ref" => {
+                let name = rope
                     .byte_slice(interval.start..interval.stop)
                     .to_string();
-                if !class_name.is_empty() {
-                    if let Some(resp) = lookup_index(state, &class_name, &rope, uri) {
-                        return Some(resp);
-                    }
+                if let Some(resp) = resolve_ref_to_def(
+                    state, &symbols, &rope, uri,
+                    interval.kind.as_str(), interval.id,
+                    &interval.scope, &name,
+                ) {
+                    return Some(resp);
                 }
             }
             _ => {}
@@ -456,6 +334,7 @@ fn cross_file_response(
     current_rope: &Rope,
     current_uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
+    info!("cross_file_response: ENTER target_uri={target_uri} span=[{},{}]", span[0], span[1]);
     // target_uri may be a `file://` URL (from enum/project index) or a bare
     // path (from mcc cross_file_targets). Handle both forms.
     let target_url = if target_uri.starts_with("file://") || target_uri.starts_with("untitled:") {
@@ -466,15 +345,24 @@ fn cross_file_response(
 
     // Try to get rope from state or disk
     let target_rope = if let Some(r) = state.document_rope(&target_url) {
+        info!("cross_file_response: using document_rope");
         r
     } else if target_url == *current_uri {
+        info!("cross_file_response: using current_rope (same uri)");
         current_rope.clone()
     } else {
+        info!("cross_file_response: reading from disk");
         read_file_to_rope(&target_url)?
     };
 
     let start = offset_to_position(span[0], &target_rope)?;
     let end = offset_to_position(span[1], &target_rope)?;
+    info!(
+        "cross_file_response: uri={} span=[{},{}] → pos=({},{})..({},{})",
+        target_uri, span[0], span[1],
+        start.line, start.character,
+        end.line, end.character
+    );
     Some(GotoDefinitionResponse::Scalar(Location::new(
         target_url,
         Range::new(start, end),
@@ -560,7 +448,7 @@ mod tests {
     fn enum_value_def_returns_local_self_response() {
         // `SOP8` row gets an enum_value_def lapper entry; cursor on it must
         // return the same span (self-resolution), matching the behavior of
-        // `port_definition`.
+        // `port_def`.
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
         let (state, uri) = state_with_lapper(
             source,
@@ -651,6 +539,116 @@ mod tests {
     }
 }
 
+/// Check if `a` and `b` refer to the same base identifier in mcode naming.
+///
+/// Handles:
+///   - Array indices:  `res1` ↔ `res[1:2]` / `res[1,2]`  (both → `res`)
+///   - Brace expansion: `rs485.A` ↔ `rs485{A,B}`        (both → `rs485`)
+///   - Exact match:     `VDD_3V3` ↔ `VDD_3V3`
+fn belongs_to(a: &str, b: &str) -> bool {
+    normalize_mc_name(a) == normalize_mc_name(b)
+}
+
+/// Strip mcode array/brace/dot suffixes and trailing digits to get
+/// the base identifier.
+fn normalize_mc_name(name: &str) -> &str {
+    let s = name;
+    // [...] suffix → base (res[1:2] → res, res[1,2] → res)
+    if let Some(i) = s.rfind('[') {
+        if s[i + 1..].ends_with(']') {
+            return &s[..i];
+        }
+    }
+    // {...} suffix → base (rs485{A,B} → rs485)
+    if let Some(i) = s.rfind('{') {
+        if s[i + 1..].ends_with('}') {
+            return &s[..i];
+        }
+    }
+    // Trailing .member (rs485.A → rs485)
+    if let Some(i) = s.rfind('.') {
+        return &s[..i];
+    }
+    // Trailing digits (res1, res2 → res)
+    let trimmed = s.trim_end_matches(|c: char| c.is_ascii_digit());
+    if !trimmed.is_empty() && trimmed.len() < s.len() {
+        return trimmed;
+    }
+    s
+}
+
+/// Unified ref→def resolution for handlers that follow the 4-level
+/// scope-priority lookup. Returns `None` if unresolved (caller may
+/// fall back to self-locate or error).
+fn resolve_ref_to_def(
+    state: &WorkspaceState,
+    symbols: &crate::state::RpcSemSymbols,
+    rope: &Rope,
+    uri: &Url,
+    kind: &str,
+    id: u32,
+    scope: &str,
+    name: &str,
+) -> Option<GotoDefinitionResponse> {
+    // Level 1: cross_file_targets (kind + id → uri + span)
+    for target in &symbols.cross_file_targets {
+        if target.kind == kind
+            && target.ref_id == id
+            && !target.target_uri.is_empty()
+        {
+            return cross_file_response(state, &target.target_uri, target.span, rope, uri);
+        }
+    }
+
+    // Level 2: same-scope name match (exact or belongs_to)
+    if !scope.is_empty() {
+        for entry in &symbols.lapper {
+            if entry.scope == scope && entry.id != id {
+                let entry_name = rope
+                    .byte_slice(entry.start..entry.stop)
+                    .to_string();
+                if belongs_to(&entry_name, name) {
+                    return local_response(uri, [entry.start, entry.stop], rope);
+                }
+            }
+        }
+    }
+
+    // Level 3: same-file name match (any scope, prefer earlier = definition)
+    let mut best: Option<(usize, usize)> = None;
+    for entry in &symbols.lapper {
+        if entry.id != id {
+            let entry_name = rope
+                .byte_slice(entry.start..entry.stop)
+                .to_string();
+            if belongs_to(&entry_name, name) {
+                let pos = entry.start;
+                if best.map_or(true, |(s, _)| pos < s) {
+                    best = Some((pos, entry.stop));
+                }
+            }
+        }
+    }
+    if let Some((s, e)) = best {
+        return local_response(uri, [s, e], rope);
+    }
+
+    // Level 4: project index / library by name (exact + normalized)
+    if !name.is_empty() {
+        if let Some(resp) = lookup_index(state, name, rope, uri) {
+            return Some(resp);
+        }
+        let base = normalize_mc_name(name);
+        if base != name {
+            if let Some(resp) = lookup_index(state, base, rope, uri) {
+                return Some(resp);
+            }
+        }
+    }
+
+    None
+}
+
 /// Look up a class name in the project index, trying Component then Module.
 fn lookup_index(
     state: &WorkspaceState,
@@ -660,7 +658,7 @@ fn lookup_index(
 ) -> Option<GotoDefinitionResponse> {
     use crate::index::snapshot::IndexKind;
     let snap = state.index.snapshot();
-    for kind in &[IndexKind::Component, IndexKind::Module] {
+    for kind in &[IndexKind::Component, IndexKind::Module, IndexKind::Interface, IndexKind::Enum] {
         let entries = snap.lookup(*kind, name);
         if let Some(entry) = entries.first() {
             info!(

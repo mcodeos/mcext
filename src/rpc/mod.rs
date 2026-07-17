@@ -345,6 +345,9 @@ pub struct GlobalSymbols {
     /// ★ LSP: Cross-file goto targets (reference_id -> target)
     #[serde(default)]
     pub cross_file_targets: Vec<CrossFileTarget>,
+    /// ★ LSP: Instance cross-file targets (DeclareId -> target)
+    #[serde(default)]
+    pub instance_cross_file_targets: Vec<CrossFileTarget>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -364,6 +367,7 @@ pub struct GlobalReference {
 /// ★ LSP: Cross-file goto target entry
 #[derive(Debug, Clone, Deserialize)]
 pub struct CrossFileTarget {
+    pub kind: String,
     pub ref_id: u32,
     pub target_uri: String,
     pub span: [usize; 2],
