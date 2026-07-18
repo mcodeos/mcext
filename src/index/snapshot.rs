@@ -119,6 +119,14 @@ impl ProjectIndex {
         out
     }
 
+    /// Iterate all entries for a given kind.
+    pub fn iter_kind(&self, kind: IndexKind) -> impl Iterator<Item = &IndexEntry> {
+        self.by_name
+            .iter()
+            .filter(move |((k, _), _)| *k == kind)
+            .flat_map(|(_, entries)| entries.iter())
+    }
+
     /// Count number of entries (for testing)
     pub fn len(&self) -> usize {
         self.by_name.values().map(|v| v.len()).sum::<usize>() + self.enum_value_by_name.len()
