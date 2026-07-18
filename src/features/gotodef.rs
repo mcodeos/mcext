@@ -35,8 +35,9 @@ pub fn resolve(
         .collect();
 
     info!(
-        "goto_def: local_declares count={}",
-        symbols.local_declares.len()
+        "goto_def: local_declares count={}, cross_file_targets count={}",
+        symbols.local_declares.len(),
+        symbols.cross_file_targets.len()
     );
     for decl in &symbols.local_declares {
         info!(
@@ -86,8 +87,8 @@ pub fn resolve(
 
     for interval in &sorted_intervals {
         info!(
-            "goto_def: processing interval kind={}, id={}, start={}, stop={}",
-            interval.kind, interval.id, interval.start, interval.stop
+            "goto_def: interval kind={}, id={}, start={}, stop={}, scope='{}'",
+            interval.kind, interval.id, interval.start, interval.stop, interval.scope
         );
         match interval.kind.as_str() {
             "class_def" | "class_definition" => {
@@ -560,7 +561,14 @@ mod tests {
 ///   - Brace expansion: `rs485.A` ↔ `rs485{A,B}`        (both → `rs485`)
 ///   - Exact match:     `VDD_3V3` ↔ `VDD_3V3`
 fn belongs_to(a: &str, b: &str) -> bool {
-    normalize_mc_name(a) == normalize_mc_name(b)
+    let na = normalize_mc_name(a);
+    let nb = normalize_mc_name(b);
+    if na == nb {
+        return true;
+    }
+    // One may be a comma-separated list (e.g. "MIC, I2C0, SPI"),
+    // or truncated (e.g. "MIC{P,N" without closing brace).
+    na.contains(nb) || nb.contains(na)
 }
 
 /// Strip mcode array/brace/dot suffixes and trailing digits to get
@@ -611,10 +619,13 @@ fn resolve_ref_to_def(
         }
     }
 
-    // Level 2: same-scope name match (exact or belongs_to)
+    // Level 2: same-scope name match (exact or belongs_to).
+    // Skip the cursor's own entry (same kind AND same id), but allow
+    // cross-kind matches: e.g. instance_ref(id=D) → DeclareInstance(id=D).
     if !scope.is_empty() {
         for entry in &symbols.lapper {
-            if entry.scope == scope && entry.id != id {
+            let is_self = entry.kind == kind && entry.id == id;
+            if entry.scope == scope && !is_self {
                 let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
                 if belongs_to(&entry_name, name) {
                     return local_response(uri, [entry.start, entry.stop], rope);
@@ -623,10 +634,11 @@ fn resolve_ref_to_def(
         }
     }
 
-    // Level 3: same-file name match (any scope, prefer earlier = definition)
+    // Level 3: same-file name match (any scope, prefer earlier = definition).
     let mut best: Option<(usize, usize)> = None;
     for entry in &symbols.lapper {
-        if entry.id != id {
+        let is_self = entry.kind == kind && entry.id == id;
+        if !is_self {
             let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
             if belongs_to(&entry_name, name) {
                 let pos = entry.start;
