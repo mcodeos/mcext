@@ -93,20 +93,31 @@ impl From<SemSymbols> for RpcSemSymbols {
                 .local
                 .declares
                 .into_iter()
-                .map(|d| LocalDeclareSpan { id: d.id, span: d.span })
+                .map(|d| LocalDeclareSpan {
+                    id: d.id,
+                    span: d.span,
+                })
                 .collect(),
             local_references: sem.local.references,
             global_declares: sem
                 .global
                 .declares
                 .into_iter()
-                .map(|d| GlobalDeclareSpan { id: d.id, uri: d.uri, span: d.span })
+                .map(|d| GlobalDeclareSpan {
+                    id: d.id,
+                    uri: d.uri,
+                    span: d.span,
+                })
                 .collect(),
             global_references: sem
                 .global
                 .references
                 .into_iter()
-                .map(|r| GlobalReferenceSpan { id: r.id, uri: r.uri, span: r.span })
+                .map(|r| GlobalReferenceSpan {
+                    id: r.id,
+                    uri: r.uri,
+                    span: r.span,
+                })
                 .collect(),
             cross_file_targets: sem.global.cross_file_targets,
         }

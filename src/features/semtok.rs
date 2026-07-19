@@ -409,29 +409,132 @@ fn emit_multiline_comment(
     }
 }
 
-// Tests disabled - require mcc direct calls
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::state::WorkspaceState;
-//     use mcc::McURI;
-//
-//     fn fake_state(text: &str) -> (WorkspaceState, Url) {
-//         let state = WorkspaceState::new();
-//         let uri = Url::parse("file:///test.mc").unwrap();
-//         state.insert_document(uri.clone(), Rope::from_str(text), 1);
-//
-//         let mc_uri = McURI::from("/test.mc");
-//         mcc::mcc_load_from_string(&mc_uri, text);
-//
-//         if let Some(result) = mcc::mcc_query(&mc_uri) {
-//             state.insert_parse(
-//                 uri.clone(),
-//                 std::sync::Arc::clone(&result.symbols.sem_tokens),
-//                 std::sync::Arc::clone(&result.symbols.sem_symbols),
-//                 mc_uri,
-//             );
-//         }
-//
-//         (state, uri)
-//     }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{RpcSemTokens, SemTokenEntry};
+    use ropey::Rope;
+    use std::sync::{Arc, Mutex};
+
+    fn state_with_tokens(text: &str, raw_tokens: Vec<(i16, i32, i32)>) -> (WorkspaceState, Url) {
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///test.mc").unwrap();
+        state.insert_document(uri.clone(), Rope::from_str(text), 1);
+        let tokens = RpcSemTokens {
+            tokens: raw_tokens
+                .into_iter()
+                .map(|(type_, position, length)| SemTokenEntry {
+                    type_,
+                    position,
+                    length,
+                })
+                .collect(),
+        };
+        state
+            .symbols
+            .sem_tokens
+            .insert(uri.clone(), Arc::new(Mutex::new(tokens)));
+        (state, uri)
+    }
+
+    // ── compute() tests ──
+
+    #[test]
+    fn empty_tokens_returns_some_empty() {
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///test.mc").unwrap();
+        state.insert_document(uri.clone(), Rope::from_str("x\n"), 1);
+        let tokens = RpcSemTokens { tokens: vec![] };
+        state
+            .symbols
+            .sem_tokens
+            .insert(uri.clone(), Arc::new(Mutex::new(tokens)));
+        let result = compute(&state, &uri).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn single_token_delta_encoded() {
+        let (state, uri) = state_with_tokens("abc\n", vec![(0, 0, 3)]);
+        let result = compute(&state, &uri).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].delta_line, 0);
+    }
+
+    #[test]
+    fn tokens_sorted_by_position() {
+        let (state, uri) = state_with_tokens("abcdef\n", vec![(1, 4, 2), (0, 0, 3)]);
+        let result = compute(&state, &uri).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].token_type, 0);
+    }
+
+    #[test]
+    fn keyword_kept_for_real_keyword() {
+        let (state, uri) = state_with_tokens("component X\n", vec![(13, 0, 9)]);
+        let result = compute(&state, &uri).unwrap();
+        assert!(result.iter().any(|t| t.token_type == type_map::T_KEYWORD));
+    }
+
+    #[test]
+    fn keyword_reclassified_to_variable() {
+        let (state, uri) = state_with_tokens("foobar\n", vec![(13, 0, 6)]);
+        let result = compute(&state, &uri).unwrap();
+        assert!(
+            result.iter().all(|t| t.token_type != type_map::T_KEYWORD),
+            "non-keyword should not have KEYWORD type"
+        );
+    }
+
+    #[test]
+    fn negative_position_skipped() {
+        let (state, uri) = state_with_tokens("abc\n", vec![(0, -1, 3)]);
+        let result = compute(&state, &uri).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn out_of_bounds_token_skipped() {
+        let (state, uri) = state_with_tokens("abc\n", vec![(0, 100, 3)]);
+        let result = compute(&state, &uri).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── Delta tests ──
+
+    #[test]
+    fn delta_empty_prev_and_curr() {
+        let prev: Vec<SemanticToken> = vec![];
+        let curr: Vec<SemanticToken> = vec![];
+        let delta = compute_delta(&prev, &curr).unwrap();
+        assert!(delta.edits.is_empty());
+    }
+
+    #[test]
+    fn delta_delete_all() {
+        let prev = vec![make_token(0, 0, 3, 0)];
+        let curr = vec![];
+        let delta = compute_delta(&prev, &curr).unwrap();
+        assert_eq!(delta.edits.len(), 1);
+        assert_eq!(delta.edits[0].delete_count, 1);
+    }
+
+    #[test]
+    fn delta_insert_all() {
+        let prev = vec![];
+        let curr = vec![make_token(0, 0, 3, 0)];
+        let delta = compute_delta(&prev, &curr).unwrap();
+        assert_eq!(delta.edits.len(), 1);
+        assert!(delta.edits[0].data.is_some());
+    }
+
+    fn make_token(line: u32, start: u32, len: u32, tt: u32) -> SemanticToken {
+        SemanticToken {
+            delta_line: line,
+            delta_start: start,
+            length: len,
+            token_type: tt,
+            token_modifiers_bitset: 0,
+        }
+    }
+}
