@@ -109,29 +109,26 @@ fn collect_local_symbols(
     let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for entry in &symbols.lapper {
-        let name = rope.byte_slice(entry.start..entry.stop).to_string();
-        // Skip: empty names, already added, anonymous (@-prefixed)
-        if name.is_empty() || name.starts_with('@') || added.contains(&name) {
-            continue;
-        }
-        added.insert(name.clone());
-
+        // Fast-path: skip ref kinds without any allocation
         let (kind, detail) = match entry.kind.as_str() {
             "port_def" => (CompletionItemKind::PROPERTY, "Port"),
             "label_def" => (CompletionItemKind::VARIABLE, "Label"),
             "instance_def" | "declare_instance" => (CompletionItemKind::VALUE, "Instance"),
             "function_def" => (CompletionItemKind::FUNCTION, "Function"),
             "class_def" | "class_definition" => (CompletionItemKind::CLASS, "Class def"),
-            "class_ref" | "declare_class" => continue, // skip refs
-            "instance_ref" | "label_ref" | "function_ref" | "pin_name_ref" | "interface_ref"
-            | "enum_value_ref" | "enum_class_ref" => continue, // skip refs
             "pin_name_def" => (CompletionItemKind::ENUM_MEMBER, "Pin"),
             "enum_value_def" => (CompletionItemKind::ENUM_MEMBER, "Enum value"),
             "enum_class_def" => (CompletionItemKind::ENUM, "Enum"),
             "define_def" => (CompletionItemKind::CONSTANT, "Define"),
             "role_def" => (CompletionItemKind::INTERFACE, "Role"),
-            _ => continue,
+            _ => continue, // skip refs and unknown kinds
         };
+
+        // Extract name only for qualifying entries (avoids allocation for skipped kinds)
+        let name = rope.byte_slice(entry.start..entry.stop).to_string();
+        if name.is_empty() || name.starts_with('@') || !added.insert(name.clone()) {
+            continue;
+        }
 
         seen.insert(name.clone());
         items.push(CompletionItem {
@@ -164,10 +161,9 @@ fn collect_index_symbols(
     ] {
         // Use the snapshot's by_name entries
         for entry in snap.iter_kind(*kind) {
-            if seen.contains(&entry.name) {
+            if !seen.insert(entry.name.clone()) {
                 continue;
             }
-            seen.insert(entry.name.clone());
             items.push(CompletionItem {
                 label: entry.name.clone(),
                 kind: Some(*item_kind),

@@ -42,6 +42,9 @@ pub struct ProjectIndex {
 
     /// Files indexed by URI
     by_uri: HashMap<Url, ()>,
+
+    /// Reverse index: URI → entries (for O(1) lookup_file)
+    by_uri_entries: HashMap<Url, Vec<(IndexKind, IndexEntry)>>,
 }
 
 impl ProjectIndex {
@@ -55,6 +58,10 @@ impl ProjectIndex {
 
     /// Add an entry
     pub fn add(&mut self, kind: IndexKind, entry: IndexEntry) {
+        self.by_uri_entries
+            .entry(entry.uri.clone())
+            .or_default()
+            .push((kind, entry.clone()));
         self.by_name
             .entry((kind, entry.name.clone()))
             .or_default()
@@ -82,6 +89,7 @@ impl ProjectIndex {
     /// Remove all entries for a file
     pub fn remove_file(&mut self, uri: &Url) {
         self.by_uri.remove(uri);
+        self.by_uri_entries.remove(uri);
         self.files.retain(|u| u != uri);
         for entries in self.by_name.values_mut() {
             entries.retain(|e| &e.uri != uri);
@@ -106,17 +114,13 @@ impl ProjectIndex {
             .get(&(class_name.to_string(), value_name.to_string()))
     }
 
-    /// Lookup all entries for a file (across kinds)
+    /// Lookup all entries for a file (across kinds).
+    /// Uses reverse index for O(1) lookup instead of O(all_entries) scan.
     pub fn lookup_file(&self, uri: &Url) -> Vec<(IndexKind, &IndexEntry)> {
-        let mut out = Vec::new();
-        for ((kind, _name), entries) in &self.by_name {
-            for e in entries {
-                if &e.uri == uri {
-                    out.push((*kind, e));
-                }
-            }
-        }
-        out
+        self.by_uri_entries
+            .get(uri)
+            .map(|entries| entries.iter().map(|(k, e)| (*k, e)).collect())
+            .unwrap_or_default()
     }
 
     /// Iterate all entries for a given kind.
