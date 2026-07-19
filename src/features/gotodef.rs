@@ -22,7 +22,7 @@ pub fn resolve(
     let rope = state.document_rope(uri)?;
     let offset = position_to_offset(position, &rope)?;
 
-    let symbols_ref = state.sem_symbols.get(uri)?;
+    let symbols_ref = state.symbols.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
     // Find symbol at cursor position using lapper.
@@ -148,7 +148,7 @@ pub fn resolve(
                 // at id=0).  Always resolve via the project index.
                 let class_name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if !class_name.is_empty() {
-                    let snap = state.index.snapshot();
+                    let snap = state.project.index.snapshot();
                     let entries = snap.lookup(crate::index::snapshot::IndexKind::Enum, &class_name);
                     if let Some(entry) = entries.first() {
                         return cross_file_response(
@@ -198,7 +198,7 @@ pub fn resolve(
                         class_name, value_name
                     );
                     if let Some(entry) = state
-                        .index
+                        .project.index
                         .snapshot()
                         .lookup_enum_value(&class_name, &value_name)
                     {
@@ -213,7 +213,7 @@ pub fn resolve(
                     info!(
                         "goto_def: enum_value_ref lookup FAILED for {}.{} (snapshot enum_values={})",
                         class_name, value_name,
-                        state.index.snapshot().enum_value_len()
+                        state.project.index.snapshot().enum_value_len()
                     );
                 }
             }
@@ -395,7 +395,7 @@ mod tests {
             cross_file_targets: vec![],
         };
         state
-            .sem_symbols
+            .symbols.sem_symbols
             .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
         (state, uri)
     }
@@ -602,7 +602,7 @@ fn lookup_index(
     uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
     use crate::index::snapshot::IndexKind;
-    let snap = state.index.snapshot();
+    let snap = state.project.index.snapshot();
     for kind in &[
         IndexKind::Component,
         IndexKind::Module,

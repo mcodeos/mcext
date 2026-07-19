@@ -25,7 +25,7 @@ use tower_lsp::lsp_types::Url;
 /// - After waking, checks seq: if still its own, calls on_fire; otherwise overwritten, discarded
 ///
 /// Not a lazy timer, but optimistic locking based on seq — avoids race condition during cancel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ReparseScheduler {
     sequences: Arc<DashMap<Url, Arc<AtomicU64>>>,
     debounce: Duration,

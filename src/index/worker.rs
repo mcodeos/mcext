@@ -35,12 +35,12 @@ pub enum IndexCommand {
 }
 
 /// Worker external handle
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct IndexWorkerHandle {
     inner: Option<InnerHandle>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct InnerHandle {
     tx: mpsc::UnboundedSender<IndexCommand>,
     snapshot_rx: watch::Receiver<ProjectIndex>,

@@ -57,7 +57,7 @@ pub fn find_symbol_at_offset(
     offset: usize,
 ) -> Option<(SymbolInfo, String)> {
     let rope = state.document_rope(uri)?;
-    let symbols_ref = state.sem_symbols.get(uri)?;
+    let symbols_ref = state.symbols.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
     let intervals = find_intervals_at(&symbols.lapper, offset);

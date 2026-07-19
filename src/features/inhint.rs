@@ -15,7 +15,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Range, Url}
 /// Compute inlay hints
 pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<InlayHint>> {
     let rope = state.document_rope(uri)?;
-    let symbols_ref = state.sem_symbols.get(uri)?;
+    let symbols_ref = state.symbols.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
     // If no symbols, return None (consistent with other feature modules)

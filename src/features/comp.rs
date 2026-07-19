@@ -96,7 +96,7 @@ fn collect_local_symbols(
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    let symbols_ref = match state.sem_symbols.get(uri) {
+    let symbols_ref = match state.symbols.sem_symbols.get(uri) {
         Some(s) => s,
         None => return,
     };
@@ -147,7 +147,7 @@ fn collect_index_symbols(
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    let snap = state.index.snapshot();
+    let snap = state.project.index.snapshot();
 
     for (kind, kind_label, item_kind) in &[
         (IndexKind::Component, "Component", CompletionItemKind::CLASS),
