@@ -16,7 +16,7 @@ use tower_lsp::lsp_types::{Range, TextEdit, Url};
 const INDENT_SIZE: usize = 4;
 
 /// Formatting options
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FormatOptions {
     /// Indent size
     pub indent_size: usize,
@@ -26,6 +26,12 @@ pub struct FormatOptions {
     pub spaces_around_operators: bool,
     /// Line width (currently unused)
     pub max_line_width: usize,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FormatOptions {

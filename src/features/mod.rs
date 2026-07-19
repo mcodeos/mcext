@@ -1,21 +1,18 @@
 //! LSP capability implementations (one module per feature)
 //!
-//! Phase 0 contains existing capabilities:
-//! - [`diag`]      — textDocument/publishDiagnostics (push)
 //! - [`gotodef`]   — textDocument/definition
 //! - [`refs`]      — textDocument/references
 //! - [`semtok`]    — textDocument/semanticTokens/full + range
-//!
-//! Phase 4 additions:
 //! - [`comp`]      — textDocument/completion (auto-completion)
 //! - [`fmt`]       — textDocument/formatting (code formatting)
 //! - [`inhint`]    — textDocument/inlayHint (inline hints)
+//! - [`hover`]     — textDocument/hover
+//! - [`symbols`]   — shared symbol resolution utilities
 //!
-//! Subsequent phase additions: hover / rename, etc.
-//! Detailed plan see `doc/features.md`.
+//! Diagnostics are fetched via RPC in `server/mod.rs::parse_and_publish`.
+//! Document links (`usejump`) are disabled — use F12 (goto_definition) instead.
 
 pub mod comp;
-pub mod diag;
 pub mod fmt;
 pub mod gotodef;
 pub mod hover;
@@ -23,4 +20,3 @@ pub mod inhint;
 pub mod refs;
 pub mod semtok;
 pub mod symbols;
-pub mod usejump;

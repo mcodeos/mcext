@@ -8,9 +8,9 @@
 //!
 //! Currently implemented is simple type hints, showing instantiation type of component/interface.
 
-use crate::common::position::position_to_offset;
+use crate::common::position::{offset_to_position, position_to_offset};
 use crate::state::WorkspaceState;
-use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url};
+use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Range, Url};
 
 /// Compute inlay hints
 pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<InlayHint>> {
@@ -18,9 +18,9 @@ pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<In
     let symbols_ref = state.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
-    // If no symbols, return empty
+    // If no symbols, return None (consistent with other feature modules)
     if symbols.lapper.is_empty() && symbols.global_declares.is_empty() {
-        return Some(Vec::new());
+        return None;
     }
 
     let uri_path = uri.path();
@@ -55,17 +55,12 @@ pub fn compute(state: &WorkspaceState, uri: &Url, range: Range) -> Option<Vec<In
     let range_start = position_to_offset(range.start, &rope)?;
     let range_end = position_to_offset(range.end, &rope)?;
     hints.retain(|h| {
-        let h_offset = position_to_offset(h.position, &rope).unwrap_or(0);
+        let h_offset = match position_to_offset(h.position, &rope) {
+            Some(o) => o,
+            None => return false, // drop hints at unrepresentable positions
+        };
         h_offset >= range_start && h_offset <= range_end
     });
 
     Some(hints)
-}
-
-/// Helper function: convert offset to position
-fn offset_to_position(offset: usize, rope: &ropey::Rope) -> Option<Position> {
-    let line = rope.try_byte_to_line(offset).ok()?;
-    let line_start = rope.try_line_to_char(line).ok()?;
-    let col = offset - line_start;
-    Some(Position::new(line as u32, col as u32))
 }

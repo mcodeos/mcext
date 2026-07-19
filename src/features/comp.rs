@@ -92,7 +92,7 @@ fn collect_local_symbols(
     state: &WorkspaceState,
     uri: &Url,
     rope: &Rope,
-    offset: usize,
+    _offset: usize,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {

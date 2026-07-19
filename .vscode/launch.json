@@ -46,6 +46,8 @@
         // "${workspaceFolder}/../mcd/unitest/param"
         // "${workspaceFolder}/../mcd/unitest/project"
         // "${workspaceFolder}/../mcode"
+        // "${workspaceFolder}/../mc-examples"
+        
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "build: all",

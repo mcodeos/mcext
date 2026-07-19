@@ -204,7 +204,10 @@ async fn parse_and_publish(
                 uri_str,
                 resp.diagnostics.len()
             );
-            let rope = state.document_rope(&uri).unwrap_or_else(ropey::Rope::new);
+            let Some(rope) = state.document_rope(&uri) else {
+                tracing::warn!("document rope missing for {} — skipping diagnostics", uri);
+                return;
+            };
             for d in &resp.diagnostics {
                 debug!(
                     "  diag: code={} line={} col={} pos={} len={} msg={}",
@@ -311,43 +314,7 @@ async fn parse_and_publish(
     state.registered_uris.insert(uri.clone(), mc_uri.clone());
 
     // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
-    let rpc_symbols = crate::state::RpcSemSymbols {
-        lapper: sem.symbols.lapper.clone(),
-        local_declares: sem
-            .symbols
-            .local
-            .declares
-            .iter()
-            .map(|d| crate::state::LocalDeclareSpan {
-                id: d.id,
-                span: d.span,
-            })
-            .collect(),
-        local_references: sem.symbols.local.references.clone(),
-        global_declares: sem
-            .symbols
-            .global
-            .declares
-            .iter()
-            .map(|d| crate::state::GlobalDeclareSpan {
-                id: d.id,
-                uri: d.uri.clone(),
-                span: d.span,
-            })
-            .collect(),
-        global_references: sem
-            .symbols
-            .global
-            .references
-            .iter()
-            .map(|r| crate::state::GlobalReferenceSpan {
-                id: r.id,
-                uri: r.uri.clone(),
-                span: r.span,
-            })
-            .collect(),
-        cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
-    };
+    let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
     state
         .sem_symbols
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
@@ -850,43 +817,7 @@ impl LanguageServer for Backend {
                         // Serialize with other RPC calls (init, parse_and_publish)
                         let _rpc_guard = self.state.rpc_lock.lock().await;
                         if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
-                            let rpc_symbols = crate::state::RpcSemSymbols {
-                                lapper: sem.symbols.lapper.clone(),
-                                local_declares: sem
-                                    .symbols
-                                    .local
-                                    .declares
-                                    .iter()
-                                    .map(|d| crate::state::LocalDeclareSpan {
-                                        id: d.id,
-                                        span: d.span,
-                                    })
-                                    .collect(),
-                                local_references: sem.symbols.local.references.clone(),
-                                global_declares: sem
-                                    .symbols
-                                    .global
-                                    .declares
-                                    .iter()
-                                    .map(|d| crate::state::GlobalDeclareSpan {
-                                        id: d.id,
-                                        uri: d.uri.clone(),
-                                        span: d.span,
-                                    })
-                                    .collect(),
-                                global_references: sem
-                                    .symbols
-                                    .global
-                                    .references
-                                    .iter()
-                                    .map(|r| crate::state::GlobalReferenceSpan {
-                                        id: r.id,
-                                        uri: r.uri.clone(),
-                                        span: r.span,
-                                    })
-                                    .collect(),
-                                cross_file_targets: sem.symbols.global.cross_file_targets.clone(),
-                            };
+                            let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
                             info!(
                                 "goto_definition: on-the-fly sem populated for {}",
                                 uri.path()

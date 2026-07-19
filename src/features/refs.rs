@@ -5,7 +5,7 @@
 //!
 //! Phase 0 only in-file references; cross-file references need project index.
 
-use crate::common::position::position_to_offset;
+use crate::common::position::{offset_to_position, position_to_offset};
 use crate::state::WorkspaceState;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
@@ -66,12 +66,4 @@ pub fn resolve(
     } else {
         Some(locations)
     }
-}
-
-/// Helper: convert offset to Position
-fn offset_to_position(offset: usize, rope: &ropey::Rope) -> Option<Position> {
-    let line = rope.try_byte_to_line(offset).ok()?;
-    let line_start = rope.try_line_to_char(line).ok()?;
-    let col = offset - line_start;
-    Some(Position::new(line as u32, col as u32))
 }

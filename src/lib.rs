@@ -6,7 +6,6 @@
 pub mod common;
 pub mod features;
 pub mod index;
-pub mod mcclock;
 pub mod mccsrv;
 pub mod project;
 pub mod rpc;

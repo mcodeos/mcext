@@ -14,15 +14,15 @@ pub struct MccRpcClient {
 
 impl MccRpcClient {
     /// Create a new client connecting to the given host:port
-    pub fn new(host: &str, port: u16) -> Self {
+    pub fn new(host: &str, port: u16) -> Result<Self, RpcError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
-            .expect("failed to build reqwest client");
-        Self {
+            .map_err(|e| RpcError::Network(e.to_string()))?;
+        Ok(Self {
             base_url: format!("http://{}:{}/rpc", host, port),
             client,
-        }
+        })
     }
 
     /// Call an RPC method with params

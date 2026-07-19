@@ -11,8 +11,8 @@
 //! Shares data sources with gotodef: sem-symbols lapper + project index.
 
 use crate::index::snapshot::{IndexEntry, IndexKind};
-use crate::rpc::LapperEntry;
 use crate::state::WorkspaceState;
+use crate::util::usechk::{parse_use_prefix, resolve_use_target, strip_use_keyword};
 use ropey::Rope;
 use tower_lsp::lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, MarkupKind, Url};
 
@@ -198,39 +198,6 @@ fn resolve_reference_hover(
 // Helpers
 // ============================================================================
 
-/// Pick the most specific / highest-priority interval from the list.
-/// Mirrors the priority logic in gotodef.
-fn pick_best_interval<'a>(intervals: &[&'a LapperEntry]) -> Option<&'a LapperEntry> {
-    let mut best: Option<&&LapperEntry> = None;
-    for i in intervals {
-        match best {
-            None => best = Some(i),
-            Some(b) => {
-                let cur_rank = kind_rank(&i.kind);
-                let best_rank = kind_rank(&b.kind);
-                if cur_rank < best_rank {
-                    best = Some(i);
-                }
-            }
-        }
-    }
-    best.copied()
-}
-
-/// Priority rank (lower = more specific).
-fn kind_rank(kind: &str) -> u8 {
-    match kind {
-        "class_def" | "function_def" | "role_def" => 0,
-        "class_ref" | "declare_class" => 1,
-        "instance_ref" | "port_def" | "label_ref" => 2,
-        "pin_name_def" | "pin_name_ref" => 3,
-        "instance_def" | "declare_instance" | "label_def" => 4,
-        "enum_value_def" | "enum_value_ref" | "enum_class_ref" | "enum_class_def" => 5,
-        "function_ref" | "interface_ref" | "define_def" => 6,
-        _ => 7,
-    }
-}
-
 /// Human-readable label for a lapper kind string.
 fn kind_label<'a>(kind: &'a str) -> &'a str {
     match kind {
@@ -297,50 +264,4 @@ fn format_markdown_hover(lines: &[String]) -> Option<Hover> {
     })
 }
 
-// ============================================================================
-// Use-statement path helpers
-// ============================================================================
-
-/// Strip the `use` / `pub use` prefix and return the path string.
-fn strip_use_keyword(line: &str) -> Option<&str> {
-    let after = line
-        .strip_prefix("pub use ")
-        .or_else(|| line.strip_prefix("use "))?;
-    let path = after.split_whitespace().next()?;
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
-}
-
-/// Split prefix (`./` or `../`) from the rest of the path.
-fn parse_use_prefix(s: &str) -> Option<(&'static str, &str)> {
-    if let Some(p) = s.strip_prefix("./") {
-        Some(("./", p))
-    } else if let Some(p) = s.strip_prefix("../") {
-        Some(("../", p))
-    } else {
-        None
-    }
-}
-
-/// Resolve a use-path to an absolute file URL.
-fn resolve_use_target(base_url: &Url, use_path: &str) -> Option<Url> {
-    let current_file = base_url.to_file_path().ok()?;
-    let current_dir = current_file.parent()?;
-
-    let candidates: Vec<std::path::PathBuf> = if use_path.ends_with(".mc") {
-        vec![current_dir.join(use_path)]
-    } else if use_path.contains('/') {
-        vec![current_dir.join(format!("{use_path}.mc"))]
-    } else {
-        vec![
-            current_dir.join(format!("{use_path}.mc")),
-            current_dir.join(format!("{use_path}/{use_path}.mc")),
-        ]
-    };
-
-    let target = candidates.iter().find(|p| p.exists())?;
-    Url::from_file_path(target).ok()
-}
+// Use-statement path helpers are in crate::util::usechk.

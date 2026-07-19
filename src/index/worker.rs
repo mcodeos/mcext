@@ -64,7 +64,7 @@ impl IndexWorkerHandle {
         }
     }
 
-    /// Inactive handle (for tests)
+    /// Inactive handle (for tests or quick initialization without a worker).
     pub fn inactive() -> Self {
         Self { inner: None }
     }
@@ -145,7 +145,9 @@ fn worker_loop(
                     modules_tuples,
                     enum_values,
                 );
-                let _ = snap_tx.send(current.clone());
+                if snap_tx.send(current.clone()).is_err() {
+                    tracing::error!("index snapshot receiver dropped — index updates lost");
+                }
             }
         }
     }
