@@ -108,6 +108,207 @@ impl Backend {
             ));
         });
     }
+
+    /// Build the ServerCapabilities response (extracted from initialize).
+    fn build_capabilities() -> ServerCapabilities {
+        ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Options(
+                TextDocumentSyncOptions {
+                    open_close: Some(true),
+                    change: Some(TextDocumentSyncKind::INCREMENTAL),
+                    save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                        include_text: Some(true),
+                    })),
+                    ..Default::default()
+                },
+            )),
+            workspace: Some(WorkspaceServerCapabilities {
+                workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                    supported: Some(true),
+                    change_notifications: Some(OneOf::Left(true)),
+                }),
+                file_operations: None,
+            }),
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                    SemanticTokensRegistrationOptions {
+                        text_document_registration_options: TextDocumentRegistrationOptions {
+                            document_selector: Some(vec![DocumentFilter {
+                                language: Some("mcode".to_string()),
+                                scheme: Some("file".to_string()),
+                                pattern: None,
+                            }]),
+                        },
+                        semantic_tokens_options: SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions::default(),
+                            legend: SemanticTokensLegend {
+                                token_types: crate::common::LEGEND_TYPE.into(),
+                                token_modifiers: vec![],
+                            },
+                            range: Some(true),
+                            full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                        },
+                        static_registration_options: StaticRegistrationOptions::default(),
+                    },
+                ),
+            ),
+            definition_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
+            completion_provider: Some(CompletionOptions {
+                resolve_provider: Some(true),
+                trigger_characters: Some(vec![
+                    ".".to_string(),
+                    ":".to_string(),
+                    " ".to_string(),
+                ]),
+                all_commit_characters: Some(vec![]),
+                completion_item: None,
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
+            document_formatting_provider: Some(OneOf::Left(true)),
+            document_range_formatting_provider: Some(OneOf::Left(true)),
+            inlay_hint_provider: Some(OneOf::Left(true)),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        }
+    }
+}
+
+/// MCC server initialization task: start subprocess, load project, fetch symbols,
+/// retry pending diagnostics. Runs in a background tokio task during initialize.
+async fn run_server_init(
+    mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
+    project_root: Option<std::path::PathBuf>,
+    system_root: Option<std::path::PathBuf>,
+    state: Arc<WorkspaceState>,
+    lsp_client: Client,
+) {
+    // Phase 1: start mcc server, clone RPC client, release write lock
+    let rpc_client: Option<crate::rpc::MccRpcClient> = {
+        let mut server_guard = mcc_server.write().await;
+        let Some(ref mut server) = *server_guard else {
+            return;
+        };
+        if let Err(e) = server.start().await {
+            warn!(
+                "Failed to start mcc server, falling back to direct mode: {}",
+                e
+            );
+            return;
+        }
+        debug!("mcc server subprocess started");
+        server.client().cloned()
+    };
+
+    let Some(client) = rpc_client else {
+        warn!("mcc server started but RPC client is None");
+        return;
+    };
+
+    // Phase 2: initialize project (no lock held — parse_and_publish runs concurrently)
+    if let Some(ref sys_root) = system_root {
+        info!("Setting system root: {}", sys_root.display());
+        let _ = client
+            .set_system_root(sys_root.to_str().unwrap_or(""))
+            .await;
+    }
+
+    let _ = client.init().await;
+
+    if let Some(ref root) = project_root {
+        let root_str = root.to_string_lossy();
+        let _ = client.set_project_root(&root_str).await;
+
+        if let Some(config) = ProjectConfig::load_from(root) {
+            info!(
+                "Auto-loading {} dependencies from project.toml...",
+                config.dependency_names().len()
+            );
+            for lib_name in config.dependency_names() {
+                info!("Calling lib.load for: {}", lib_name);
+                let lib_result = client.lib_load(lib_name).await;
+                if lib_result.is_ok() {
+                    info!("Successfully loaded lib: {}", lib_name);
+                } else {
+                    warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
+                }
+                match client.lib_show(lib_name).await {
+                    Ok(info) => {
+                        info!("Lib info: name={} symbols={} modules={} components={} interfaces={}",
+                            info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
+                    }
+                    Err(e) => {
+                        warn!("lib_show failed: {:?}", e);
+                    }
+                }
+            }
+
+            let entry = config.entry_path(root);
+            info!("Calling load_project for entry: {}", entry);
+            if let Err(e) = client.load_project(&entry).await {
+                warn!("Failed to load project '{}': {:?}", entry, e);
+            } else {
+                info!("Successfully loaded project entry: {}", entry);
+            }
+
+            // Fetch project symbols for the index (incl. enum values)
+            info!("Fetching project_symbols for index...");
+            if let Ok(resp) = client.project_symbols().await {
+                let ec = resp.enums.clone();
+                let ev = resp.enum_values.clone();
+                if let Ok(mut cache) = state.project_symbols.lock() {
+                    cache.components = resp.components;
+                    cache.interfaces = resp.interfaces;
+                    cache.enums = ec.clone();
+                    cache.modules = resp.modules;
+                    cache.enum_values = ev.clone();
+                }
+                if let Ok(cache) = state.project_symbols.lock() {
+                    let _ = state.index.send(
+                        crate::index::worker::IndexCommand::UpdateProjectSymbols {
+                            components: cache.components.clone(),
+                            interfaces: cache.interfaces.clone(),
+                            enums: cache.enums.clone(),
+                            modules: cache.modules.clone(),
+                            enum_values: cache.enum_values.clone(),
+                        },
+                    );
+                }
+                info!("project_symbols done → worker updated");
+            } else {
+                warn!("project_symbols RPC failed");
+            }
+        }
+    }
+
+    // Signal init complete (order: sticky flag first, then notify)
+    state.init_done.store(true, Ordering::Release);
+    state.init_notify.notify_waiters();
+    info!("init_done = true — parse_and_publish can now make RPC calls");
+
+    // Phase 3: retry pending diagnostics
+    let pending: Vec<(Url, Option<i32>)> = state
+        .pending_diagnostics
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect();
+    for (uri, _) in &pending {
+        state.pending_diagnostics.remove(uri);
+    }
+    if !pending.is_empty() {
+        info!(
+            "Retrying {} pending diagnostics after mcc server ready",
+            pending.len()
+        );
+        for (uri, version) in pending {
+            if state.documents.contains_key(&uri) {
+                let s = Arc::clone(&state);
+                let mc = Arc::clone(&mcc_server);
+                let cl = lsp_client.clone();
+                parse_and_publish(s, mc, cl, uri, version).await;
+            }
+        }
+    }
 }
 
 /// Parse + publish diagnostics (executed in debounced task)
@@ -349,13 +550,11 @@ async fn parse_and_publish(
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Parse initialization_options
         let cfg = params
             .initialization_options
             .map(ServerConfig::from_initialization_options)
             .unwrap_or_default();
 
-        // Initialize mcc system/project root via RPC after server starts
         let project_root = cfg
             .project_root
             .clone()
@@ -368,168 +567,18 @@ impl LanguageServer for Backend {
             })
             .or_else(|| std::env::current_dir().ok());
 
-        // Try to start mcc server subprocess for RPC mode
-        // This provides:
-        // 1. Separate log output (visible in LSP terminal)
-        // 2. Crash isolation (mcc crash won't kill LSP)
-        let mcc_server = self.mcc_server.clone();
-        let project_root_clone = project_root.clone();
-        let cfg_system_root = cfg.system_root.clone();
-        let state_for_init = self.state.clone();
-        let lsp_client = self.client.clone();
-        tokio::spawn(async move {
-            // Phase 1: start mcc server with write lock, clone the RPC client,
-            //          then release the lock immediately so parse_and_publish
-            //          (which needs read lock) is not blocked.
-            let rpc_client: Option<crate::rpc::MccRpcClient> = {
-                let mut server_guard = mcc_server.write().await;
-                let Some(ref mut server) = *server_guard else {
-                    return;
-                };
-                if let Err(e) = server.start().await {
-                    warn!(
-                        "Failed to start mcc server, falling back to direct mode: {}",
-                        e
-                    );
-                    return;
-                }
-                debug!("mcc server subprocess started");
-                // Clone the RPC client so we can release the write lock.
-                // MccRpcClient wraps reqwest::Client (Arc-based), so cloning is cheap.
-                server.client().cloned()
-            }; // write lock released — parse_and_publish can now proceed
+        // Background task: start mcc subprocess, load project + dependencies,
+        // fetch symbols, build index, signal init-done, retry pending diagnostics.
+        tokio::spawn(run_server_init(
+            self.mcc_server.clone(),
+            project_root.clone(),
+            cfg.system_root.clone(),
+            self.state.clone(),
+            self.client.clone(),
+        ));
 
-            let Some(client) = rpc_client else {
-                warn!("mcc server started but RPC client is None");
-                return;
-            };
-
-            // Phase 2: initialize project WITHOUT holding any lock on mcc_server.
-            //          parse_and_publish runs concurrently via its own read lock.
-            // Only set system_root if explicitly configured
-            if let Some(ref sys_root) = cfg_system_root {
-                info!("Setting system root: {}", sys_root.display());
-                let _ = client
-                    .set_system_root(sys_root.to_str().unwrap_or(""))
-                    .await;
-            }
-
-            // Initialize mcc
-            let _ = client.init().await;
-
-            // Set project root
-            if let Some(ref root) = project_root_clone {
-                let root_str = root.to_string_lossy();
-                let _ = client.set_project_root(&root_str).await;
-
-                // Load project.toml and auto-load dependencies
-                if let Some(config) = ProjectConfig::load_from(&root) {
-                    info!(
-                        "Auto-loading {} dependencies from project.toml...",
-                        config.dependency_names().len()
-                    );
-                    // Load each dependency
-                    for lib_name in config.dependency_names() {
-                        info!("Calling lib.load for: {}", lib_name);
-                        let lib_result = client.lib_load(lib_name).await;
-                        if lib_result.is_ok() {
-                            info!("Successfully loaded lib: {}", lib_name);
-                        } else {
-                            warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
-                        }
-                        // Debug: show library info
-                        match client.lib_show(lib_name).await {
-                            Ok(info) => {
-                                info!("Lib info: name={} symbols={} modules={} components={} interfaces={}",
-                                    info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
-                            }
-                            Err(e) => {
-                                warn!("lib_show failed: {:?}", e);
-                            }
-                        }
-                    }
-                    // Load project entry
-                    let entry = config.entry_path(&root);
-                    info!("Calling load_project for entry: {}", entry);
-                    if let Err(e) = client.load_project(&entry).await {
-                        warn!("Failed to load project '{}': {:?}", entry, e);
-                    } else {
-                        info!("Successfully loaded project entry: {}", entry);
-                    }
-
-                    // ★ Fetch project symbols AFTER load_project
-                    //    so the index (incl. enum values) is ready
-                    //    before any F12 / goto-def request.
-                    info!("Fetching project_symbols for index...");
-                    if let Ok(resp) = client.project_symbols().await {
-                        let ec = resp.enums.clone();
-                        let ev = resp.enum_values.clone();
-                        if let Ok(mut cache) = state_for_init.project_symbols.lock() {
-                            cache.components = resp.components;
-                            cache.interfaces = resp.interfaces;
-                            cache.enums = ec.clone();
-                            cache.modules = resp.modules;
-                            cache.enum_values = ev.clone();
-                        }
-                        // Read back from cache to avoid
-                        // partial-move issues with resp.
-                        if let Ok(cache) = state_for_init.project_symbols.lock() {
-                            let _ = state_for_init.index.send(
-                                crate::index::worker::IndexCommand::UpdateProjectSymbols {
-                                    components: cache.components.clone(),
-                                    interfaces: cache.interfaces.clone(),
-                                    enums: cache.enums.clone(),
-                                    modules: cache.modules.clone(),
-                                    enum_values: cache.enum_values.clone(),
-                                },
-                            );
-                        }
-                        info!("project_symbols done → worker updated");
-                    } else {
-                        warn!("project_symbols RPC failed");
-                    }
-                }
-            }
-
-            // Signal that init is complete.
-            // Order matters: set the sticky flag FIRST, then notify.
-            // This ensures any task woken by notify_waiters() sees init_done == true.
-            state_for_init.init_done.store(true, Ordering::Release);
-            state_for_init.init_notify.notify_waiters();
-            info!("init_done = true — parse_and_publish can now make RPC calls");
-
-            // Phase 3: retry any files whose parse_and_publish failed during startup.
-            //          By now the server is connected, so retries will succeed.
-            let pending: Vec<(Url, Option<i32>)> = state_for_init
-                .pending_diagnostics
-                .iter()
-                .map(|entry| (entry.key().clone(), *entry.value()))
-                .collect();
-            // Remove after collecting to avoid losing entries inserted concurrently.
-            for (uri, _) in &pending {
-                state_for_init.pending_diagnostics.remove(uri);
-            }
-            if !pending.is_empty() {
-                info!(
-                    "Retrying {} pending diagnostics after mcc server ready",
-                    pending.len()
-                );
-                // Serial retry: mcc is single-threaded, concurrent RPC calls crash it.
-                for (uri, version) in pending {
-                    if state_for_init.documents.contains_key(&uri) {
-                        let s = Arc::clone(&state_for_init);
-                        let mc = Arc::clone(&mcc_server);
-                        let cl = lsp_client.clone();
-                        parse_and_publish(s, mc, cl, uri, version).await;
-                    }
-                }
-            }
-        });
-
-        // NOTE: `initialized` is called BEFORE VS Code sends `did_open` notifications.
-        // So at this point, `documents` is empty. The real parse scheduling
-        // is done in `did_open` where all files are properly cascade-parsed.
-        // We only parse what VS Code already reported as open at this moment.
+        // Parse any documents VS Code already reported as open.
+        // (initialized fires before didOpen, so this list is usually empty.)
         let docs: Vec<_> = self
             .state
             .documents
@@ -547,13 +596,10 @@ impl LanguageServer for Backend {
             });
         }
 
-        // Trigger project index
+        // Trigger project index scan
         if let Some(root) = project_root {
             let _ = self.state.index.send(IndexCommand::ParseAll(root.clone()));
-            trace!(
-                "server: project index ParseAll triggered: {}",
-                root.display()
-            );
+            trace!("server: project index ParseAll triggered: {}", root.display());
         }
 
         self.config.insert("current".to_string(), cfg);
@@ -561,80 +607,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             server_info: None,
             offset_encoding: None,
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Options(
-                    TextDocumentSyncOptions {
-                        open_close: Some(true),
-                        // Phase 2: change to INCREMENTAL
-                        change: Some(TextDocumentSyncKind::INCREMENTAL),
-                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
-                            include_text: Some(true),
-                        })),
-                        ..Default::default()
-                    },
-                )),
-                workspace: Some(WorkspaceServerCapabilities {
-                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
-                        supported: Some(true),
-                        change_notifications: Some(OneOf::Left(true)),
-                    }),
-                    file_operations: None,
-                }),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
-                        SemanticTokensRegistrationOptions {
-                            text_document_registration_options: {
-                                TextDocumentRegistrationOptions {
-                                    document_selector: Some(vec![DocumentFilter {
-                                        language: Some("mcode".to_string()),
-                                        scheme: Some("file".to_string()),
-                                        pattern: None,
-                                    }]),
-                                }
-                            },
-                            semantic_tokens_options: SemanticTokensOptions {
-                                work_done_progress_options: WorkDoneProgressOptions::default(),
-                                legend: SemanticTokensLegend {
-                                    token_types: crate::common::LEGEND_TYPE.into(),
-                                    token_modifiers: vec![],
-                                },
-                                range: Some(true),
-                                // Phase 3: enable Delta mode, support incremental updates
-                                full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
-                            },
-                            static_registration_options: StaticRegistrationOptions::default(),
-                        },
-                    ),
-                ),
-                // F12 go to definition — previously missing declaration, VSCode doesn't send request, F12 doesn't work
-                definition_provider: Some(OneOf::Left(true)),
-                // Shift+F12 find references
-                references_provider: Some(OneOf::Left(true)),
-                // Phase 4: auto-completion
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(true),
-                    trigger_characters: Some(vec![
-                        // Trigger completion characters
-                        ".".to_string(), // member access
-                        ":".to_string(), // type annotation
-                        " ".to_string(), // may be keyword after space
-                    ]),
-                    all_commit_characters: Some(vec![]),
-                    completion_item: None,
-                    work_done_progress_options: WorkDoneProgressOptions::default(),
-                }),
-                // Phase 4.2: code formatting
-                document_formatting_provider: Some(OneOf::Left(true)),
-                document_range_formatting_provider: Some(OneOf::Left(true)),
-                // Phase 4.3: inline hints
-                inlay_hint_provider: Some(OneOf::Left(true)),
-                // Phase 5: hover
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                // Note: document_link_provider disabled to avoid underlines on use statements
-                // Use F12 (goto definition) to navigate to use targets instead
-                // document_link_provider: Some(DocumentLinkOptions { ... }),
-                ..ServerCapabilities::default()
-            },
+            capabilities: Self::build_capabilities(),
         })
     }
 
@@ -745,7 +718,7 @@ impl LanguageServer for Backend {
         ))
     }
 
-    // Phase 4.2: 范围格式化
+    // Phase 4.2: range formatting
     async fn range_formatting(
         &self,
         params: DocumentRangeFormattingParams,

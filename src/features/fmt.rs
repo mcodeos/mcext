@@ -99,7 +99,10 @@ pub fn format_range(
     }])
 }
 
-/// Internal: format text
+/// Internal: format text using a character-by-character state machine.
+///
+/// State tracked across iterations: `indent_level`, `in_line`, `line_start`.
+/// Each `match` arm handles one character class and is self-contained.
 fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
     let mut result = String::with_capacity(text.len() * 2);
     let mut indent_level = 0;
@@ -109,139 +112,16 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
 
     while let Some(c) = chars.next() {
         match c {
-            '{' => {
-                if !line_start || result.ends_with(' ') {
-                    // No space needed here
-                }
-                result.push('{');
-                indent_level += 1;
-                in_line = false;
-
-                // Check if next line is empty or has only comments
-                skip_whitespace_and_comments(&mut chars);
-                if let Some(&'\n') = chars.peek() {
-                    chars.next();
-                    result.push('\n');
-                    add_indent(&mut result, indent_level, options.indent_size);
-                }
-                line_start = true;
-            }
-            '}' => {
-                indent_level = indent_level.saturating_sub(1);
-                if !line_start && !result.ends_with('\n') {
-                    result.push('\n');
-                }
-                add_indent(&mut result, indent_level, options.indent_size);
-                result.push('}');
-                in_line = false;
-
-                // Check if newline is needed
-                skip_whitespace_and_comments(&mut chars);
-                if let Some(&c) = chars.peek() {
-                    if c == ',' || c == ';' {
-                        chars.next();
-                        result.push(c);
-                    }
-                    if c != '\n' && c != '}' && c != '/' {
-                        result.push('\n');
-                    }
-                }
-                line_start = true;
-            }
-            '\n' => {
-                result.push('\n');
-                add_indent(&mut result, indent_level, options.indent_size);
-                in_line = false;
-                line_start = true;
-            }
-            c if c.is_whitespace() => {
-                if in_line && c == ' ' && !line_start {
-                    // Preserve inline spaces
-                    if !result.ends_with(' ') && !result.ends_with('\t') {
-                        result.push(' ');
-                    }
-                } else if c == '\t' {
-                    // Convert tabs to spaces
-                    if !result.ends_with('\t') {
-                        result.push(' ');
-                    }
-                }
-                // Newlines and line-start spaces handled above
-                if c != '\n' {
-                    line_start = false;
-                }
-            }
-            ',' => {
-                result.push(',');
-                in_line = true;
-                skip_whitespace_and_comments(&mut chars);
-                if let Some(&'\n') = chars.peek() {
-                    // Let newline logic handle it
-                } else {
-                    result.push(' ');
-                }
-                line_start = false;
-            }
-            ';' => {
-                result.push(';');
-                in_line = false;
-                skip_whitespace_and_comments(&mut chars);
-                if let Some(&'\n') = chars.peek() {
-                    // Let newline logic handle it
-                } else if let Some(&'/') = chars.peek() {
-                    // Newline after comment
-                } else {
-                    result.push('\n');
-                    add_indent(&mut result, indent_level, options.indent_size);
-                }
-                line_start = true;
-            }
-            '/' => {
-                // Check if this is a comment
-                if let Some(&'/') = chars.peek() {
-                    // Line comment
-                    while let Some(&c) = chars.peek() {
-                        if c == '\n' {
-                            break;
-                        }
-                        result.push(c);
-                        chars.next();
-                    }
-                    result.push('\n');
-                    add_indent(&mut result, indent_level, options.indent_size);
-                    line_start = true;
-                } else {
-                    result.push('/');
-                    in_line = true;
-                    line_start = false;
-                }
-            }
-            '[' => {
-                result.push('[');
-                in_line = true;
-                line_start = false;
-                skip_whitespace_and_comments(&mut chars);
-                if let Some(&']') = chars.peek() {
-                    // Empty array
-                } else if let Some(&c) = chars.peek() {
-                    if !c.is_whitespace() {
-                        // result.push(' ');
-                    }
-                }
-            }
-            ']' => {
-                result.push(']');
-                in_line = true;
-                line_start = false;
-            }
-            _ => {
-                if line_start && !result.ends_with('\n') && !result.is_empty() {
-                    // Line start check
-                }
-                result.push(c);
-                in_line = true;
-                line_start = false;
-            }
+            '{' => handle_open_brace(&mut result, &mut indent_level, &mut in_line, &mut line_start, &mut chars, options),
+            '}' => handle_close_brace(&mut result, &mut indent_level, &mut in_line, &mut line_start, &mut chars, options),
+            '\n' => handle_newline(&mut result, &mut indent_level, &mut in_line, &mut line_start, options),
+            c if c.is_whitespace() => handle_whitespace(c, &mut result, &mut in_line, &mut line_start),
+            ',' => handle_comma(&mut result, &mut in_line, &mut line_start, &mut chars),
+            ';' => handle_semicolon(&mut result, &mut indent_level, &mut in_line, &mut line_start, &mut chars, options),
+            '/' => handle_slash(&mut result, &mut indent_level, &mut in_line, &mut line_start, &mut chars, options),
+            '[' => handle_open_bracket(&mut result, &mut in_line, &mut line_start, &mut chars),
+            ']' => handle_close_bracket(&mut result, &mut in_line, &mut line_start),
+            _ => handle_default(c, &mut result, &mut in_line, &mut line_start),
         }
     }
 
@@ -252,6 +132,185 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
     result.push('\n');
 
     Some(result)
+}
+
+// ── Character handlers for format_text ──
+
+fn handle_open_brace(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    options: &FormatOptions,
+) {
+    result.push('{');
+    *indent_level += 1;
+    *in_line = false;
+    skip_whitespace_and_comments(chars);
+    if let Some(&'\n') = chars.peek() {
+        chars.next();
+        result.push('\n');
+        add_indent(result, *indent_level, options.indent_size);
+    }
+    *line_start = true;
+}
+
+fn handle_close_brace(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    options: &FormatOptions,
+) {
+    *indent_level = indent_level.saturating_sub(1);
+    if !*line_start && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    add_indent(result, *indent_level, options.indent_size);
+    result.push('}');
+    *in_line = false;
+    skip_whitespace_and_comments(chars);
+    if let Some(&c) = chars.peek() {
+        if c == ',' || c == ';' {
+            chars.next();
+            result.push(c);
+        }
+        if c != '\n' && c != '}' && c != '/' {
+            result.push('\n');
+        }
+    }
+    *line_start = true;
+}
+
+fn handle_newline(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    options: &FormatOptions,
+) {
+    result.push('\n');
+    add_indent(result, *indent_level, options.indent_size);
+    *in_line = false;
+    *line_start = true;
+}
+
+fn handle_whitespace(
+    c: char,
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+) {
+    if *in_line && c == ' ' && !*line_start {
+        if !result.ends_with(' ') && !result.ends_with('\t') {
+            result.push(' ');
+        }
+    } else if c == '\t' {
+        if !result.ends_with('\t') {
+            result.push(' ');
+        }
+    }
+    if c != '\n' {
+        *line_start = false;
+    }
+}
+
+fn handle_comma(
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) {
+    result.push(',');
+    *in_line = true;
+    skip_whitespace_and_comments(chars);
+    if chars.peek() != Some(&'\n') {
+        result.push(' ');
+    }
+    *line_start = false;
+}
+
+fn handle_semicolon(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    options: &FormatOptions,
+) {
+    result.push(';');
+    *in_line = false;
+    skip_whitespace_and_comments(chars);
+    match chars.peek() {
+        Some(&'\n') | Some(&'/') => {} // handled by subsequent iteration
+        _ => {
+            result.push('\n');
+            add_indent(result, *indent_level, options.indent_size);
+        }
+    }
+    *line_start = true;
+}
+
+fn handle_slash(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    options: &FormatOptions,
+) {
+    if chars.peek() == Some(&'/') {
+        // Line comment: consume until newline
+        while let Some(&c) = chars.peek() {
+            if c == '\n' { break; }
+            result.push(c);
+            chars.next();
+        }
+        result.push('\n');
+        add_indent(result, *indent_level, options.indent_size);
+        *line_start = true;
+    } else {
+        result.push('/');
+        *in_line = true;
+        *line_start = false;
+    }
+}
+
+fn handle_open_bracket(
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) {
+    result.push('[');
+    *in_line = true;
+    *line_start = false;
+    skip_whitespace_and_comments(chars);
+    // Peek to consume closing bracket pairs (no-op for formatting)
+    let _ = chars.peek();
+}
+
+fn handle_close_bracket(
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+) {
+    result.push(']');
+    *in_line = true;
+    *line_start = false;
+}
+
+fn handle_default(
+    c: char,
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+) {
+    result.push(c);
+    *in_line = true;
+    *line_start = false;
 }
 
 /// Skip whitespace and comments
@@ -280,11 +339,7 @@ fn skip_whitespace_and_comments(chars: &mut std::iter::Peekable<std::str::Chars>
 
 /// Add indentation
 fn add_indent(result: &mut String, level: usize, indent_size: usize) {
-    for _ in 0..level {
-        for _ in 0..indent_size {
-            result.push(' ');
-        }
-    }
+    result.push_str(&" ".repeat(level * indent_size));
 }
 
 /// Calculate diff edits between two texts

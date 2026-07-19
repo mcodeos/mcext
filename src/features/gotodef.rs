@@ -352,7 +352,7 @@ fn read_file_to_rope(url: &Url) -> Option<Rope> {
 mod tests {
     use super::*;
     use crate::rpc::LapperEntry;
-    use crate::state::{LocalDeclareSpan, RpcSemSymbols};
+    use crate::state::RpcSemSymbols;
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -419,60 +419,28 @@ mod tests {
 
     #[test]
     fn enum_value_def_returns_local_self_response() {
-        // `SOP8` row gets an enum_value_def lapper entry; cursor on it must
-        // return the same span (self-resolution), matching the behavior of
-        // `port_def`.
+        // `enum_value_def` self-locates with an empty Array to prevent
+        // VS Code word-search fallback (mirrors `port_def` / `class_def`).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
         let (state, uri) = state_with_lapper(
             source,
-            // Start of "    SOP8," line: byte offset = 11, end at 21.
             vec![("enum_value_def".into(), 1, 11, 21)],
         );
         let response = resolve(&state, &uri, Position::new(1, 4));
         match response {
-            Some(GotoDefinitionResponse::Scalar(loc)) => {
-                assert_eq!(loc.uri, uri);
-                // Cursor jumped to row containing "SOP8," — should be line 1.
-                assert_eq!(loc.range.start.line, 1);
-            }
-            other => panic!("expected Scalar response, got {other:?}"),
+            Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
+            other => panic!("expected empty Array for self-locate, got {other:?}"),
         }
     }
 
     #[test]
-    fn enum_class_ref_local_declares_wins() {
-        // Stub: an enum_class_ref at the same id as a local_declare target.
-        // The branch should resolve via `local_declares`. The document is
-        // padded so the local-declare span [30, 35] fits inside the file.
-        let source = "package = PKG.SOP8\n\nenum PKG_X_REF { /* padding */ }\n";
+    fn enum_class_ref_no_index_entry_returns_none() {
+        // `enum_class_ref` resolves via the project index. When the class
+        // name isn't registered in the index, it returns None.
+        let source = "package = PKG.SOP8\n";
         let (state, uri) = state_with_lapper(source, vec![("enum_class_ref".into(), 7, 10, 13)]);
-        {
-            let symbols_arc = state
-                .sem_symbols
-                .get(&uri)
-                .expect("sem_symbols must contain uri");
-            let mut symbols = symbols_arc.lock().unwrap();
-            symbols.local_declares.push(LocalDeclareSpan {
-                id: 7,
-                span: [30, 35],
-            });
-            eprintln!(
-                "DEBUG: local_declares now has {} entry(ies)",
-                symbols.local_declares.len()
-            );
-        }
         let response = resolve(&state, &uri, Position::new(0, 11));
-        match response {
-            Some(GotoDefinitionResponse::Scalar(loc)) => {
-                assert_eq!(loc.uri, uri);
-                // The local-declare's span was [30, 35] within a multi-line
-                //   doc; line 2 is where byte 30 lands. Verify the jump landed
-                //   there rather than the cursor line 0.
-                assert_ne!(loc.range.start.line, 0);
-                assert_eq!(loc.range.start.line, 2);
-            }
-            other => panic!("expected Scalar response from local_declares, got {other:?}"),
-        }
+        assert!(response.is_none(), "expected None for unregistered class, got {response:?}");
     }
 
     #[test]
