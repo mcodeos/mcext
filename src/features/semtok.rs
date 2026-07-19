@@ -12,11 +12,14 @@
 //! - [`compute`] calculates full tokens
 //! - [`compute_delta`] calculates incremental diff
 
+use crate::common::legend::type_map;
 use crate::state::WorkspaceState;
 use ropey::Rope;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 
-/// mcc type value for multi-line comments (consistent with logs in `work.md`)
+/// mcc-returned type value for multi-line comment tokens.
+/// Value 101 is outside the LSP legend range (0..16) and mapped to
+/// `type_map::T_COMMENT` after splitting into per-line tokens.
 const MULTILINE_COMMENT_TYPE: i16 = 101;
 
 /// Compute semantic tokens for the document corresponding to URI (delta-encoded).
@@ -25,7 +28,10 @@ const MULTILINE_COMMENT_TYPE: i16 = 101;
 pub fn compute(state: &WorkspaceState, uri: &Url) -> Option<Vec<SemanticToken>> {
     let rope = state.document_rope(uri)?;
     let tokens_ref = state.sem_tokens.get(uri)?;
-    let tokens_guard = tokens_ref.lock().unwrap_or_else(|e| e.into_inner());
+    let tokens_guard = tokens_ref.lock().unwrap_or_else(|e| {
+        tracing::warn!("sem_tokens lock poisoned, attempting recovery");
+        e.into_inner()
+    });
 
     // Copy + sort (mcc doesn't guarantee order)
     let mut sorted = tokens_guard.tokens.clone();
@@ -118,13 +124,13 @@ fn emit_single_token(
     *last_start = start;
 
     // Reclassify KEYWORD-typed identifiers: check if it's a real language keyword
-    let final_type = if type_ == 13 {
+    let final_type = if type_ == type_map::T_KEYWORD as i16 {
         if end <= rope.len_bytes() {
             let text = rope.byte_slice(pos..end).to_string();
             if is_mcode_keyword(&text) {
-                13 // KEYWORD
+                type_map::T_KEYWORD
             } else {
-                9 // VARIABLE (identifier)
+                type_map::T_VARIABLE // identifier, not a keyword
             }
         } else {
             type_ as u32
@@ -397,7 +403,7 @@ fn emit_multiline_comment(
             delta_line,
             delta_start,
             length: line_len,
-            token_type: 16, // COMMENT
+            token_type: type_map::T_COMMENT,
             token_modifiers_bitset: 0,
         });
     }

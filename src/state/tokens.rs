@@ -35,26 +35,38 @@ impl TokensState {
     /// Store latest tokens for URI (with auto-generated numeric id)
     pub fn store(&self, uri: Url, id: u64, tokens: Vec<SemanticToken>) {
         let result_id = id.to_string();
-        let mut last = self.last.write().expect("tokens lock poisoned");
+        let mut last = self.last.write().unwrap_or_else(|e| {
+            tracing::warn!("tokens lock poisoned, attempting recovery");
+            e.into_inner()
+        });
         last.insert(uri, TokenEntry { result_id, tokens });
     }
 
     /// Store latest tokens for URI with a pre-set string result_id (from RPC)
     pub fn store_with_result_id(&self, uri: Url, result_id: String, tokens: Vec<SemanticToken>) {
-        let mut last = self.last.write().expect("tokens lock poisoned");
+        let mut last = self.last.write().unwrap_or_else(|e| {
+            tracing::warn!("tokens lock poisoned, attempting recovery");
+            e.into_inner()
+        });
         last.insert(uri, TokenEntry { result_id, tokens });
     }
 
     /// Get last stored (result_id, tokens) for URI
     pub fn get(&self, uri: &Url) -> Option<(String, Vec<SemanticToken>)> {
-        let last = self.last.read().expect("tokens lock poisoned");
+        let last = self.last.read().unwrap_or_else(|e| {
+            tracing::warn!("tokens lock poisoned, attempting recovery");
+            e.into_inner()
+        });
         last.get(uri)
             .map(|e| (e.result_id.clone(), e.tokens.clone()))
     }
 
     /// Remove URI (cleanup on document close)
     pub fn remove(&self, uri: &Url) {
-        let mut last = self.last.write().expect("tokens lock poisoned");
+        let mut last = self.last.write().unwrap_or_else(|e| {
+            tracing::warn!("tokens lock poisoned, attempting recovery");
+            e.into_inner()
+        });
         last.remove(uri);
     }
 }

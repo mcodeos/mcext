@@ -1,4 +1,5 @@
 use mcodels::Backend;
+use std::sync::Mutex;
 use tower_lsp::{LspService, Server};
 
 #[tokio::main]
@@ -7,17 +8,25 @@ async fn main() {
     // Truncate log file for fresh session
     let _ = std::fs::write(&log_path, "");
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .expect("failed to open log file");
+    // Open log file; fall back to stderr if unavailable.
+    // stderr may interfere with VS Code LSP client, but it's better than crashing.
+    let writer: Mutex<Box<dyn std::io::Write + Send>> = Mutex::new(
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => Box::new(f),
+            Err(e) => {
+                eprintln!("warning: cannot open log.txt: {e}, falling back to stderr");
+                Box::new(std::io::stderr())
+            }
+        },
+    );
 
-    // Only write to log.txt; DO NOT write to stderr/stdout
-    // (stderr output can interfere with VS Code LSP client)
     tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_writer(file)
+        .with_writer(writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),

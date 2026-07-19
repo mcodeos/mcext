@@ -7,18 +7,13 @@ edition = "2021"
 
 [dependencies]
 # mcc dependency removed - all interactions via RPC
-chumsky = "0.9.3"
 ropey = "1.5.0"
 serde_json = "1.0.78"
 tokio = { version = "1.17.0", features = ["full"] }
 tower-lsp = { version = "0.20.0", features = ["proposed"]}
 serde = { version = "1.0", features = ["derive"] }
 dashmap = "6.1.0"
-im-rc = "15.0.0"
-oxc_index = "0.36.0"
 anyhow = "1.0.93"
-thiserror = "2.0.3"
-rust-lapper = "1.1.0"
 
 # tracing: structured logging + span support
 tracing = "0.1"
@@ -29,8 +24,4 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # TOML parsing for project.toml
 toml = "0.8"
-
-# tokio-console: async debugging tool (dev dependency only)
-[dev-dependencies]
-console-subscriber = "0.4"
 

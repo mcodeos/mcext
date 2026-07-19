@@ -78,7 +78,9 @@ impl MccServer {
     pub fn clear_log() {
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
             let log_path = std::path::Path::new(&manifest).join("log.txt");
-            let _ = std::fs::write(&log_path, "");
+            if let Err(e) = std::fs::write(&log_path, "") {
+                warn!("failed to clear log file: {e}");
+            }
         }
     }
 
@@ -97,24 +99,30 @@ impl MccServer {
         let check_addr = format!("{}:{}", self.host, self.port);
         if std::net::TcpListener::bind(&check_addr).is_err() {
             info!("Port {} is already in use, trying to connect", self.port);
-            let client = MccRpcClient::new(&self.host, self.port);
-            match timeout(
-                Duration::from_secs(2),
-                client.call("server.info", serde_json::json!({})),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {
-                    self.client = Some(client);
-                    self.state = ConnectionState::Connected;
-                    info!("Connected to existing mcc server");
-                    return Ok(());
+            match MccRpcClient::new(&self.host, self.port) {
+                Ok(client) => {
+                    match timeout(
+                        Duration::from_secs(2),
+                        client.call("server.info", serde_json::json!({})),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            self.client = Some(client);
+                            self.state = ConnectionState::Connected;
+                            info!("Connected to existing mcc server");
+                            return Ok(());
+                        }
+                        Ok(Err(e)) => {
+                            warn!("mcc server responded with error: {}", e);
+                        }
+                        Err(_) => {
+                            warn!("Timeout connecting to existing mcc server");
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
-                    warn!("mcc server responded with error: {}", e);
-                }
-                Err(_) => {
-                    warn!("Timeout connecting to existing mcc server");
+                Err(e) => {
+                    warn!("Failed to create RPC client for existing server: {}", e);
                 }
             }
         } else {
@@ -199,7 +207,18 @@ impl MccServer {
 
             // Try to connect with retries
             info!("Attempting RPC connection to {}:{}", self.host, self.port);
-            let client = MccRpcClient::new(&self.host, self.port);
+            let client = match MccRpcClient::new(&self.host, self.port) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to build RPC client: {}", e);
+                    self.restart_count += 1;
+                    if self.restart_count >= self.max_restarts {
+                        return Err(MccServerError::Rpc(e.to_string()));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
             for attempt in 1..=5 {
                 info!("RPC connection attempt {}/5", attempt);
@@ -246,8 +265,14 @@ impl MccServer {
         }
     }
 
-    /// Stop mcc server
+    /// Stop mcc server and kill the child process
     pub async fn stop(&mut self) -> Result<(), MccServerError> {
+        if let Some(ref mut child) = self.child {
+            if let Err(e) = child.start_kill() {
+                warn!("failed to kill mcc child process: {}", e);
+            }
+            self.child = None;
+        }
         self.state = ConnectionState::Disconnected;
         info!("mcc server stopped");
         Ok(())
@@ -299,9 +324,18 @@ impl MccServer {
 
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
-        // Try common locations
+        // Check MCC_PATH env var first
+        if let Ok(path) = std::env::var("MCC_PATH") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                debug!("Found mcc via MCC_PATH: {:?}", p);
+                return p;
+            }
+            warn!("MCC_PATH={} does not exist, falling back", path);
+        }
+
+        // Try common relative locations (cargo workspace layout)
         let candidates = [
-            PathBuf::from("/Users/dan/work/mo/mcc/target/debug/mcc"),
             PathBuf::from("../mcc/target/debug/mcc"),
             PathBuf::from("../../mcc/target/debug/mcc"),
             PathBuf::from("target/debug/mcc"),
@@ -315,9 +349,8 @@ impl MccServer {
         }
 
         // Fallback to PATH
-        let path = PathBuf::from("mcc");
         debug!("Using mcc from PATH");
-        path
+        PathBuf::from("mcc")
     }
 }
 

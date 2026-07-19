@@ -4,7 +4,9 @@
 //! Data source: RpcSemSymbols from sem RPC
 
 use crate::common::position::{offset_to_position, position_to_offset};
+use crate::features::symbols::kind_rank;
 use crate::state::WorkspaceState;
+use crate::util::usechk::{parse_use_prefix, resolve_use_path, strip_use_keyword};
 use ropey::Rope;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
 use tracing::info;
@@ -74,16 +76,7 @@ pub fn resolve(
     // (e.g. `[+, -]::DC(volt, Source)`), which would otherwise shadow
     // instance_ref entries for the param references inside.
     let mut sorted_intervals = intervals.clone();
-    sorted_intervals.sort_by(|a, b| {
-        let order = |k: &str| match k {
-            "class_def" | "function_def" | "role_definition" => 0,
-            "class_ref" => 1,
-            "instance_ref" | "port_def" => 2,
-            "pin_name_def" => 3,
-            _ => 4,
-        };
-        order(&a.kind).cmp(&order(&b.kind))
-    });
+    sorted_intervals.sort_by(|a, b| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)));
 
     for interval in &sorted_intervals {
         info!(
@@ -270,10 +263,8 @@ fn resolve_use_jump(
     let line_idx = rope.try_byte_to_line(offset).ok()?;
     let line_text = rope.get_line(line_idx)?.to_string();
 
-    let Some(path) = parse_use_path(&line_text) else {
-        return None;
-    };
-    let (_prefix, use_path) = path;
+    let path = strip_use_keyword(&line_text)?;
+    let (_prefix, use_path) = parse_use_prefix(path)?;
 
     let current_file = uri.to_file_path().ok()?;
     let current_dir = current_file.parent()?;
@@ -291,39 +282,6 @@ fn resolve_use_jump(
         target_url,
         target_range,
     )))
-}
-
-fn parse_use_path(line: &str) -> Option<(&'static str, &str)> {
-    let trimmed = line.trim();
-    let after_use = trimmed
-        .strip_prefix("pub use")
-        .or_else(|| trimmed.strip_prefix("use"))?
-        .trim();
-    let path = after_use.split_whitespace().next()?;
-    if path.is_empty() {
-        return None;
-    }
-    if let Some(p) = path.strip_prefix("./") {
-        Some(("./", p))
-    } else if let Some(p) = path.strip_prefix("../") {
-        Some(("../", p))
-    } else {
-        None
-    }
-}
-
-fn resolve_use_path(base: &std::path::Path, path: &str) -> Vec<std::path::PathBuf> {
-    if path.ends_with(".mc") {
-        return vec![base.join(path)];
-    }
-    if path.contains('/') {
-        vec![base.join(format!("{path}.mc"))]
-    } else {
-        vec![
-            base.join(format!("{path}.mc")),
-            base.join(format!("{path}/{path}.mc")),
-        ]
-    }
 }
 
 /// Same-file response: compute precise Range using local Rope
@@ -526,7 +484,7 @@ mod tests {
         // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
         // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
         let source = "package = PKG.SOP8\n\n";
-        let (state, uri) = state_with_lapper(source, vec![("enum_value_ref".into(), 99, 14, 18)]);
+        let (_state, _uri) = state_with_lapper(source, vec![("enum_value_ref".into(), 99, 14, 18)]);
 
         // Register the SOP8 row at span (90, 94) in another file. The
         //   State::index is a `IndexWorkerHandle`; in active mode it pulls
@@ -534,7 +492,6 @@ mod tests {
         //   empty. We test the lookup logic by constructing a ProjectIndex
         //   directly and asserting via `lookup_enum_value`.
         use crate::index::snapshot::ProjectIndex;
-        use crate::rpc::EnumValueEntry;
         let mut idx = ProjectIndex::new();
         let other_uri = Url::parse("file:///proj/pkg.mc").unwrap();
         idx.add_enum_value(
