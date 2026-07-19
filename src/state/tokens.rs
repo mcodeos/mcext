@@ -9,11 +9,13 @@ use std::sync::RwLock;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 
 /// Tokens state
+#[derive(Debug)]
 pub struct TokensState {
     next_id: AtomicU64,
     last: RwLock<HashMap<Url, TokenEntry>>,
 }
 
+#[derive(Debug)]
 struct TokenEntry {
     result_id: String,
     tokens: Vec<SemanticToken>,

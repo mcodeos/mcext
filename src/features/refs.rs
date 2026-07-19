@@ -20,7 +20,7 @@ pub fn resolve(
 ) -> Option<Vec<Location>> {
     let rope = state.document_rope(uri)?;
     let offset = position_to_offset(position, &rope)?;
-    let symbols_ref = state.sem_symbols.get(uri)?;
+    let symbols_ref = state.symbols.sem_symbols.get(uri)?;
     let symbols = symbols_ref.lock().ok()?;
 
     // Find symbol at cursor position

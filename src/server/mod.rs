@@ -56,7 +56,7 @@ impl Backend {
         let mcc_server = Arc::clone(&self.mcc_server);
         let client = self.client.clone();
         let uri_for_task = uri.clone();
-        self.state.scheduler.fire_immediately(uri, move || {
+        self.state.project.scheduler.fire_immediately(uri, move || {
             tokio::spawn(parse_and_publish(
                 state,
                 mcc_server,
@@ -98,7 +98,7 @@ impl Backend {
         let mcc_server = Arc::clone(&self.mcc_server);
         let client = self.client.clone();
         let uri_for_task = uri.clone();
-        self.state.scheduler.schedule(uri, move || {
+        self.state.project.scheduler.schedule(uri, move || {
             tokio::spawn(parse_and_publish(
                 state,
                 mcc_server,
@@ -256,15 +256,15 @@ async fn run_server_init(
             if let Ok(resp) = client.project_symbols().await {
                 let ec = resp.enums.clone();
                 let ev = resp.enum_values.clone();
-                if let Ok(mut cache) = state.project_symbols.lock() {
+                if let Ok(mut cache) = state.symbols.project_symbols.lock() {
                     cache.components = resp.components;
                     cache.interfaces = resp.interfaces;
                     cache.enums = ec.clone();
                     cache.modules = resp.modules;
                     cache.enum_values = ev.clone();
                 }
-                if let Ok(cache) = state.project_symbols.lock() {
-                    let _ = state.index.send(
+                if let Ok(cache) = state.symbols.project_symbols.lock() {
+                    let _ = state.project.index.send(
                         crate::index::worker::IndexCommand::UpdateProjectSymbols {
                             components: cache.components.clone(),
                             interfaces: cache.interfaces.clone(),
@@ -282,18 +282,18 @@ async fn run_server_init(
     }
 
     // Signal init complete (order: sticky flag first, then notify)
-    state.init_done.store(true, Ordering::Release);
-    state.init_notify.notify_waiters();
+    state.init.done.store(true, Ordering::Release);
+    state.init.notify.notify_waiters();
     info!("init_done = true — parse_and_publish can now make RPC calls");
 
     // Phase 3: retry pending diagnostics
     let pending: Vec<(Url, Option<i32>)> = state
-        .pending_diagnostics
+        .diags.pending
         .iter()
         .map(|entry| (entry.key().clone(), *entry.value()))
         .collect();
     for (uri, _) in &pending {
-        state.pending_diagnostics.remove(uri);
+        state.diags.pending.remove(uri);
     }
     if !pending.is_empty() {
         info!(
@@ -301,7 +301,7 @@ async fn run_server_init(
             pending.len()
         );
         for (uri, version) in pending {
-            if state.documents.contains_key(&uri) {
+            if state.docs.documents.contains_key(&uri) {
                 let s = Arc::clone(&state);
                 let mc = Arc::clone(&mcc_server);
                 let cl = lsp_client.clone();
@@ -343,20 +343,20 @@ async fn parse_and_publish(
     //
     // Two-phase: AtomicBool for sticky check (fast path after init),
     //            Notify for efficient wakeup (slow path during init).
-    if !state.init_done.load(Ordering::Acquire) {
+    if !state.init.done.load(Ordering::Acquire) {
         // Slow path: wait for init_notify.  After waking, MUST re-check
         // init_done because Notify is NOT sticky — if notify_waiters()
         // was already consumed by earlier tasks, notified() would block
         // forever.  The AtomicBool protects against this TOCTOU race.
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            state.init_notify.notified(),
+            state.init.notify.notified(),
         )
         .await;
-        if !state.init_done.load(Ordering::Acquire) {
+        if !state.init.done.load(Ordering::Acquire) {
             // Still not done after wake/timeout → truly not ready
             info!("parse_and_publish: init not ready for {uri}, queuing for retry");
-            state.pending_diagnostics.insert(uri.clone(), version);
+            state.diags.pending.insert(uri.clone(), version);
             return;
         }
     }
@@ -364,7 +364,7 @@ async fn parse_and_publish(
     let server_guard = mcc_server.read().await;
     let Some(server) = server_guard.as_ref() else {
         debug!("mcc server not available for {uri}, queuing for retry");
-        state.pending_diagnostics.insert(uri.clone(), version);
+        state.diags.pending.insert(uri.clone(), version);
         return;
     };
 
@@ -378,7 +378,7 @@ async fn parse_and_publish(
         }
         if !server.is_connected() {
             debug!("mcc server still not connected for {uri}, queuing for retry");
-            state.pending_diagnostics.insert(uri.clone(), version);
+            state.diags.pending.insert(uri.clone(), version);
             return;
         }
     }
@@ -510,22 +510,21 @@ async fn parse_and_publish(
             .collect(),
     };
     state
-        .sem_tokens
+        .symbols.sem_tokens
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_tokens)));
-    state.registered_uris.insert(uri.clone(), mc_uri.clone());
+    state.docs.registered_uris.insert(uri.clone(), mc_uri.clone());
 
     // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
     let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
     state
-        .sem_symbols
+        .symbols.sem_symbols
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
         let lsp_tokens = crate::features::semtok::compute(&state, &uri).unwrap_or_default();
         state
-            .tokens
-            .store_with_result_id(uri.clone(), rid, lsp_tokens);
+            .symbols.tokens            .store_with_result_id(uri.clone(), rid, lsp_tokens);
     }
 
     // Trigger semantic tokens refresh so VSCode re-requests after parse
@@ -540,7 +539,7 @@ async fn parse_and_publish(
         .await;
 
     // Success — remove from pending retry set if it was there
-    state.pending_diagnostics.remove(&uri);
+    state.diags.pending.remove(&uri);
     info!(
         "parse_and_publish done for {}: {diag_count} diags",
         uri.path()
@@ -581,7 +580,7 @@ impl LanguageServer for Backend {
         // (initialized fires before didOpen, so this list is usually empty.)
         let docs: Vec<_> = self
             .state
-            .documents
+            .docs.documents
             .iter()
             .map(|e| (e.key().clone(), e.value().version))
             .collect();
@@ -591,14 +590,14 @@ impl LanguageServer for Backend {
             let cl = self.client.clone();
             let u = uri.clone();
             let v = version;
-            self.state.scheduler.fire_immediately(uri, move || {
+            self.state.project.scheduler.fire_immediately(uri, move || {
                 tokio::spawn(parse_and_publish(s, mc, cl, u, Some(v)));
             });
         }
 
         // Trigger project index scan
         if let Some(root) = project_root {
-            let _ = self.state.index.send(IndexCommand::ParseAll(root.clone()));
+            let _ = self.state.project.index.send(IndexCommand::ParseAll(root.clone()));
             trace!("server: project index ParseAll triggered: {}", root.display());
         }
 
@@ -633,7 +632,7 @@ impl LanguageServer for Backend {
 
         // Notify index worker
         let mc_uri = String::from(uri.path());
-        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+        let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -648,7 +647,7 @@ impl LanguageServer for Backend {
         .await;
         // Notify index worker
         let mc_uri = String::from(uri.path());
-        let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+        let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
@@ -663,9 +662,9 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         debug!("did_close: {}", params.text_document.uri.path());
         self.state.remove_document(&params.text_document.uri);
-        self.state.scheduler.remove(&params.text_document.uri);
+        self.state.project.scheduler.remove(&params.text_document.uri);
         let mc_uri = String::from(params.text_document.uri.path());
-        let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
+        let _ = self.state.project.index.send(IndexCommand::RemoveFile(mc_uri));
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -674,10 +673,10 @@ impl LanguageServer for Backend {
             let mc_uri = String::from(change.uri.path());
             match change.typ {
                 FileChangeType::DELETED => {
-                    let _ = self.state.index.send(IndexCommand::RemoveFile(mc_uri));
+                    let _ = self.state.project.index.send(IndexCommand::RemoveFile(mc_uri));
                 }
                 FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    let _ = self.state.index.send(IndexCommand::AddFile(mc_uri));
+                    let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
                 }
                 _ => {}
             }
@@ -776,10 +775,10 @@ impl LanguageServer for Backend {
         // ready), do an on-the-fly sem call to populate it.
         // Only do this AFTER init is complete — concurrent RPC during init
         // (e.g. with Phase 2's load_project) will crash the single-threaded mcc.
-        if self.state.sem_symbols.get(&uri).is_none()
+        if self.state.symbols.sem_symbols.get(&uri).is_none()
             && self
                 .state
-                .init_done
+                .init.done
                 .load(std::sync::atomic::Ordering::Acquire)
         {
             if let Some(rope) = self.state.document_rope(&uri) {
@@ -796,7 +795,7 @@ impl LanguageServer for Backend {
                                 uri.path()
                             );
                             self.state
-                                .sem_symbols
+                                .symbols.sem_symbols
                                 .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
                         }
                     }
@@ -832,10 +831,9 @@ impl LanguageServer for Backend {
 
         let tokens = crate::features::semtok::compute(&self.state, &uri);
         let tokens = tokens.unwrap_or_default();
-        let result_id = self.state.tokens.next_id();
+        let result_id = self.state.symbols.tokens.next_id();
         self.state
-            .tokens
-            .store(uri.clone(), result_id, tokens.clone());
+            .symbols.tokens            .store(uri.clone(), result_id, tokens.clone());
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: Some(result_id.to_string()),
@@ -856,7 +854,7 @@ impl LanguageServer for Backend {
         let curr = curr.unwrap_or_default();
 
         // Try incremental: check last tokens
-        let prev_tokens = self.state.tokens.get(&uri);
+        let prev_tokens = self.state.symbols.tokens.get(&uri);
         let prev_id_str: String = params.previous_result_id;
         if let Some((stored_id, prev_tokens)) = prev_tokens {
             if stored_id == prev_id_str {
@@ -864,8 +862,7 @@ impl LanguageServer for Backend {
                 if let Some(delta) = crate::features::semtok::compute_delta(&prev_tokens, &curr) {
                     let new_id = prev_id_str.clone();
                     self.state
-                        .tokens
-                        .store_with_result_id(uri.clone(), new_id.clone(), curr);
+                        .symbols.tokens                        .store_with_result_id(uri.clone(), new_id.clone(), curr);
                     return Ok(Some(SemanticTokensFullDeltaResult::TokensDelta(
                         tower_lsp::lsp_types::SemanticTokensDelta {
                             result_id: Some(new_id),
@@ -876,10 +873,9 @@ impl LanguageServer for Backend {
             }
 
             // fallback to full
-            let new_id = self.state.tokens.next_id().to_string();
+            let new_id = self.state.symbols.tokens.next_id().to_string();
             self.state
-                .tokens
-                .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+                .symbols.tokens                .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
             return Ok(Some(SemanticTokensFullDeltaResult::Tokens(
                 SemanticTokens {
                     result_id: Some(new_id),
@@ -889,10 +885,9 @@ impl LanguageServer for Backend {
         }
 
         // No previous data, return full
-        let new_id = self.state.tokens.next_id().to_string();
+        let new_id = self.state.symbols.tokens.next_id().to_string();
         self.state
-            .tokens
-            .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+            .symbols.tokens            .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
         Ok(Some(SemanticTokensFullDeltaResult::Tokens(
             SemanticTokens {
                 result_id: Some(new_id),
@@ -928,7 +923,7 @@ impl LanguageServer for Backend {
             .first()
             .and_then(|f| f.uri.to_file_path().ok())
         {
-            let _ = self.state.index.send(IndexCommand::ParseAll(root.clone()));
+            let _ = self.state.project.index.send(IndexCommand::ParseAll(root.clone()));
 
             // Auto-load project dependencies from project.toml
             let mcc_server = self.mcc_server.clone();

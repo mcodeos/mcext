@@ -102,7 +102,7 @@ fn resolve_use_hover(
 
 /// Collect all index entries whose URI matches the target file.
 fn lookup_file_entries(state: &WorkspaceState, target_url: &Url) -> Vec<IndexEntry> {
-    let snap = state.index.snapshot();
+    let snap = state.project.index.snapshot();
     snap.lookup_file(target_url)
         .into_iter()
         .map(|(_kind, entry)| entry.clone())
@@ -153,7 +153,7 @@ fn resolve_reference_hover(
     kind: &str,
     scope: &str,
 ) -> Option<Hover> {
-    let snap = state.index.snapshot();
+    let snap = state.project.index.snapshot();
 
     // Determine the index kind to search
     let index_kind = match kind {

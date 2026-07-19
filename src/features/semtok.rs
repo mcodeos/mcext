@@ -27,7 +27,7 @@ const MULTILINE_COMMENT_TYPE: i16 = 101;
 /// Returns `Vec<SemanticToken>`, sorted by position in ascending order.
 pub fn compute(state: &WorkspaceState, uri: &Url) -> Option<Vec<SemanticToken>> {
     let rope = state.document_rope(uri)?;
-    let tokens_ref = state.sem_tokens.get(uri)?;
+    let tokens_ref = state.symbols.sem_tokens.get(uri)?;
     let tokens_guard = tokens_ref.lock().unwrap_or_else(|e| {
         tracing::warn!("sem_tokens lock poisoned, attempting recovery");
         e.into_inner()
@@ -427,8 +427,8 @@ fn emit_multiline_comment(
 //         if let Some(result) = mcc::mcc_query(&mc_uri) {
 //             state.insert_parse(
 //                 uri.clone(),
-//                 std::sync::Arc::clone(&result.sem_tokens),
-//                 std::sync::Arc::clone(&result.sem_symbols),
+//                 std::sync::Arc::clone(&result.symbols.sem_tokens),
+//                 std::sync::Arc::clone(&result.symbols.sem_symbols),
 //                 mc_uri,
 //             );
 //         }
