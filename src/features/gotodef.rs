@@ -479,6 +479,53 @@ mod tests {
             Some(other_uri.to_string())
         );
     }
+
+    #[test]
+    fn belongs_to_substring_false_positive() {
+        // AVDD09_CAP should NOT match CAP (substring false positive)
+        assert!(!belongs_to("AVDD09_CAP", "CAP"));
+        assert!(!belongs_to("CAP", "AVDD09_CAP"));
+    }
+
+    #[test]
+    fn belongs_to_exact_match() {
+        assert!(belongs_to("CAP", "CAP"));
+        assert!(belongs_to("VDD_3V3", "VDD_3V3"));
+    }
+
+    #[test]
+    fn belongs_to_array_index_normalization() {
+        assert!(belongs_to("res[1:2]", "res"));
+        assert!(belongs_to("res", "res[1:2]"));
+    }
+
+    #[test]
+    fn belongs_to_brace_expansion() {
+        assert!(belongs_to("rs485{A,B}", "rs485"));
+    }
+
+    #[test]
+    fn belongs_to_trailing_digits() {
+        assert!(belongs_to("res1", "res"));
+        assert!(belongs_to("res2", "res"));
+    }
+
+    #[test]
+    fn belongs_to_comma_separated_list() {
+        assert!(belongs_to("MIC, I2C0, SPI", "MIC"));
+        assert!(belongs_to("I2C0, SPI", "SPI"));
+    }
+
+    #[test]
+    fn belongs_to_truncated_brace() {
+        assert!(belongs_to("MIC{P,N", "MIC"));
+    }
+
+    #[test]
+    fn belongs_to_no_false_substring() {
+        assert!(!belongs_to("AVDD09_CAP", "CAP"));
+        assert!(!belongs_to("VDD_CAP_NEW", "CAP"));
+    }
 }
 
 /// Check if `a` and `b` refer to the same base identifier in mcode naming.
@@ -495,7 +542,31 @@ fn belongs_to(a: &str, b: &str) -> bool {
     }
     // One may be a comma-separated list (e.g. "MIC, I2C0, SPI"),
     // or truncated (e.g. "MIC{P,N" without closing brace).
-    na.contains(nb) || nb.contains(na)
+    // Split by comma and exact-match each piece (handles comma-separated lists).
+    let pieces_a: Vec<&str> = na.split(',').map(|s| s.trim()).collect();
+    let pieces_b: Vec<&str> = nb.split(',').map(|s| s.trim()).collect();
+    if pieces_a.iter().any(|pa| pieces_b.iter().any(|pb| *pa == *pb)) {
+        return true;
+    }
+    // Truncated brace/bracket tokens: "MIC{P,N" should match "MIC".
+    if pieces_a.iter().any(|pa| pieces_b.iter().any(|pb| is_truncated_brace_match(pa, pb))) {
+        return true;
+    }
+    // Trailing-digit normalization: res1 ↔ res, rs485 ↔ rs
+    // (normalize_mc_name already stripped digits from the original, but the
+    // counterpart may have had a brace/bracket stripped first, leaving digits).
+    fn strip_trailing_digits(s: &str) -> &str {
+        s.trim_end_matches(|c: char| c.is_ascii_digit())
+    }
+    pieces_a.iter().any(|pa| {
+        let stripped = strip_trailing_digits(pa);
+        !stripped.is_empty() && stripped.len() < pa.len()
+            && pieces_b.iter().any(|pb| stripped == *pb)
+    }) || pieces_b.iter().any(|pb| {
+        let stripped = strip_trailing_digits(pb);
+        !stripped.is_empty() && stripped.len() < pb.len()
+            && pieces_a.iter().any(|pa| *pa == stripped)
+    })
 }
 
 /// Strip mcode array/brace/dot suffixes and trailing digits to get
@@ -526,6 +597,34 @@ fn normalize_mc_name(name: &str) -> &str {
     s
 }
 
+/// Check if one string is a truncated brace/bracket token whose base
+/// matches the other. For example, "MIC{P,N" (no closing `}`) should
+/// match "MIC", but "AVDD09_CAP" should NOT match "CAP".
+fn is_truncated_brace_match(a: &str, b: &str) -> bool {
+    // Find where a potential truncation starts: `{`, `[`, or `(`
+    let trunc = |s: &str| -> Option<usize> {
+        [s.find('{'), s.find('['), s.find('(')]
+            .iter()
+            .filter_map(|&i| i)
+            .min()
+    };
+    // If one string has an unclosed brace/bracket/paren, check if
+    // the prefix (before the opener) exactly matches the other string.
+    if let Some(pos) = trunc(a) {
+        let prefix = a[..pos].trim_end();
+        if prefix == b {
+            return true;
+        }
+    }
+    if let Some(pos) = trunc(b) {
+        let prefix = b[..pos].trim_end();
+        if prefix == a {
+            return true;
+        }
+    }
+    false
+}
+
 /// Unified ref→def resolution for handlers that follow the 4-level
 /// scope-priority lookup. Returns `None` if unresolved (caller may
 /// fall back to self-locate or error).
@@ -546,13 +645,34 @@ fn resolve_ref_to_def(
         }
     }
 
-    // Level 2: same-scope name match (exact or belongs_to).
-    // Skip the cursor's own entry (same kind AND same id), but allow
-    // cross-kind matches: e.g. instance_ref(id=D) → DeclareInstance(id=D).
+    // Levels 2-3: same-file definition lookup.
+    // Map reference kinds to their expected definition kinds so we
+    // jump to the *definition*, not another reference site.
+    let def_kinds: &[&str] = match kind {
+        "class_ref" | "declare_class" | "interface_ref" => {
+            &["class_def", "class_definition"]
+        }
+        "enum_class_ref" => &["enum_class_def"],
+        "function_ref" => &["function_def"],
+        "pin_name_ref" => &["pin_name_def"],
+        "label_ref" => &["label_def"],
+        "instance_ref" | "instance_def" | "declare_instance" => {
+            &["instance_def", "declare_instance"]
+        }
+        _ => &[],
+    };
+
+    let is_def_kind = |k: &str| -> bool {
+        def_kinds.is_empty() || def_kinds.iter().any(|dk| *dk == k)
+    };
+
+    // Level 2: same-scope definition match.
     if !scope.is_empty() {
         for entry in &symbols.lapper {
-            let is_self = entry.kind == kind && entry.id == id;
-            if entry.scope == scope && !is_self {
+            if is_def_kind(&entry.kind)
+                && entry.scope == scope
+                && entry.kind != kind
+            {
                 let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
                 if belongs_to(&entry_name, name) {
                     return local_response(uri, [entry.start, entry.stop], rope);
@@ -561,11 +681,10 @@ fn resolve_ref_to_def(
         }
     }
 
-    // Level 3: same-file name match (any scope, prefer earlier = definition).
+    // Level 3: same-file definition match (any scope, prefer earlier).
     let mut best: Option<(usize, usize)> = None;
     for entry in &symbols.lapper {
-        let is_self = entry.kind == kind && entry.id == id;
-        if !is_self {
+        if is_def_kind(&entry.kind) && entry.kind != kind {
             let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
             if belongs_to(&entry_name, name) {
                 let pos = entry.start;
