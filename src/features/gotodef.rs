@@ -198,7 +198,8 @@ pub fn resolve(
                         class_name, value_name
                     );
                     if let Some(entry) = state
-                        .project.index
+                        .project
+                        .index
                         .snapshot()
                         .lookup_enum_value(&class_name, &value_name)
                     {
@@ -395,7 +396,8 @@ mod tests {
             cross_file_targets: vec![],
         };
         state
-            .symbols.sem_symbols
+            .symbols
+            .sem_symbols
             .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
         (state, uri)
     }
@@ -422,10 +424,7 @@ mod tests {
         // `enum_value_def` self-locates with an empty Array to prevent
         // VS Code word-search fallback (mirrors `port_def` / `class_def`).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(
-            source,
-            vec![("enum_value_def".into(), 1, 11, 21)],
-        );
+        let (state, uri) = state_with_lapper(source, vec![("enum_value_def".into(), 1, 11, 21)]);
         let response = resolve(&state, &uri, Position::new(1, 4));
         match response {
             Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
@@ -440,7 +439,10 @@ mod tests {
         let source = "package = PKG.SOP8\n";
         let (state, uri) = state_with_lapper(source, vec![("enum_class_ref".into(), 7, 10, 13)]);
         let response = resolve(&state, &uri, Position::new(0, 11));
-        assert!(response.is_none(), "expected None for unregistered class, got {response:?}");
+        assert!(
+            response.is_none(),
+            "expected None for unregistered class, got {response:?}"
+        );
     }
 
     #[test]

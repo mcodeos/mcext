@@ -265,3 +265,152 @@ fn format_markdown_hover(lines: &[String]) -> Option<Hover> {
 }
 
 // Use-statement path helpers are in crate::util::usechk.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::LapperEntry;
+    use crate::state::RpcSemSymbols;
+    use ropey::Rope;
+    use std::sync::{Arc, Mutex};
+    use tower_lsp::lsp_types::{
+        HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams,
+    };
+
+    // ── Markdown formatting (pure functions) ──
+
+    #[test]
+    fn entry_line_formats_correctly() {
+        let entry = IndexEntry {
+            uri: Url::parse("file:///test.mc").unwrap(),
+            span: (10, 20),
+            name: "helper_chip".into(),
+        };
+        let line = format_entry_line(&entry);
+        assert!(line.contains("helper_chip"), "line: {line}");
+        assert!(line.contains("[10:20]"), "line: {line}");
+    }
+
+    #[test]
+    fn markdown_header_and_lines() {
+        let header = "### Definitions in helper.mc";
+        let lines: Vec<String> = vec!["- helper_chip [0:20]".into()];
+        let content = format_markdown(header, &lines);
+        assert_eq!(content.kind, MarkupKind::Markdown);
+        assert!(content.value.contains(header));
+        assert!(content.value.contains("helper_chip"));
+    }
+
+    #[test]
+    fn markdown_hover_empty_lines_returns_none() {
+        let result = format_markdown_hover(&[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn markdown_hover_with_lines() {
+        let lines = vec!["line 1".to_string(), "line 2".to_string()];
+        let hover = format_markdown_hover(&lines).unwrap();
+        match &hover.contents {
+            HoverContents::Markup(mc) => {
+                assert!(mc.value.contains("line 1"));
+                assert!(mc.value.contains("line 2"));
+            }
+            _ => panic!("expected Markup"),
+        }
+    }
+
+    #[test]
+    fn symbol_hover_format() {
+        let hover = format_symbol_hover("helper_chip", "component/module", "global").unwrap();
+        match &hover.contents {
+            HoverContents::Markup(mc) => {
+                assert!(mc.value.contains("helper_chip"));
+                assert!(mc.value.contains("component/module"));
+            }
+            _ => panic!("expected Markup"),
+        }
+    }
+
+    // ── Symbol hover ──
+
+    fn state_with_lapper(
+        lapper_entries: Vec<(&str, usize, usize, u32, &str)>,
+    ) -> (WorkspaceState, Url) {
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///test.mc").unwrap();
+        let source = "component main                \n";
+        state.insert_document(uri.clone(), Rope::from_str(source), 1);
+        let lapper: Vec<LapperEntry> = lapper_entries
+            .into_iter()
+            .map(|(kind, start, stop, id, scope)| LapperEntry {
+                kind: kind.into(),
+                start,
+                stop,
+                id,
+                scope: scope.into(),
+            })
+            .collect();
+        let symbols = RpcSemSymbols {
+            lapper,
+            ..Default::default()
+        };
+        state
+            .symbols
+            .sem_symbols
+            .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
+        (state, uri)
+    }
+
+    #[test]
+    fn class_def_hover_shows_kind() {
+        // "component main" — "main" from byte 10 to 14
+        let (state, uri) = state_with_lapper(vec![("class_def", 10, 14, 0, "")]);
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 12),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hover = resolve(&state, &params).unwrap();
+        match &hover.contents {
+            HoverContents::Markup(mc) => {
+                assert!(
+                    mc.value.contains("component/module"),
+                    "expected component/module label, got: {}",
+                    mc.value
+                );
+            }
+            _ => panic!("expected Markup"),
+        }
+    }
+
+    #[test]
+    fn empty_lapper_returns_none() {
+        let (state, uri) = state_with_lapper(vec![]);
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let result = resolve(&state, &params);
+        assert!(result.is_none(), "expected None for empty lapper");
+    }
+
+    #[test]
+    fn out_of_bounds_position_returns_none() {
+        let (state, uri) = state_with_lapper(vec![("class_def", 0, 10, 0, "")]);
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(100, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let result = resolve(&state, &params);
+        assert!(result.is_none(), "expected None for out-of-bounds");
+    }
+}

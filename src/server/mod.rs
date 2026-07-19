@@ -156,11 +156,7 @@ impl Backend {
             references_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec![
-                    ".".to_string(),
-                    ":".to_string(),
-                    " ".to_string(),
-                ]),
+                trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
                 all_commit_characters: Some(vec![]),
                 completion_item: None,
                 work_done_progress_options: WorkDoneProgressOptions::default(),
@@ -234,8 +230,14 @@ async fn run_server_init(
                 }
                 match client.lib_show(lib_name).await {
                     Ok(info) => {
-                        info!("Lib info: name={} symbols={} modules={} components={} interfaces={}",
-                            info.name, info.total_symbols, info.module_count, info.component_count, info.interface_count);
+                        info!(
+                            "Lib info: name={} symbols={} modules={} components={} interfaces={}",
+                            info.name,
+                            info.total_symbols,
+                            info.module_count,
+                            info.component_count,
+                            info.interface_count
+                        );
                     }
                     Err(e) => {
                         warn!("lib_show failed: {:?}", e);
@@ -288,7 +290,8 @@ async fn run_server_init(
 
     // Phase 3: retry pending diagnostics
     let pending: Vec<(Url, Option<i32>)> = state
-        .diags.pending
+        .diags
+        .pending
         .iter()
         .map(|entry| (entry.key().clone(), *entry.value()))
         .collect();
@@ -510,21 +513,28 @@ async fn parse_and_publish(
             .collect(),
     };
     state
-        .symbols.sem_tokens
+        .symbols
+        .sem_tokens
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_tokens)));
-    state.docs.registered_uris.insert(uri.clone(), mc_uri.clone());
+    state
+        .docs
+        .registered_uris
+        .insert(uri.clone(), mc_uri.clone());
 
     // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
     let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
     state
-        .symbols.sem_symbols
+        .symbols
+        .sem_symbols
         .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
 
     // Store the result_id so semantic_tokens_full uses it
     if let Some(rid) = sem.result_id {
         let lsp_tokens = crate::features::semtok::compute(&state, &uri).unwrap_or_default();
         state
-            .symbols.tokens            .store_with_result_id(uri.clone(), rid, lsp_tokens);
+            .symbols
+            .tokens
+            .store_with_result_id(uri.clone(), rid, lsp_tokens);
     }
 
     // Trigger semantic tokens refresh so VSCode re-requests after parse
@@ -580,7 +590,8 @@ impl LanguageServer for Backend {
         // (initialized fires before didOpen, so this list is usually empty.)
         let docs: Vec<_> = self
             .state
-            .docs.documents
+            .docs
+            .documents
             .iter()
             .map(|e| (e.key().clone(), e.value().version))
             .collect();
@@ -597,8 +608,15 @@ impl LanguageServer for Backend {
 
         // Trigger project index scan
         if let Some(root) = project_root {
-            let _ = self.state.project.index.send(IndexCommand::ParseAll(root.clone()));
-            trace!("server: project index ParseAll triggered: {}", root.display());
+            let _ = self
+                .state
+                .project
+                .index
+                .send(IndexCommand::ParseAll(root.clone()));
+            trace!(
+                "server: project index ParseAll triggered: {}",
+                root.display()
+            );
         }
 
         self.config.insert("current".to_string(), cfg);
@@ -662,9 +680,16 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         debug!("did_close: {}", params.text_document.uri.path());
         self.state.remove_document(&params.text_document.uri);
-        self.state.project.scheduler.remove(&params.text_document.uri);
+        self.state
+            .project
+            .scheduler
+            .remove(&params.text_document.uri);
         let mc_uri = String::from(params.text_document.uri.path());
-        let _ = self.state.project.index.send(IndexCommand::RemoveFile(mc_uri));
+        let _ = self
+            .state
+            .project
+            .index
+            .send(IndexCommand::RemoveFile(mc_uri));
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -673,7 +698,11 @@ impl LanguageServer for Backend {
             let mc_uri = String::from(change.uri.path());
             match change.typ {
                 FileChangeType::DELETED => {
-                    let _ = self.state.project.index.send(IndexCommand::RemoveFile(mc_uri));
+                    let _ = self
+                        .state
+                        .project
+                        .index
+                        .send(IndexCommand::RemoveFile(mc_uri));
                 }
                 FileChangeType::CREATED | FileChangeType::CHANGED => {
                     let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
@@ -778,7 +807,8 @@ impl LanguageServer for Backend {
         if self.state.symbols.sem_symbols.get(&uri).is_none()
             && self
                 .state
-                .init.done
+                .init
+                .done
                 .load(std::sync::atomic::Ordering::Acquire)
         {
             if let Some(rope) = self.state.document_rope(&uri) {
@@ -795,7 +825,8 @@ impl LanguageServer for Backend {
                                 uri.path()
                             );
                             self.state
-                                .symbols.sem_symbols
+                                .symbols
+                                .sem_symbols
                                 .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
                         }
                     }
@@ -833,7 +864,9 @@ impl LanguageServer for Backend {
         let tokens = tokens.unwrap_or_default();
         let result_id = self.state.symbols.tokens.next_id();
         self.state
-            .symbols.tokens            .store(uri.clone(), result_id, tokens.clone());
+            .symbols
+            .tokens
+            .store(uri.clone(), result_id, tokens.clone());
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: Some(result_id.to_string()),
@@ -861,8 +894,11 @@ impl LanguageServer for Backend {
                 // id matches, try diff
                 if let Some(delta) = crate::features::semtok::compute_delta(&prev_tokens, &curr) {
                     let new_id = prev_id_str.clone();
-                    self.state
-                        .symbols.tokens                        .store_with_result_id(uri.clone(), new_id.clone(), curr);
+                    self.state.symbols.tokens.store_with_result_id(
+                        uri.clone(),
+                        new_id.clone(),
+                        curr,
+                    );
                     return Ok(Some(SemanticTokensFullDeltaResult::TokensDelta(
                         tower_lsp::lsp_types::SemanticTokensDelta {
                             result_id: Some(new_id),
@@ -874,8 +910,11 @@ impl LanguageServer for Backend {
 
             // fallback to full
             let new_id = self.state.symbols.tokens.next_id().to_string();
-            self.state
-                .symbols.tokens                .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+            self.state.symbols.tokens.store_with_result_id(
+                uri.clone(),
+                new_id.clone(),
+                curr.clone(),
+            );
             return Ok(Some(SemanticTokensFullDeltaResult::Tokens(
                 SemanticTokens {
                     result_id: Some(new_id),
@@ -887,7 +926,9 @@ impl LanguageServer for Backend {
         // No previous data, return full
         let new_id = self.state.symbols.tokens.next_id().to_string();
         self.state
-            .symbols.tokens            .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
+            .symbols
+            .tokens
+            .store_with_result_id(uri.clone(), new_id.clone(), curr.clone());
         Ok(Some(SemanticTokensFullDeltaResult::Tokens(
             SemanticTokens {
                 result_id: Some(new_id),
@@ -923,7 +964,11 @@ impl LanguageServer for Backend {
             .first()
             .and_then(|f| f.uri.to_file_path().ok())
         {
-            let _ = self.state.project.index.send(IndexCommand::ParseAll(root.clone()));
+            let _ = self
+                .state
+                .project
+                .index
+                .send(IndexCommand::ParseAll(root.clone()));
 
             // Auto-load project dependencies from project.toml
             let mcc_server = self.mcc_server.clone();
