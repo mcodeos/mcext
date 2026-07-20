@@ -521,24 +521,45 @@ async fn parse_and_publish(
         .registered_uris
         .insert(uri.clone(), mc_uri.clone());
 
-    // ★ Fix: Store sem_symbols from RPC response for goto_definition and other features
-    let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
-    state
-        .symbols
-        .sem_symbols
-        .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
+    // ★ §7.6: result_id dedup — skip recompute if mcc data unchanged
+    let mcc_result_id = sem.result_id.clone();
+    let should_skip = mcc_result_id
+        .as_ref()
+        .is_some_and(|rid| state.symbols.tokens.last_result_id(&uri).as_ref() == Some(rid));
 
-    // Store the result_id so semantic_tokens_full uses it
-    if let Some(rid) = sem.result_id {
-        let lsp_tokens = crate::features::semtok::compute(&state, &uri).unwrap_or_default();
+    if !should_skip {
+        // Store sem_symbols for goto_definition and other features
+        let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
         state
             .symbols
-            .tokens
-            .store_with_result_id(uri.clone(), rid, lsp_tokens);
-    }
+            .sem_symbols
+            .insert(uri.clone(), Arc::new(std::sync::Mutex::new(rpc_symbols)));
 
-    // Trigger semantic tokens refresh so VSCode re-requests after parse
-    client.semantic_tokens_refresh().await.ok();
+        // Store result_id and recompute tokens
+        if let Some(rid) = mcc_result_id {
+            let lsp_tokens = crate::features::semtok::compute(&state, &uri).unwrap_or_default();
+            state
+                .symbols
+                .tokens
+                .store_with_result_id(uri.clone(), rid, lsp_tokens);
+        }
+
+        // Trigger semantic tokens refresh so VSCode re-requests after parse
+        client.semantic_tokens_refresh().await.ok();
+
+        // ★ §7.6: Mark affected files dirty and trigger re-parse if open
+        for affected_uri_str in &sem.affected_uris {
+            let affected_url = Url::parse(affected_uri_str)
+                .or_else(|_| Url::from_file_path(affected_uri_str))
+                .unwrap_or_else(|_| Url::parse("file:///").unwrap());
+            if affected_url == uri {
+                continue; // skip self
+            }
+            if let Ok(mut dirty) = state.symbols.sem_dirty.lock() {
+                dirty.insert(affected_url.clone());
+            }
+        }
+    }
 
     // Always publish diagnostics (with current version) so old errors get cleared.
     // The diagnostics vector contains results from the latest mcc parse for this document.

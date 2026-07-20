@@ -285,6 +285,9 @@ pub struct SemResponse {
     /// Stable result_id for semantic tokens (hash of token data)
     #[serde(default)]
     pub result_id: Option<String>,
+    /// §7.6: Files that `use` this one — need re-parse
+    #[serde(default)]
+    pub affected_uris: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -301,6 +304,37 @@ pub struct SemSymbols {
     pub lapper: Vec<LapperEntry>,
     #[serde(default)]
     pub global: GlobalSymbols,
+    /// ★ Unified ref→def map (RefDefMap) — replaces cross_file_targets
+    #[serde(default)]
+    pub ref_def_map: Option<RefDefMapData>,
+}
+
+/// RefDefMap payload from mcc sem RPC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefDefMapData {
+    pub entries: Vec<RefDefEntryData>,
+    pub files: Vec<String>,
+    pub containers: Vec<String>,
+    #[serde(default)]
+    pub kind_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefDefEntryData {
+    pub ref_kind: u8,
+    pub ref_id: u32,
+    pub file_id: u32,
+    pub def_span: [u32; 2],
+    pub def_kind: u8,
+    pub container_id: u32,
+}
+
+impl RefDefMapData {
+    pub fn lookup(&self, ref_kind: u8, ref_id: u32) -> Option<&RefDefEntryData> {
+        self.entries
+            .iter()
+            .find(|e| e.ref_kind == ref_kind && e.ref_id == ref_id)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
