@@ -61,6 +61,8 @@ pub struct RpcSemSymbols {
     pub global_declares: Vec<GlobalDeclareSpan>,
     pub global_references: Vec<GlobalReferenceSpan>,
     pub cross_file_targets: Vec<CrossFileTarget>,
+    /// ★ RefDefMap — unified ref→def table from mcc
+    pub ref_def_map: Option<crate::rpc::RefDefMapData>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +122,7 @@ impl From<SemSymbols> for RpcSemSymbols {
                 })
                 .collect(),
             cross_file_targets: sem.global.cross_file_targets,
+            ref_def_map: sem.ref_def_map,
         }
     }
 }
@@ -189,6 +192,8 @@ pub struct SymbolCache {
     pub sem_symbols: DashMap<Url, RpcSemSymbolsArcCell>,
     pub tokens: TokensState,
     pub project_symbols: Arc<Mutex<ProjectSymbolsCache>>,
+    /// §7.6: URIs whose Use table needs refresh (dependency changed)
+    pub sem_dirty: std::sync::Mutex<std::collections::HashSet<Url>>,
 }
 
 impl SymbolCache {
@@ -198,6 +203,7 @@ impl SymbolCache {
             sem_symbols: DashMap::new(),
             tokens: TokensState::new(),
             project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
+            sem_dirty: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 }

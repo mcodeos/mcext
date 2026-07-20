@@ -88,23 +88,22 @@ pub fn resolve(
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "instance_def" | "declare_instance" => {
-                let name = rope.byte_slice(interval.start..interval.stop).to_string();
-                if let Some(resp) = resolve_ref_to_def(
-                    state,
-                    &symbols,
-                    &rope,
-                    uri,
-                    interval.kind.as_str(),
-                    interval.id,
-                    &interval.scope,
-                    &name,
-                ) {
-                    return Some(resp);
-                }
+                // Cursor is on the definition itself — self-locate.
+                // (Previously called resolve_ref_to_def which searched by
+                // *instance* name, jumping to unrelated same-named instances.)
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "instance_ref" => {
+            // ── Label / port reference resolution ──
+            // Strategy (see docs/label-lookup-strategy.md):
+            //   1. Search same-scope for explicit def (port_def / label_def) → jump
+            //   2. Search same-file for implicit def (port_def / label_def) → jump
+            //   3. Neither found → self is the implicit def → self-locate
+            "instance_ref" | "label_ref" => {
                 let name = rope.byte_slice(interval.start..interval.stop).to_string();
+                eprintln!(
+                    "F12_DIAG resolve instance_ref/label_ref name='{name}' kind={} id={} scope='{}' start={} stop={}",
+                    interval.kind, interval.id, interval.scope, interval.start, interval.stop
+                );
                 if let Some(resp) = resolve_ref_to_def(
                     state,
                     &symbols,
@@ -114,9 +113,15 @@ pub fn resolve(
                     interval.id,
                     &interval.scope,
                     &name,
+                    (interval.start, interval.stop),
                 ) {
                     return Some(resp);
                 }
+                // Step 3: no earlier def found — self is the implicit definition.
+                eprintln!(
+                    "F12_DIAG resolve instance_ref/label_ref name='{name}' => Step3 self-locate (empty Array)"
+                );
+                return Some(GotoDefinitionResponse::Array(vec![]));
             }
             "port_def" => {
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
@@ -232,8 +237,7 @@ pub fn resolve(
                 // Self-locate: cursor on label definition itself → stay
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref"
-            | "label_ref" => {
+            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref" => {
                 let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
                     state,
@@ -244,6 +248,7 @@ pub fn resolve(
                     interval.id,
                     &interval.scope,
                     &name,
+                    (interval.start, interval.stop),
                 ) {
                     return Some(resp);
                 }
@@ -282,20 +287,6 @@ fn resolve_use_jump(
     Some(GotoDefinitionResponse::Scalar(Location::new(
         target_url,
         target_range,
-    )))
-}
-
-/// Same-file response: compute precise Range using local Rope
-fn local_response(uri: &Url, span: [usize; 2], rope: &Rope) -> Option<GotoDefinitionResponse> {
-    let start = offset_to_position(span[0], rope)?;
-    let end = offset_to_position(span[1], rope)?;
-    eprintln!(
-        "F12_DIAG local_response bytes[{}:{}] -> line{}col{}:line{}col{}",
-        span[0], span[1], start.line, start.character, end.line, end.character
-    );
-    Some(GotoDefinitionResponse::Scalar(Location::new(
-        uri.clone(),
-        Range::new(start, end),
     )))
 }
 
@@ -394,6 +385,7 @@ mod tests {
             global_declares: vec![],
             global_references: vec![],
             cross_file_targets: vec![],
+            ref_def_map: None,
         };
         state
             .symbols
@@ -479,150 +471,39 @@ mod tests {
             Some(other_uri.to_string())
         );
     }
-
-    #[test]
-    fn belongs_to_substring_false_positive() {
-        // AVDD09_CAP should NOT match CAP (substring false positive)
-        assert!(!belongs_to("AVDD09_CAP", "CAP"));
-        assert!(!belongs_to("CAP", "AVDD09_CAP"));
-    }
-
-    #[test]
-    fn belongs_to_exact_match() {
-        assert!(belongs_to("CAP", "CAP"));
-        assert!(belongs_to("VDD_3V3", "VDD_3V3"));
-    }
-
-    #[test]
-    fn belongs_to_array_index_normalization() {
-        assert!(belongs_to("res[1:2]", "res"));
-        assert!(belongs_to("res", "res[1:2]"));
-    }
-
-    #[test]
-    fn belongs_to_brace_expansion() {
-        assert!(belongs_to("rs485{A,B}", "rs485"));
-    }
-
-    #[test]
-    fn belongs_to_trailing_digits() {
-        assert!(belongs_to("res1", "res"));
-        assert!(belongs_to("res2", "res"));
-    }
-
-    #[test]
-    fn belongs_to_comma_separated_list() {
-        assert!(belongs_to("MIC, I2C0, SPI", "MIC"));
-        assert!(belongs_to("I2C0, SPI", "SPI"));
-    }
-
-    #[test]
-    fn belongs_to_truncated_brace() {
-        assert!(belongs_to("MIC{P,N", "MIC"));
-    }
-
-    #[test]
-    fn belongs_to_no_false_substring() {
-        assert!(!belongs_to("AVDD09_CAP", "CAP"));
-        assert!(!belongs_to("VDD_CAP_NEW", "CAP"));
-    }
 }
 
 /// Check if `a` and `b` refer to the same base identifier in mcode naming.
 ///
-/// Handles:
-///   - Array indices:  `res1` ↔ `res[1:2]` / `res[1,2]`  (both → `res`)
-///   - Brace expansion: `rs485.A` ↔ `rs485{A,B}`        (both → `rs485`)
-///   - Exact match:     `VDD_3V3` ↔ `VDD_3V3`
-fn belongs_to(a: &str, b: &str) -> bool {
-    let na = normalize_mc_name(a);
-    let nb = normalize_mc_name(b);
-    if na == nb {
-        return true;
+/// Map lapper kind string to RefDefMap SymbolKind ordinal.
+/// Covers all lapper kinds emitted by mcc `symbol_table_to_json()`.
+/// Ordinals match `SymbolKind` enum in `mcc/src/ast/ast_semantic.rs`.
+fn map_kind_from_str(kind: &str) -> Option<u8> {
+    match kind {
+        // ── Definition kinds ──
+        "class_def" | "class_definition" => Some(0), // ClassDef
+        "instance_def" | "declare_instance" => Some(2), // InstDef
+        "port_def" => Some(4),                       // PortDef
+        "label_def" => Some(6),                      // LabelDef
+        "function_def" => Some(8),                   // FuncDef
+        "pin_name_def" => Some(12),                  // PinNameDef
+        "enum_class_def" => Some(16),                // EnumDef
+        "enum_value_def" => Some(18),                // EnumValDef
+        "role_def" => Some(20),                      // RoleDef
+        "define_def" => Some(22),                    // DefineDef
+        // ── Reference kinds ──
+        "class_ref" | "declare_class" => Some(1), // ClassRef
+        "instance_ref" => Some(3),                // InstRef
+        "port_ref" => Some(5),                    // PortRef (future: distinct from InstRef)
+        "label_ref" => Some(7),                   // LabelRef
+        "function_ref" => Some(9),                // FuncRef
+        "pin_id_ref" => Some(11),                 // PinIdRef (future)
+        "pin_name_ref" => Some(13),               // PinNameRef
+        "pin_iface_ref" => Some(15),              // PinIfaceRef (future)
+        "enum_class_ref" => Some(17),             // EnumRef
+        "enum_value_ref" => Some(19),             // EnumValRef
+        _ => None,
     }
-    // One may be a comma-separated list (e.g. "MIC, I2C0, SPI"),
-    // or truncated (e.g. "MIC{P,N" without closing brace).
-    // Split by comma and exact-match each piece (handles comma-separated lists).
-    let pieces_a: Vec<&str> = na.split(',').map(|s| s.trim()).collect();
-    let pieces_b: Vec<&str> = nb.split(',').map(|s| s.trim()).collect();
-    if pieces_a.iter().any(|pa| pieces_b.iter().any(|pb| *pa == *pb)) {
-        return true;
-    }
-    // Truncated brace/bracket tokens: "MIC{P,N" should match "MIC".
-    if pieces_a.iter().any(|pa| pieces_b.iter().any(|pb| is_truncated_brace_match(pa, pb))) {
-        return true;
-    }
-    // Trailing-digit normalization: res1 ↔ res, rs485 ↔ rs
-    // (normalize_mc_name already stripped digits from the original, but the
-    // counterpart may have had a brace/bracket stripped first, leaving digits).
-    fn strip_trailing_digits(s: &str) -> &str {
-        s.trim_end_matches(|c: char| c.is_ascii_digit())
-    }
-    pieces_a.iter().any(|pa| {
-        let stripped = strip_trailing_digits(pa);
-        !stripped.is_empty() && stripped.len() < pa.len()
-            && pieces_b.iter().any(|pb| stripped == *pb)
-    }) || pieces_b.iter().any(|pb| {
-        let stripped = strip_trailing_digits(pb);
-        !stripped.is_empty() && stripped.len() < pb.len()
-            && pieces_a.iter().any(|pa| *pa == stripped)
-    })
-}
-
-/// Strip mcode array/brace/dot suffixes and trailing digits to get
-/// the base identifier.
-fn normalize_mc_name(name: &str) -> &str {
-    let s = name;
-    // [...] suffix → base (res[1:2] → res, res[1,2] → res)
-    if let Some(i) = s.rfind('[') {
-        if s[i + 1..].ends_with(']') {
-            return &s[..i];
-        }
-    }
-    // {...} suffix → base (rs485{A,B} → rs485)
-    if let Some(i) = s.rfind('{') {
-        if s[i + 1..].ends_with('}') {
-            return &s[..i];
-        }
-    }
-    // Trailing .member (rs485.A → rs485)
-    if let Some(i) = s.rfind('.') {
-        return &s[..i];
-    }
-    // Trailing digits (res1, res2 → res)
-    let trimmed = s.trim_end_matches(|c: char| c.is_ascii_digit());
-    if !trimmed.is_empty() && trimmed.len() < s.len() {
-        return trimmed;
-    }
-    s
-}
-
-/// Check if one string is a truncated brace/bracket token whose base
-/// matches the other. For example, "MIC{P,N" (no closing `}`) should
-/// match "MIC", but "AVDD09_CAP" should NOT match "CAP".
-fn is_truncated_brace_match(a: &str, b: &str) -> bool {
-    // Find where a potential truncation starts: `{`, `[`, or `(`
-    let trunc = |s: &str| -> Option<usize> {
-        [s.find('{'), s.find('['), s.find('(')]
-            .iter()
-            .filter_map(|&i| i)
-            .min()
-    };
-    // If one string has an unclosed brace/bracket/paren, check if
-    // the prefix (before the opener) exactly matches the other string.
-    if let Some(pos) = trunc(a) {
-        let prefix = a[..pos].trim_end();
-        if prefix == b {
-            return true;
-        }
-    }
-    if let Some(pos) = trunc(b) {
-        let prefix = b[..pos].trim_end();
-        if prefix == a {
-            return true;
-        }
-    }
-    false
 }
 
 /// Unified ref→def resolution for handlers that follow the 4-level
@@ -635,79 +516,42 @@ fn resolve_ref_to_def(
     uri: &Url,
     kind: &str,
     id: u32,
-    scope: &str,
+    _scope: &str,
     name: &str,
+    ref_span: (usize, usize),
 ) -> Option<GotoDefinitionResponse> {
-    // Level 1: cross_file_targets (kind + id → uri + span)
-    for target in &symbols.cross_file_targets {
-        if target.kind == kind && target.ref_id == id && !target.target_uri.is_empty() {
-            return cross_file_response(state, &target.target_uri, target.span, rope, uri);
-        }
-    }
-
-    // Levels 2-3: same-file definition lookup.
-    // Map reference kinds to their expected definition kinds so we
-    // jump to the *definition*, not another reference site.
-    let def_kinds: &[&str] = match kind {
-        "class_ref" | "declare_class" | "interface_ref" => {
-            &["class_def", "class_definition"]
-        }
-        "enum_class_ref" => &["enum_class_def"],
-        "function_ref" => &["function_def"],
-        "pin_name_ref" => &["pin_name_def"],
-        "label_ref" => &["label_def"],
-        "instance_ref" | "instance_def" | "declare_instance" => {
-            &["instance_def", "declare_instance"]
-        }
-        _ => &[],
-    };
-
-    let is_def_kind = |k: &str| -> bool {
-        def_kinds.is_empty() || def_kinds.iter().any(|dk| *dk == k)
-    };
-
-    // Level 2: same-scope definition match.
-    if !scope.is_empty() {
-        for entry in &symbols.lapper {
-            if is_def_kind(&entry.kind)
-                && entry.scope == scope
-                && entry.kind != kind
-            {
-                let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
-                if belongs_to(&entry_name, name) {
-                    return local_response(uri, [entry.start, entry.stop], rope);
+    // Level 0: RefDefMap lookup (O(1), replaces cross_file_targets + name matching)
+    if let Some(ref map) = symbols.ref_def_map {
+        if let Some(ref_kind) = map_kind_from_str(kind) {
+            if let Some(entry) = map.lookup(ref_kind, id) {
+                let def_uri = &map.files[entry.file_id as usize];
+                eprintln!(
+                    "F12_DIAG resolve_ref_to_def name='{name}' kind={kind} id={id} \
+                     => RefDefMap MATCH: uri={def_uri} span=[{},{}] def_kind={}",
+                    entry.def_span[0], entry.def_span[1], entry.def_kind
+                );
+                // Skip self-references
+                if entry.def_span[0] as usize == ref_span.0
+                    && entry.def_span[1] as usize == ref_span.1
+                {
+                    eprintln!("F12_DIAG => RefDefMap SKIP (self-ref)");
+                } else {
+                    return cross_file_response(
+                        state,
+                        def_uri,
+                        [entry.def_span[0] as usize, entry.def_span[1] as usize],
+                        rope,
+                        uri,
+                    );
                 }
             }
         }
     }
 
-    // Level 3: same-file definition match (any scope, prefer earlier).
-    let mut best: Option<(usize, usize)> = None;
-    for entry in &symbols.lapper {
-        if is_def_kind(&entry.kind) && entry.kind != kind {
-            let entry_name = rope.byte_slice(entry.start..entry.stop).to_string();
-            if belongs_to(&entry_name, name) {
-                let pos = entry.start;
-                if best.map_or(true, |(s, _)| pos < s) {
-                    best = Some((pos, entry.stop));
-                }
-            }
-        }
-    }
-    if let Some((s, e)) = best {
-        return local_response(uri, [s, e], rope);
-    }
-
-    // Level 4: project index / library by name (exact + normalized)
+    // Level 1: project index / library by name (fallback for RefDefMap misses)
     if !name.is_empty() {
         if let Some(resp) = lookup_index(state, name, rope, uri) {
             return Some(resp);
-        }
-        let base = normalize_mc_name(name);
-        if base != name {
-            if let Some(resp) = lookup_index(state, base, rope, uri) {
-                return Some(resp);
-            }
         }
     }
 

@@ -63,6 +63,15 @@ impl TokensState {
             .map(|e| (e.result_id.clone(), e.tokens.clone()))
     }
 
+    /// §7.6: Get last stored result_id for dedup.
+    pub fn last_result_id(&self, uri: &Url) -> Option<String> {
+        let last = self.last.read().unwrap_or_else(|e| {
+            tracing::warn!("tokens lock poisoned, attempting recovery");
+            e.into_inner()
+        });
+        last.get(uri).map(|e| e.result_id.clone())
+    }
+
     /// Remove URI (cleanup on document close)
     pub fn remove(&self, uri: &Url) {
         let mut last = self.last.write().unwrap_or_else(|e| {
