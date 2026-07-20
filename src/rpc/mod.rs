@@ -19,6 +19,8 @@ impl MccRpcClient {
     pub fn new(host: &str, port: u16) -> Result<Self, RpcError> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| RpcError::Network(e.to_string()))?;
         Ok(Self {
