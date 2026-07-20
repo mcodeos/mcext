@@ -111,16 +111,20 @@ fn collect_local_symbols(
     for entry in &symbols.lapper {
         // Fast-path: skip ref kinds without any allocation
         let (kind, detail) = match entry.kind.as_str() {
-            "port_def" => (CompletionItemKind::PROPERTY, "Port"),
-            "label_def" => (CompletionItemKind::VARIABLE, "Label"),
-            "instance_def" | "declare_instance" => (CompletionItemKind::VALUE, "Instance"),
-            "function_def" => (CompletionItemKind::FUNCTION, "Function"),
-            "class_def" | "class_definition" => (CompletionItemKind::CLASS, "Class def"),
-            "pin_name_def" => (CompletionItemKind::ENUM_MEMBER, "Pin"),
-            "enum_value_def" => (CompletionItemKind::ENUM_MEMBER, "Enum value"),
-            "enum_class_def" => (CompletionItemKind::ENUM, "Enum"),
-            "define_def" => (CompletionItemKind::CONSTANT, "Define"),
-            "role_def" => (CompletionItemKind::INTERFACE, "Role"),
+            "port_def" | "PortDef" => (CompletionItemKind::PROPERTY, "Port"),
+            "label_def" | "LabelDef" => (CompletionItemKind::VARIABLE, "Label"),
+            "instance_def" | "declare_instance" | "InstDef" => {
+                (CompletionItemKind::VALUE, "Instance")
+            }
+            "function_def" | "FuncDef" => (CompletionItemKind::FUNCTION, "Function"),
+            "class_def" | "class_definition" | "ClassDef" => {
+                (CompletionItemKind::CLASS, "Class def")
+            }
+            "pin_name_def" | "PinNameDef" => (CompletionItemKind::ENUM_MEMBER, "Pin"),
+            "enum_value_def" | "EnumValDef" => (CompletionItemKind::ENUM_MEMBER, "Enum value"),
+            "enum_class_def" | "EnumDef" => (CompletionItemKind::ENUM, "Enum"),
+            "define_def" | "DefineDef" => (CompletionItemKind::CONSTANT, "Define"),
+            "role_def" | "RoleDef" => (CompletionItemKind::INTERFACE, "Role"),
             _ => continue, // skip refs and unknown kinds
         };
 
