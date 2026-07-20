@@ -93,7 +93,6 @@ mod tests {
             local_references: vec![],
             global_declares,
             global_references: vec![],
-            cross_file_targets: vec![],
             ref_def_map: None,
         };
         state

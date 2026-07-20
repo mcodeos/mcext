@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// RPC client for mcc server
 #[derive(Clone)]
@@ -317,6 +319,15 @@ pub struct RefDefMapData {
     pub containers: Vec<String>,
     #[serde(default)]
     pub kind_names: Vec<String>,
+    /// §7.6: Content hash for mcext dedup.
+    #[serde(default)]
+    pub result_id: u64,
+    /// O(1) index: (ref_kind, ref_id) → entry index. Built lazily.
+    #[serde(skip)]
+    index: OnceLock<HashMap<(u8, u32), usize>>,
+    /// kind name → ordinal map. Built lazily from kind_names.
+    #[serde(skip)]
+    kind_map: OnceLock<HashMap<String, u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,13 +338,42 @@ pub struct RefDefEntryData {
     pub def_span: [u32; 2],
     pub def_kind: u8,
     pub container_id: u32,
+    /// CMIE table kind: 0=Component, 1=Module, 2=Interface, 3=Enum, 255=unknown
+    #[serde(default = "default_cmie_kind")]
+    pub cmie_kind: u8,
+}
+
+fn default_cmie_kind() -> u8 {
+    255
 }
 
 impl RefDefMapData {
+    /// O(1) lookup by (ref_kind, ref_id). Builds HashMap index on first call.
     pub fn lookup(&self, ref_kind: u8, ref_id: u32) -> Option<&RefDefEntryData> {
-        self.entries
-            .iter()
-            .find(|e| e.ref_kind == ref_kind && e.ref_id == ref_id)
+        let idx = self.index.get_or_init(|| {
+            let mut m = HashMap::new();
+            for (i, e) in self.entries.iter().enumerate() {
+                m.insert((e.ref_kind, e.ref_id), i);
+            }
+            m
+        });
+        idx.get(&(ref_kind, ref_id)).map(|&i| &self.entries[i])
+    }
+
+    /// Build `kind_name → ordinal` reverse map from `kind_names`.
+    pub fn kind_map(&self) -> &HashMap<String, u8> {
+        self.kind_map.get_or_init(|| {
+            self.kind_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i as u8))
+                .collect()
+        })
+    }
+
+    /// Lookup ref_kind ordinal by lapper kind string.
+    pub fn resolve_kind(&self, kind_str: &str) -> Option<u8> {
+        self.kind_map().get(kind_str).copied()
     }
 }
 
@@ -376,12 +416,6 @@ pub struct GlobalSymbols {
     pub declares: Vec<GlobalDeclare>,
     #[serde(default)]
     pub references: Vec<GlobalReference>,
-    /// ★ LSP: Cross-file goto targets (reference_id -> target)
-    #[serde(default)]
-    pub cross_file_targets: Vec<CrossFileTarget>,
-    /// ★ LSP: Instance cross-file targets (DeclareId -> target)
-    #[serde(default)]
-    pub instance_cross_file_targets: Vec<CrossFileTarget>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -395,15 +429,6 @@ pub struct GlobalDeclare {
 pub struct GlobalReference {
     pub id: u32,
     pub uri: String,
-    pub span: [usize; 2],
-}
-
-/// ★ LSP: Cross-file goto target entry
-#[derive(Debug, Clone, Deserialize)]
-pub struct CrossFileTarget {
-    pub kind: String,
-    pub ref_id: u32,
-    pub target_uri: String,
     pub span: [usize; 2],
 }
 

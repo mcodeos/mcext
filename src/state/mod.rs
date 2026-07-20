@@ -12,7 +12,7 @@ pub use scheduler::ReparseScheduler;
 pub use tokens::TokensState;
 
 use crate::index::IndexWorkerHandle;
-use crate::rpc::{CrossFileTarget, LapperEntry, LocalReference, SemSymbols, SymbolEntry};
+use crate::rpc::{LapperEntry, LocalReference, SemSymbols, SymbolEntry};
 use dashmap::DashMap;
 use ropey::Rope;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,8 +60,7 @@ pub struct RpcSemSymbols {
     pub local_references: Vec<LocalReference>,
     pub global_declares: Vec<GlobalDeclareSpan>,
     pub global_references: Vec<GlobalReferenceSpan>,
-    pub cross_file_targets: Vec<CrossFileTarget>,
-    /// ★ RefDefMap — unified ref→def table from mcc
+    /// ★ RefDefMap — unified ref→def table from mcc (replaces cross_file_targets)
     pub ref_def_map: Option<crate::rpc::RefDefMapData>,
 }
 
@@ -121,7 +120,6 @@ impl From<SemSymbols> for RpcSemSymbols {
                     span: r.span,
                 })
                 .collect(),
-            cross_file_targets: sem.global.cross_file_targets,
             ref_def_map: sem.ref_def_map,
         }
     }
