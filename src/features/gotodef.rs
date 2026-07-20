@@ -88,10 +88,10 @@ pub fn resolve(
             interval.kind, interval.id, interval.start, interval.stop, interval.scope
         );
         match interval.kind.as_str() {
-            "class_def" | "class_definition" => {
+            "class_def" | "class_definition" | "ClassDef" => {
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "instance_def" | "declare_instance" => {
+            "instance_def" | "declare_instance" | "InstDef" => {
                 // Cursor is on the definition itself — self-locate.
                 // (Previously called resolve_ref_to_def which searched by
                 // *instance* name, jumping to unrelated same-named instances.)
@@ -102,7 +102,7 @@ pub fn resolve(
             //   1. Search same-scope for explicit def (port_def / label_def) → jump
             //   2. Search same-file for implicit def (port_def / label_def) → jump
             //   3. Neither found → self is the implicit def → self-locate
-            "instance_ref" | "label_ref" => {
+            "instance_ref" | "InstRef" | "label_ref" | "LabelRef" => {
                 let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 eprintln!(
                     "F12_DIAG resolve instance_ref/label_ref name='{name}' kind={} id={} scope='{}' start={} stop={}",
@@ -127,26 +127,26 @@ pub fn resolve(
                 );
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "port_def" => {
+            "port_def" | "PortDef" => {
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             // ★ enum support — separate kind family. Cursor on `enum PKG {`
             //   self-locates (empty Array, mirroring class_definition).
-            "enum_class_def" => {
+            "enum_class_def" | "EnumDef" => {
                 info!(
                     "goto_def: enum_class_def at self, returning empty Array to prevent VS Code fallback"
                 );
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "enum_value_def" => {
+            "enum_value_def" | "EnumValDef" => {
                 // Self-locate — use empty Array to prevent VS Code word-search fallback
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             // Cursor on the class half of a qualified ref (e.g. `PKG` in
             // `PKG.SOP8`). Step 3b in mcc must emit this kind on the
             // reference site; loop-1 keeps the branch ready without it.
-            "enum_class_ref" => {
+            "enum_class_ref" | "EnumRef" => {
                 info!(
                     "goto_def: enum_class_ref id={} looking up target span",
                     interval.id
@@ -174,7 +174,7 @@ pub fn resolve(
             //   (class, value) is recovered from the line tokens. For loop-1
             //   we lean on ProjectIndex.lookup_enum_value; the extension
             //   only reaches this branch when mcc emits it (Step 3b).
-            "enum_value_ref" => {
+            "enum_value_ref" | "EnumValRef" => {
                 info!(
                     "goto_def: enum_value_ref id={} looking up (class, value) -> span",
                     interval.id
@@ -198,7 +198,10 @@ pub fn resolve(
                 let class_name = symbols
                     .lapper
                     .iter()
-                    .find(|i| i.kind == "enum_class_ref" && i.stop + 1 == interval.start)
+                    .find(|i| {
+                        (i.kind == "enum_class_ref" || i.kind == "EnumRef")
+                            && i.stop + 1 == interval.start
+                    })
                     .map(|i| rope.byte_slice(i.start..i.stop).to_string())
                     .and_then(|s| if s.is_empty() { None } else { Some(s) });
                 if let (Some(ref class_name), Some(ref value_name)) = (class_name, value_name_opt) {
@@ -228,14 +231,18 @@ pub fn resolve(
                 }
             }
             // ── Definion kinds: self-locate ──
-            "function_def" | "define_def" | "role_def" | "pin_name_def" | "label_def"
-            | "pin_id_def" | "pin_iface_def" | "enum_def" | "param_def" | "attr_def" => {
+            "function_def" | "FuncDef" | "define_def" | "DefineDef" | "role_def" | "RoleDef"
+            | "pin_name_def" | "PinNameDef" | "label_def" | "LabelDef" | "pin_id_def"
+            | "PinIdDef" | "pin_iface_def" | "PinIfaceDef" | "enum_def" | "EnumDef"
+            | "param_def" | "ParamDef" | "attr_def" | "AttrDef" => {
                 // Self-locate: cursor on definition itself → stay
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
             // ── Reference kinds: resolve via RefDefMap ──
-            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref"
-            | "port_ref" | "enum_ref" | "pin_id_ref" | "pin_iface_ref" => {
+            "function_ref" | "FuncRef" | "class_ref" | "ClassRef" | "declare_class"
+            | "interface_ref" | "port_ref" | "PortRef" | "enum_ref" | "EnumRef"
+            | "pin_name_ref" | "PinNameRef" | "pin_id_ref" | "PinIdRef" | "pin_iface_ref"
+            | "PinIfaceRef" => {
                 let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
                     state,
@@ -493,7 +500,13 @@ fn resolve_ref_to_def(
 ) -> Option<GotoDefinitionResponse> {
     // Level 0: RefDefMap lookup (O(1))
     if let Some(ref map) = symbols.ref_def_map {
+        info!(
+            "resolve_ref_to_def: RefDefMap present, entries={}, kind_names={:?}, looking for kind='{kind}' id={id} name='{name}'",
+            map.entries.len(),
+            map.kind_names,
+        );
         if let Some(ref_kind) = map_kind_from_str(kind, map) {
+            info!("resolve_ref_to_def: kind='{kind}' → ordinal={ref_kind}");
             if let Some(entry) = map.lookup(ref_kind, id) {
                 let def_uri = &map.files[entry.file_id as usize];
                 eprintln!(
@@ -515,8 +528,19 @@ fn resolve_ref_to_def(
                         uri,
                     );
                 }
+            } else {
+                info!(
+                    "resolve_ref_to_def: RefDefMap MISS for kind='{kind}' id={id} name='{name}' (no entry in map)"
+                );
             }
+        } else {
+            info!(
+                "resolve_ref_to_def: kind='{kind}' NOT FOUND in kind_names={:?}",
+                map.kind_names
+            );
         }
+    } else {
+        info!("resolve_ref_to_def: RefDefMap is None");
     }
 
     // Level 1: project index / library by name (fallback for RefDefMap misses)
