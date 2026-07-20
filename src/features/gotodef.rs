@@ -37,9 +37,13 @@ pub fn resolve(
         .collect();
 
     info!(
-        "goto_def: local_declares count={}, cross_file_targets count={}",
+        "goto_def: local_declares count={}, ref_def_map entries={}",
         symbols.local_declares.len(),
-        symbols.cross_file_targets.len()
+        symbols
+            .ref_def_map
+            .as_ref()
+            .map(|m| m.entries.len())
+            .unwrap_or(0)
     );
     for decl in &symbols.local_declares {
         info!(
@@ -223,21 +227,15 @@ pub fn resolve(
                     );
                 }
             }
-            // ── M6 gaps: new SymbolType variants ──
-            "function_def" | "define_def" | "role_def" => {
+            // ── Definion kinds: self-locate ──
+            "function_def" | "define_def" | "role_def" | "pin_name_def" | "label_def"
+            | "pin_id_def" | "pin_iface_def" | "enum_def" | "param_def" | "attr_def" => {
                 // Self-locate: cursor on definition itself → stay
                 return Some(GotoDefinitionResponse::Array(vec![]));
             }
-            "pin_name_def" => {
-                // Self-locate — use empty Array to prevent VS Code word-search fallback
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            // ── Label support (scope design, step 7/9) ──
-            "label_def" => {
-                // Self-locate: cursor on label definition itself → stay
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref" => {
+            // ── Reference kinds: resolve via RefDefMap ──
+            "function_ref" | "class_ref" | "declare_class" | "interface_ref" | "pin_name_ref"
+            | "port_ref" | "enum_ref" | "pin_id_ref" | "pin_iface_ref" => {
                 let name = rope.byte_slice(interval.start..interval.stop).to_string();
                 if let Some(resp) = resolve_ref_to_def(
                     state,
@@ -384,7 +382,6 @@ mod tests {
             local_references: vec![],
             global_declares: vec![],
             global_references: vec![],
-            cross_file_targets: vec![],
             ref_def_map: None,
         };
         state
@@ -473,37 +470,11 @@ mod tests {
     }
 }
 
-/// Check if `a` and `b` refer to the same base identifier in mcode naming.
-///
-/// Map lapper kind string to RefDefMap SymbolKind ordinal.
-/// Covers all lapper kinds emitted by mcc `symbol_table_to_json()`.
-/// Ordinals match `SymbolKind` enum in `mcc/src/ast/ast_semantic.rs`.
-fn map_kind_from_str(kind: &str) -> Option<u8> {
-    match kind {
-        // ── Definition kinds ──
-        "class_def" | "class_definition" => Some(0), // ClassDef
-        "instance_def" | "declare_instance" => Some(2), // InstDef
-        "port_def" => Some(4),                       // PortDef
-        "label_def" => Some(6),                      // LabelDef
-        "function_def" => Some(8),                   // FuncDef
-        "pin_name_def" => Some(12),                  // PinNameDef
-        "enum_class_def" => Some(16),                // EnumDef
-        "enum_value_def" => Some(18),                // EnumValDef
-        "role_def" => Some(20),                      // RoleDef
-        "define_def" => Some(22),                    // DefineDef
-        // ── Reference kinds ──
-        "class_ref" | "declare_class" => Some(1), // ClassRef
-        "instance_ref" => Some(3),                // InstRef
-        "port_ref" => Some(5),                    // PortRef (future: distinct from InstRef)
-        "label_ref" => Some(7),                   // LabelRef
-        "function_ref" => Some(9),                // FuncRef
-        "pin_id_ref" => Some(11),                 // PinIdRef (future)
-        "pin_name_ref" => Some(13),               // PinNameRef
-        "pin_iface_ref" => Some(15),              // PinIfaceRef (future)
-        "enum_class_ref" => Some(17),             // EnumRef
-        "enum_value_ref" => Some(19),             // EnumValRef
-        _ => None,
-    }
+/// Resolve a lapper kind string to RefDefMap SymbolKind ordinal.
+/// Uses the dynamic `kind_names` mapping from mcc (rather than hardcoded ordinals),
+/// so mcc and mcext stay in sync automatically after enum changes (§7.6).
+fn map_kind_from_str(kind: &str, map: &crate::rpc::RefDefMapData) -> Option<u8> {
+    map.resolve_kind(kind)
 }
 
 /// Unified ref→def resolution for handlers that follow the 4-level
@@ -520,9 +491,9 @@ fn resolve_ref_to_def(
     name: &str,
     ref_span: (usize, usize),
 ) -> Option<GotoDefinitionResponse> {
-    // Level 0: RefDefMap lookup (O(1), replaces cross_file_targets + name matching)
+    // Level 0: RefDefMap lookup (O(1))
     if let Some(ref map) = symbols.ref_def_map {
-        if let Some(ref_kind) = map_kind_from_str(kind) {
+        if let Some(ref_kind) = map_kind_from_str(kind, map) {
             if let Some(entry) = map.lookup(ref_kind, id) {
                 let def_uri = &map.files[entry.file_id as usize];
                 eprintln!(
