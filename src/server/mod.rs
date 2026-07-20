@@ -183,6 +183,8 @@ async fn run_server_init(
     let rpc_client: Option<crate::rpc::MccRpcClient> = {
         let mut server_guard = mcc_server.write().await;
         let Some(ref mut server) = *server_guard else {
+            warn!("mcc_server is None, signalling init done to unblock waiters");
+            state.init.signal_done();
             return;
         };
         if let Err(e) = server.start().await {
@@ -190,6 +192,7 @@ async fn run_server_init(
                 "Failed to start mcc server, falling back to direct mode: {}",
                 e
             );
+            state.init.signal_done();
             return;
         }
         debug!("mcc server subprocess started");
@@ -198,10 +201,14 @@ async fn run_server_init(
 
     let Some(client) = rpc_client else {
         warn!("mcc server started but RPC client is None");
+        state.init.signal_done();
         return;
     };
 
-    // Phase 2: initialize project (no lock held — parse_and_publish runs concurrently)
+    // Phase 2: basic init (fast) — set roots and init mcc system.
+    // parse_and_publish only needs the mcc server connected + init'd to make
+    // sem()/diagnostics() RPC calls, so we signal init_done here rather than
+    // waiting for the slow load_project below.
     if let Some(ref sys_root) = system_root {
         info!("Setting system root: {}", sys_root.display());
         let _ = client
@@ -214,7 +221,17 @@ async fn run_server_init(
     if let Some(ref root) = project_root {
         let root_str = root.to_string_lossy();
         let _ = client.set_project_root(&root_str).await;
+    }
 
+    // ★ Signal init complete BEFORE slow project loading.
+    // This unblocks parse_and_publish so didOpen files start parsing immediately.
+    state.init.signal_done();
+    info!("init_done = true — parse_and_publish can now make RPC calls");
+
+    // Phase 3: project loading (slow — may block mcc's single thread for seconds).
+    // Each RPC call acquires rpc_lock to serialize with parse_and_publish
+    // (mcc server cannot handle concurrent requests without state corruption).
+    if let Some(ref root) = project_root {
         if let Some(config) = ProjectConfig::load_from(root) {
             info!(
                 "Auto-loading {} dependencies from project.toml...",
@@ -222,13 +239,20 @@ async fn run_server_init(
             );
             for lib_name in config.dependency_names() {
                 info!("Calling lib.load for: {}", lib_name);
-                let lib_result = client.lib_load(lib_name).await;
+                let lib_result = {
+                    let _rpc_guard = state.rpc_lock.lock().await;
+                    client.lib_load(lib_name).await
+                };
                 if lib_result.is_ok() {
                     info!("Successfully loaded lib: {}", lib_name);
                 } else {
                     warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
                 }
-                match client.lib_show(lib_name).await {
+                let show_result = {
+                    let _rpc_guard = state.rpc_lock.lock().await;
+                    client.lib_show(lib_name).await
+                };
+                match show_result {
                     Ok(info) => {
                         info!(
                             "Lib info: name={} symbols={} modules={} components={} interfaces={}",
@@ -247,7 +271,11 @@ async fn run_server_init(
 
             let entry = config.entry_path(root);
             info!("Calling load_project for entry: {}", entry);
-            if let Err(e) = client.load_project(&entry).await {
+            let load_result = {
+                let _rpc_guard = state.rpc_lock.lock().await;
+                client.load_project(&entry).await
+            };
+            if let Err(ref e) = load_result {
                 warn!("Failed to load project '{}': {:?}", entry, e);
             } else {
                 info!("Successfully loaded project entry: {}", entry);
@@ -255,7 +283,11 @@ async fn run_server_init(
 
             // Fetch project symbols for the index (incl. enum values)
             info!("Fetching project_symbols for index...");
-            if let Ok(resp) = client.project_symbols().await {
+            let symbols_result = {
+                let _rpc_guard = state.rpc_lock.lock().await;
+                client.project_symbols().await
+            };
+            if let Ok(resp) = symbols_result {
                 let ec = resp.enums.clone();
                 let ev = resp.enum_values.clone();
                 if let Ok(mut cache) = state.symbols.project_symbols.lock() {
@@ -283,12 +315,9 @@ async fn run_server_init(
         }
     }
 
-    // Signal init complete (order: sticky flag first, then notify)
-    state.init.done.store(true, Ordering::Release);
-    state.init.notify.notify_waiters();
-    info!("init_done = true — parse_and_publish can now make RPC calls");
-
-    // Phase 3: retry pending diagnostics
+    // Phase 4: retry any diagnostics that were queued before load_project completed.
+    // After full project load, re-parse pending files so they get complete symbol
+    // resolution (dependencies, project-wide symbols).
     let pending: Vec<(Url, Option<i32>)> = state
         .diags
         .pending
@@ -300,7 +329,7 @@ async fn run_server_init(
     }
     if !pending.is_empty() {
         info!(
-            "Retrying {} pending diagnostics after mcc server ready",
+            "Retrying {} pending diagnostics after project load complete",
             pending.len()
         );
         for (uri, version) in pending {
