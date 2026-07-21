@@ -334,22 +334,8 @@ pub struct RefDefMapData {
     pub(crate) kind_map: OnceLock<HashMap<String, u8>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RefDefEntryData {
-    pub ref_kind: u8,
-    pub ref_id: u32,
-    pub file_id: u32,
-    pub def_span: [u32; 2],
-    pub def_kind: u8,
-    pub container_id: u32,
-    /// CMIE table kind: 0=Component, 1=Module, 2=Interface, 3=Enum, 255=unknown
-    #[serde(default = "default_cmie_kind")]
-    pub cmie_kind: u8,
-}
-
-fn default_cmie_kind() -> u8 {
-    255
-}
+/// §14.4: Shared RPC type from mc-rpc-types crate.
+pub use mc_rpc_types::RefDefEntryData;
 
 impl RefDefMapData {
     /// O(1) lookup by (ref_kind, ref_id). Builds HashMap index on first call.
@@ -404,18 +390,8 @@ pub struct LocalReference {
     pub declare_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct LapperEntry {
-    pub kind: u8,
-    pub start: usize,
-    pub stop: usize,
-    pub id: u32,
-    #[serde(default)]
-    pub scope: String,
-    /// Source file URI for this entry (fixes cross-file span lookup).
-    #[serde(default)]
-    pub file: String,
-}
+/// §14.4: Shared RPC type from mc-rpc-types crate.
+pub use mc_rpc_types::LapperEntry;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GlobalSymbols {
