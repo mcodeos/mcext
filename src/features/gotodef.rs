@@ -225,6 +225,7 @@ mod tests {
                 stop,
                 id,
                 scope: String::new(),
+                file: "file:///enum_test.mc".to_string(),
             })
             .collect();
         let symbols = RpcSemSymbols {
@@ -327,6 +328,168 @@ fn map_kind_from_str(kind: &str, map: &crate::rpc::RefDefMapData) -> Option<u8> 
     map.resolve_kind(kind)
 }
 
+#[cfg(test)]
+mod f12_e2e_tests {
+    use super::*;
+    use crate::rpc::{LapperEntry, RefDefEntryData, RefDefMapData};
+    use crate::state::RpcSemSymbols;
+    use std::sync::{Arc, Mutex};
+
+    /// Standard kind_names matching SymbolKind ordinals from mcc.
+    const KIND_NAMES: &[&str] = &[
+        "ClassDef", "ClassRef", "InstDef", "InstRef", "PortDef", "PortRef",
+        "LabelDef", "LabelRef", "FuncDef", "FuncRef",
+        "PinIdDef", "PinIdRef", "PinNameDef", "PinNameRef", "PinIfaceDef", "PinIfaceRef",
+        "EnumDef", "EnumRef", "EnumValDef", "EnumValRef",
+        "RoleDef", "ParamDef", "DefineDef", "AttrDef",
+    ];
+
+    fn kind_ordinal(name: &str) -> u8 {
+        KIND_NAMES.iter().position(|&k| k == name).unwrap() as u8
+    }
+
+    fn state_with_refdef(
+        source: &str,
+        lapper_entries: Vec<LapperEntry>,
+        refdef_entries: Vec<(u8, u32, u32, u32, u32, u8)>, // (ref_kind, ref_id, file_id, def_span_start, def_span_end, def_kind)
+    ) -> (WorkspaceState, Url) {
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///test.mc").unwrap();
+        state.insert_document(uri.clone(), Rope::from_str(source), 1);
+
+        let ref_def_map = RefDefMapData {
+            entries: refdef_entries
+                .into_iter()
+                .map(|(ref_kind, ref_id, file_id, ds, de, def_kind)| RefDefEntryData {
+                    ref_kind,
+                    ref_id,
+                    file_id,
+                    def_span: [ds, de],
+                    def_kind,
+                    container_id: 0,
+                    cmie_kind: 255,
+                })
+                .collect(),
+            files: vec!["file:///test.mc".to_string()],
+            containers: vec!["".to_string()],
+            func_names: vec![],
+            kind_names: KIND_NAMES.iter().map(|s| s.to_string()).collect(),
+            result_id: 0,
+            index: std::sync::OnceLock::new(),
+            kind_map: std::sync::OnceLock::new(),
+        };
+
+        let symbols = RpcSemSymbols {
+            lapper: lapper_entries,
+            local_declares: vec![],
+            local_references: vec![],
+            global_declares: vec![],
+            global_references: vec![],
+            ref_def_map: Some(ref_def_map),
+        };
+        state
+            .symbols
+            .sem_symbols
+            .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
+        (state, uri)
+    }
+
+    /// Find line+col byte offset in source text.
+    /// Find byte offset of a substring in source.
+    fn byte_offset(source: &str, needle: &str, nth: usize) -> Option<usize> {
+        source.match_indices(needle).nth(nth).map(|(i, _)| i)
+    }
+
+    fn pos_at(source: &str, offset: usize) -> Position {
+        let rope = Rope::from_str(source);
+        offset_to_position(offset, &rope).unwrap_or(Position::new(0, 0))
+    }
+
+    #[test]
+    fn funcref_resolves_to_funcdef_via_refdefmap() {
+        // Simulate: `func power(...)` def + `uC.power(...)` ref.
+        // FuncRef(id=56) → FuncDef(id=56) via RefDefMap.
+        let source = "func power(){}\n\nuC.power()\n";
+        let def_start = byte_offset(source, "power", 0).unwrap(); // "power" in func power
+        let def_end = def_start + 5;
+        let ref_start = byte_offset(source, "power", 1).unwrap(); // "power" in uC.power
+        let ref_end = ref_start + 5;
+
+        let funcdef_kind = kind_ordinal("FuncDef");
+        let funcref_kind = kind_ordinal("FuncRef");
+        let lapper = vec![
+            LapperEntry { kind: "FuncDef".into(), id: 56, start: def_start, stop: def_end, scope: "".into(), file: "file:///test.mc".into() },
+            LapperEntry { kind: "FuncRef".into(), id: 56, start: ref_start, stop: ref_end, scope: "".into(), file: "file:///test.mc".into() },
+        ];
+        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![
+            (funcref_kind, 56, 0, def_start as u32, def_end as u32, funcdef_kind)
+        ];
+        let (state, uri) = state_with_refdef(source, lapper, refdef);
+
+        // Cursor on "p" of "power" in uC.power()
+        let resp = resolve(&state, &uri, pos_at(source, ref_start));
+        match resp {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, uri);
+                let rope = Rope::from_str(source);
+                let start = offset_to_position(def_start, &rope).unwrap();
+                let end = offset_to_position(def_end, &rope).unwrap();
+                assert_eq!(loc.range, Range::new(start, end));
+            }
+            other => panic!("expected Scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portref_resolves_to_portdef_via_refdefmap() {
+        // Simulate: module M([VDD_3V3,GND]) with member VDD_3V3 used in funcall.
+        let source = "module M([VDD_3V3,GND]){\n  uC.p([VDD_3V3,GND])\n}\n";
+        let def_start = byte_offset(source, "VDD_3V3", 0).unwrap();
+        let def_end = def_start + 7;
+        let ref_start = byte_offset(source, "VDD_3V3", 1).unwrap();
+        let ref_end = ref_start + 7;
+
+        let portdef_kind = kind_ordinal("PortDef");
+        let portref_kind = kind_ordinal("PortRef");
+        let lapper = vec![
+            LapperEntry { kind: "PortDef".into(), id: 100, start: def_start, stop: def_end, scope: "M".into(), file: "file:///test.mc".into() },
+            LapperEntry { kind: "PortRef".into(), id: 100, start: ref_start, stop: ref_end, scope: "M".into(), file: "file:///test.mc".into() },
+        ];
+        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![
+            (portref_kind, 100, 0, def_start as u32, def_end as u32, portdef_kind)
+        ];
+        let (state, uri) = state_with_refdef(source, lapper, refdef);
+
+        let resp = resolve(&state, &uri, pos_at(source, ref_start));
+        match resp {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, uri);
+                let rope = Rope::from_str(source);
+                let start = offset_to_position(def_start, &rope).unwrap();
+                let end = offset_to_position(def_end, &rope).unwrap();
+                assert_eq!(loc.range, Range::new(start, end));
+            }
+            other => panic!("expected Scalar for PortRef→PortDef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kind_rank_puts_funcref_before_instref() {
+        // Verify FuncRef has priority >= InstRef to prevent shadowing.
+        assert!(kind_rank("FuncRef") <= kind_rank("InstRef"),
+            "FuncRef must have priority >= InstRef to avoid shadowing");
+    }
+
+    #[test]
+    fn all_known_kinds_have_explicit_rank() {
+        // Verify all SymbolKind names from mcc have explicit rank entries.
+        for &kind in KIND_NAMES {
+            let rank = kind_rank(kind);
+            assert!(rank < 7, "kind '{kind}' has default rank 7, needs explicit entry");
+        }
+    }
+}
+
 /// Unified ref→def resolution for handlers that follow the 4-level
 /// scope-priority lookup. Returns `None` if unresolved (caller may
 /// fall back to self-locate or error).
@@ -390,37 +553,3 @@ fn resolve_ref_to_def(
     None
 }
 
-/// Look up a class name using mcc's unified_lookup RPC (Tier 1-4 priority),
-/// falling back to project index.
-fn lookup_index(
-    state: &WorkspaceState,
-    name: &str,
-    rope: &Rope,
-    uri: &Url,
-) -> Option<GotoDefinitionResponse> {
-    use crate::index::snapshot::IndexKind;
-    let snap = state.project.index.snapshot();
-    for kind in &[
-        IndexKind::Component,
-        IndexKind::Module,
-        IndexKind::Interface,
-        IndexKind::Enum,
-    ] {
-        let entries = snap.lookup(*kind, name);
-        if let Some(entry) = entries.first() {
-            info!(
-                "lookup_index: found '{name}' as {kind:?} → {} span=[{},{}]",
-                entry.uri, entry.span.0, entry.span.1
-            );
-            return cross_file_response(
-                state,
-                &entry.uri.to_string(),
-                [entry.span.0, entry.span.1],
-                rope,
-                uri,
-            );
-        }
-    }
-    info!("lookup_index: '{name}' NOT FOUND in Component or Module");
-    None
-}

@@ -349,6 +349,7 @@ mod tests {
                 stop,
                 id,
                 scope: scope.into(),
+                file: "file:///test.mc".into(),
             })
             .collect();
         let symbols = RpcSemSymbols {
