@@ -27,14 +27,16 @@ pub struct SymbolInfo {
 /// Priority rank for interval kinds (lower = more specific / preferred).
 /// Mirrors the sort order in gotodef.
 pub fn kind_rank(kind: &str) -> u8 {
+    // Kind strings come from SymbolKind::kind_name() (PascalCase).
+    // Lower number = higher priority when multiple intervals overlap.
     match kind {
-        "class_def" | "function_def" | "role_def" => 0,
-        "class_ref" | "declare_class" => 1,
-        "instance_ref" | "port_def" | "label_ref" => 2,
-        "pin_name_def" | "pin_name_ref" => 3,
-        "instance_def" | "declare_instance" | "label_def" => 4,
-        "enum_value_def" | "enum_value_ref" | "enum_class_ref" | "enum_class_def" => 5,
-        "function_ref" | "interface_ref" | "define_def" => 6,
+        "ClassDef" | "FuncDef" | "RoleDef" => 0,
+        "ClassRef" => 1,
+        "InstRef" | "PortRef" | "PortDef" | "LabelRef" | "FuncRef" => 2,
+        "PinNameDef" | "PinNameRef" | "PinIdDef" | "PinIdRef" | "PinIfaceDef" | "PinIfaceRef" => 3,
+        "InstDef" | "LabelDef" => 4,
+        "EnumValDef" | "EnumValRef" | "EnumRef" | "EnumDef" => 5,
+        "DefineDef" | "ParamDef" | "AttrDef" => 6,
         _ => 7,
     }
 }

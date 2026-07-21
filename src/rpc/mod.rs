@@ -320,16 +320,18 @@ pub struct RefDefMapData {
     pub files: Vec<String>,
     pub containers: Vec<String>,
     #[serde(default)]
+    pub func_names: Vec<String>,
+    #[serde(default)]
     pub kind_names: Vec<String>,
     /// §7.6: Content hash for mcext dedup.
     #[serde(default)]
     pub result_id: u64,
     /// O(1) index: (ref_kind, ref_id) → entry index. Built lazily.
     #[serde(skip)]
-    index: OnceLock<HashMap<(u8, u32), usize>>,
+    pub(crate) index: OnceLock<HashMap<(u8, u32), usize>>,
     /// kind name → ordinal map. Built lazily from kind_names.
     #[serde(skip)]
-    kind_map: OnceLock<HashMap<String, u8>>,
+    pub(crate) kind_map: OnceLock<HashMap<String, u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -410,6 +412,9 @@ pub struct LapperEntry {
     pub id: u32,
     #[serde(default)]
     pub scope: String,
+    /// Source file URI for this entry (fixes cross-file span lookup).
+    #[serde(default)]
+    pub file: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
