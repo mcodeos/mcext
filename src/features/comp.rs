@@ -110,22 +110,18 @@ fn collect_local_symbols(
 
     for entry in &symbols.lapper {
         // Fast-path: skip ref kinds without any allocation
-        let (kind, detail) = match entry.kind.as_str() {
-            "port_def" | "PortDef" => (CompletionItemKind::PROPERTY, "Port"),
-            "label_def" | "LabelDef" => (CompletionItemKind::VARIABLE, "Label"),
-            "instance_def" | "declare_instance" | "InstDef" => {
-                (CompletionItemKind::VALUE, "Instance")
-            }
-            "function_def" | "FuncDef" => (CompletionItemKind::FUNCTION, "Function"),
-            "class_def" | "class_definition" | "ClassDef" => {
-                (CompletionItemKind::CLASS, "Class def")
-            }
-            "pin_name_def" | "PinNameDef" => (CompletionItemKind::ENUM_MEMBER, "Pin"),
-            "enum_value_def" | "EnumValDef" => (CompletionItemKind::ENUM_MEMBER, "Enum value"),
-            "enum_class_def" | "EnumDef" => (CompletionItemKind::ENUM, "Enum"),
-            "define_def" | "DefineDef" => (CompletionItemKind::CONSTANT, "Define"),
-            "role_def" | "RoleDef" => (CompletionItemKind::INTERFACE, "Role"),
-            _ => continue, // skip refs and unknown kinds
+        let (kind, detail) = match entry.kind {
+            0 => (CompletionItemKind::CLASS, "Class def"),              // ClassDef
+            2 => (CompletionItemKind::VALUE, "Instance"),               // InstDef
+            4 => (CompletionItemKind::PROPERTY, "Port"),                // PortDef
+            6 => (CompletionItemKind::VARIABLE, "Label"),               // LabelDef
+            8 => (CompletionItemKind::FUNCTION, "Function"),            // FuncDef
+            10 | 12 | 14 => (CompletionItemKind::ENUM_MEMBER, "Pin"),   // Pin*Def
+            16 => (CompletionItemKind::ENUM, "Enum"),                   // EnumDef
+            18 => (CompletionItemKind::ENUM_MEMBER, "Enum value"),      // EnumValDef
+            20 => (CompletionItemKind::INTERFACE, "Role"),              // RoleDef
+            22 => (CompletionItemKind::CONSTANT, "Define"),             // DefineDef
+            _ => continue,
         };
 
         // Extract name only for qualifying entries (avoids allocation for skipped kinds)

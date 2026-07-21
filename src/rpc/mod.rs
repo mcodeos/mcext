@@ -406,7 +406,7 @@ pub struct LocalReference {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LapperEntry {
-    pub kind: String,
+    pub kind: u8,
     pub start: usize,
     pub stop: usize,
     pub id: u32,
