@@ -13,6 +13,7 @@
 //! Document links (`usejump`) are disabled — use F12 (goto_definition) instead.
 
 pub mod comp;
+pub mod docsym;
 pub mod fmt;
 pub mod gotodef;
 pub mod hover;

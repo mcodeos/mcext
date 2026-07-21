@@ -34,13 +34,13 @@ pub fn kind_rank(kind: u8) -> u8 {
     // EnumValDef=18, EnumValRef=19, RoleDef=20, ParamDef=21,
     // DefineDef=22, AttrDef=23
     match kind {
-        0 | 8 | 20 => 0,             // ClassDef, FuncDef, RoleDef
-        1 => 1,                       // ClassRef
-        3 | 5 | 4 | 7 | 9 => 2,      // InstRef, PortRef, PortDef, LabelRef, FuncRef
-        10..=15 => 3,                 // Pin*Def/Pin*Ref
-        2 | 6 => 4,                   // InstDef, LabelDef
-        16..=19 => 5,                 // Enum*
-        21 | 22 | 23 => 6,            // ParamDef, DefineDef, AttrDef
+        0 | 8 | 20 => 0,        // ClassDef, FuncDef, RoleDef
+        1 => 1,                 // ClassRef
+        3 | 5 | 4 | 7 | 9 => 2, // InstRef, PortRef, PortDef, LabelRef, FuncRef
+        10..=15 => 3,           // Pin*Def/Pin*Ref
+        2 | 6 => 4,             // InstDef, LabelDef
+        16..=19 => 5,           // Enum*
+        21 | 22 | 23 => 6,      // ParamDef, DefineDef, AttrDef
         _ => 7,
     }
 }
@@ -98,24 +98,24 @@ pub fn find_symbol_at_cursor(
 /// kind is a SymbolKind ordinal (u8) matching mcc's `kind_names` ordering.
 pub fn kind_label(kind: u8) -> String {
     match kind {
-        0 => "component/module".into(),   // ClassDef
-        1 => "→ class".into(),             // ClassRef
-        2 => "instance".into(),            // InstDef
-        3 => "→ instance".into(),          // InstRef
-        4 => "port".into(),                // PortDef
-        5 => "→ port".into(),              // PortRef
-        6 => "label".into(),               // LabelDef
-        7 => "→ label".into(),             // LabelRef
-        8 => "function".into(),            // FuncDef
-        9 => "→ function".into(),          // FuncRef
-        10 | 12 | 14 => "pin".into(),      // PinDef
-        11 | 13 | 15 => "→ pin".into(),    // PinRef
-        16 | 18 => "enum".into(),          // EnumDef/EnumValDef
-        17 | 19 => "→ enum".into(),        // EnumRef/EnumValRef
-        20 => "role".into(),               // RoleDef
-        21 => "param".into(),              // ParamDef
-        22 => "define".into(),             // DefineDef
-        23 => "attr".into(),               // AttrDef
+        0 => "component/module".into(), // ClassDef
+        1 => "→ class".into(),          // ClassRef
+        2 => "instance".into(),         // InstDef
+        3 => "→ instance".into(),       // InstRef
+        4 => "port".into(),             // PortDef
+        5 => "→ port".into(),           // PortRef
+        6 => "label".into(),            // LabelDef
+        7 => "→ label".into(),          // LabelRef
+        8 => "function".into(),         // FuncDef
+        9 => "→ function".into(),       // FuncRef
+        10 | 12 | 14 => "pin".into(),   // PinDef
+        11 | 13 | 15 => "→ pin".into(), // PinRef
+        16 | 18 => "enum".into(),       // EnumDef/EnumValDef
+        17 | 19 => "→ enum".into(),     // EnumRef/EnumValRef
+        20 => "role".into(),            // RoleDef
+        21 => "param".into(),           // ParamDef
+        22 => "define".into(),          // DefineDef
+        23 => "attr".into(),            // AttrDef
         _ => "?".into(),
     }
 }

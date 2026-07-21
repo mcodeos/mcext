@@ -341,11 +341,30 @@ mod f12_e2e_tests {
 
     /// Standard kind_names matching SymbolKind ordinals from mcc.
     const KIND_NAMES: &[&str] = &[
-        "ClassDef", "ClassRef", "InstDef", "InstRef", "PortDef", "PortRef",
-        "LabelDef", "LabelRef", "FuncDef", "FuncRef",
-        "PinIdDef", "PinIdRef", "PinNameDef", "PinNameRef", "PinIfaceDef", "PinIfaceRef",
-        "EnumDef", "EnumRef", "EnumValDef", "EnumValRef",
-        "RoleDef", "ParamDef", "DefineDef", "AttrDef",
+        "ClassDef",
+        "ClassRef",
+        "InstDef",
+        "InstRef",
+        "PortDef",
+        "PortRef",
+        "LabelDef",
+        "LabelRef",
+        "FuncDef",
+        "FuncRef",
+        "PinIdDef",
+        "PinIdRef",
+        "PinNameDef",
+        "PinNameRef",
+        "PinIfaceDef",
+        "PinIfaceRef",
+        "EnumDef",
+        "EnumRef",
+        "EnumValDef",
+        "EnumValRef",
+        "RoleDef",
+        "ParamDef",
+        "DefineDef",
+        "AttrDef",
     ];
 
     fn kind_ordinal(name: &str) -> u8 {
@@ -364,15 +383,17 @@ mod f12_e2e_tests {
         let ref_def_map = RefDefMapData {
             entries: refdef_entries
                 .into_iter()
-                .map(|(ref_kind, ref_id, file_id, ds, de, def_kind)| RefDefEntryData {
-                    ref_kind,
-                    ref_id,
-                    file_id,
-                    def_span: [ds, de],
-                    def_kind,
-                    container_id: 0,
-                    cmie_kind: 255,
-                })
+                .map(
+                    |(ref_kind, ref_id, file_id, ds, de, def_kind)| RefDefEntryData {
+                        ref_kind,
+                        ref_id,
+                        file_id,
+                        def_span: [ds, de],
+                        def_kind,
+                        container_id: 0,
+                        cmie_kind: 255,
+                    },
+                )
                 .collect(),
             files: vec!["file:///test.mc".to_string()],
             containers: vec!["".to_string()],
@@ -422,12 +443,31 @@ mod f12_e2e_tests {
         let funcdef_kind = kind_ordinal("FuncDef");
         let funcref_kind = kind_ordinal("FuncRef");
         let lapper = vec![
-            LapperEntry { kind: "FuncDef".into(), id: 56, start: def_start, stop: def_end, scope: "".into(), file: "file:///test.mc".into() },
-            LapperEntry { kind: "FuncRef".into(), id: 56, start: ref_start, stop: ref_end, scope: "".into(), file: "file:///test.mc".into() },
+            LapperEntry {
+                kind: "FuncDef".into(),
+                id: 56,
+                start: def_start,
+                stop: def_end,
+                scope: "".into(),
+                file: "file:///test.mc".into(),
+            },
+            LapperEntry {
+                kind: "FuncRef".into(),
+                id: 56,
+                start: ref_start,
+                stop: ref_end,
+                scope: "".into(),
+                file: "file:///test.mc".into(),
+            },
         ];
-        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![
-            (funcref_kind, 56, 0, def_start as u32, def_end as u32, funcdef_kind)
-        ];
+        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![(
+            funcref_kind,
+            56,
+            0,
+            def_start as u32,
+            def_end as u32,
+            funcdef_kind,
+        )];
         let (state, uri) = state_with_refdef(source, lapper, refdef);
 
         // Cursor on "p" of "power" in uC.power()
@@ -456,12 +496,31 @@ mod f12_e2e_tests {
         let portdef_kind = kind_ordinal("PortDef");
         let portref_kind = kind_ordinal("PortRef");
         let lapper = vec![
-            LapperEntry { kind: "PortDef".into(), id: 100, start: def_start, stop: def_end, scope: "M".into(), file: "file:///test.mc".into() },
-            LapperEntry { kind: "PortRef".into(), id: 100, start: ref_start, stop: ref_end, scope: "M".into(), file: "file:///test.mc".into() },
+            LapperEntry {
+                kind: "PortDef".into(),
+                id: 100,
+                start: def_start,
+                stop: def_end,
+                scope: "M".into(),
+                file: "file:///test.mc".into(),
+            },
+            LapperEntry {
+                kind: "PortRef".into(),
+                id: 100,
+                start: ref_start,
+                stop: ref_end,
+                scope: "M".into(),
+                file: "file:///test.mc".into(),
+            },
         ];
-        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![
-            (portref_kind, 100, 0, def_start as u32, def_end as u32, portdef_kind)
-        ];
+        let refdef: Vec<(u8, u32, u32, u32, u32, u8)> = vec![(
+            portref_kind,
+            100,
+            0,
+            def_start as u32,
+            def_end as u32,
+            portdef_kind,
+        )];
         let (state, uri) = state_with_refdef(source, lapper, refdef);
 
         let resp = resolve(&state, &uri, pos_at(source, ref_start));
@@ -480,8 +539,10 @@ mod f12_e2e_tests {
     #[test]
     fn kind_rank_puts_funcref_before_instref() {
         // FuncRef=9, InstRef=3 — FuncRef should have higher priority (lower rank)
-        assert!(kind_rank(9) <= kind_rank(3),
-            "FuncRef must have priority >= InstRef to avoid shadowing");
+        assert!(
+            kind_rank(9) <= kind_rank(3),
+            "FuncRef must have priority >= InstRef to avoid shadowing"
+        );
     }
 
     #[test]
@@ -489,7 +550,10 @@ mod f12_e2e_tests {
         // Verify all 24 SymbolKind ordinals have explicit rank entries.
         for kind in 0u8..24 {
             let rank = kind_rank(kind);
-            assert!(rank < 7, "kind '{kind}' has default rank 7, needs explicit entry");
+            assert!(
+                rank < 7,
+                "kind '{kind}' has default rank 7, needs explicit entry"
+            );
         }
     }
 }
@@ -522,8 +586,7 @@ fn resolve_ref_to_def(
                  => RefDefMap MATCH: uri={def_uri} span=[{},{}] def_kind={}",
                 entry.def_span[0], entry.def_span[1], entry.def_kind
             );
-            if entry.def_span[0] as usize == ref_span.0
-                && entry.def_span[1] as usize == ref_span.1
+            if entry.def_span[0] as usize == ref_span.0 && entry.def_span[1] as usize == ref_span.1
             {
                 eprintln!("F12_DIAG => RefDefMap SKIP (self-ref)");
             } else {
@@ -547,4 +610,3 @@ fn resolve_ref_to_def(
     // No Level 1 fallback — RefDefMap is the single source of truth (§4.2)
     None
 }
-

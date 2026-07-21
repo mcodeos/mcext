@@ -901,6 +901,42 @@ impl LanguageServer for Backend {
         ))
     }
 
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let span = tracing::debug_span!("document_symbol", uri = %uri.path());
+        let _guard = span.enter();
+        let rope = match self.state.document_rope(&uri) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let symbols_ref = match self.state.symbols.sem_symbols.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let symbols = match symbols_ref.lock().ok() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let result = crate::features::docsym::document_symbols(&symbols.lapper, &uri, &rope);
+        Ok(Some(DocumentSymbolResponse::Nested(result)))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = params.new_name;
+        let span = tracing::debug_span!("rename", uri = %uri.path(), new_name = %new_name);
+        let _guard = span.enter();
+        let edits = crate::features::refs::collect_rename_edits(&self.state, &uri, pos, &new_name);
+        Ok(edits.map(|changes| WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
