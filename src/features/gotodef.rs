@@ -87,179 +87,23 @@ pub fn resolve(
             "goto_def: interval kind={}, id={}, start={}, stop={}, scope='{}'",
             interval.kind, interval.id, interval.start, interval.stop, interval.scope
         );
-        match interval.kind.as_str() {
-            "class_def" | "class_definition" | "ClassDef" => {
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            "instance_def" | "declare_instance" | "InstDef" => {
-                // Cursor is on the definition itself — self-locate.
-                // (Previously called resolve_ref_to_def which searched by
-                // *instance* name, jumping to unrelated same-named instances.)
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            // ── Label / port reference resolution ──
-            // Strategy (see docs/label-lookup-strategy.md):
-            //   1. Search same-scope for explicit def (port_def / label_def) → jump
-            //   2. Search same-file for implicit def (port_def / label_def) → jump
-            //   3. Neither found → self is the implicit def → self-locate
-            "instance_ref" | "InstRef" | "label_ref" | "LabelRef" => {
-                let name = rope.byte_slice(interval.start..interval.stop).to_string();
-                eprintln!(
-                    "F12_DIAG resolve instance_ref/label_ref name='{name}' kind={} id={} scope='{}' start={} stop={}",
-                    interval.kind, interval.id, interval.scope, interval.start, interval.stop
-                );
-                if let Some(resp) = resolve_ref_to_def(
-                    state,
-                    &symbols,
-                    &rope,
-                    uri,
-                    interval.kind.as_str(),
-                    interval.id,
-                    &interval.scope,
-                    &name,
-                    (interval.start, interval.stop),
-                ) {
-                    return Some(resp);
-                }
-                // Step 3: no earlier def found — self is the implicit definition.
-                eprintln!(
-                    "F12_DIAG resolve instance_ref/label_ref name='{name}' => Step3 self-locate (empty Array)"
-                );
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            "port_def" | "PortDef" => {
-                // Self-locate — use empty Array to prevent VS Code word-search fallback
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            // ★ enum support — separate kind family. Cursor on `enum PKG {`
-            //   self-locates (empty Array, mirroring class_definition).
-            "enum_class_def" | "EnumDef" => {
-                info!(
-                    "goto_def: enum_class_def at self, returning empty Array to prevent VS Code fallback"
-                );
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            "enum_value_def" | "EnumValDef" => {
-                // Self-locate — use empty Array to prevent VS Code word-search fallback
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            // Cursor on the class half of a qualified ref (e.g. `PKG` in
-            // `PKG.SOP8`). Step 3b in mcc must emit this kind on the
-            // reference site; loop-1 keeps the branch ready without it.
-            "enum_class_ref" | "EnumRef" => {
-                info!(
-                    "goto_def: enum_class_ref id={} looking up target span",
-                    interval.id
-                );
-                // For system-library enums (e.g. `PKG` from mcode), the
-                // enum_class_ref id is a best-effort placeholder that can
-                // collide with unrelated local declares (e.g. a port_def
-                // at id=0).  Always resolve via the project index.
-                let class_name = rope.byte_slice(interval.start..interval.stop).to_string();
-                if !class_name.is_empty() {
-                    let snap = state.project.index.snapshot();
-                    let entries = snap.lookup(crate::index::snapshot::IndexKind::Enum, &class_name);
-                    if let Some(entry) = entries.first() {
-                        return cross_file_response(
-                            state,
-                            &entry.uri.to_string(),
-                            [entry.span.0, entry.span.1],
-                            &rope,
-                            uri,
-                        );
-                    }
-                }
-            }
-            // Cursor on the value half of a qualified ref (e.g. `SOP8`).
-            //   (class, value) is recovered from the line tokens. For loop-1
-            //   we lean on ProjectIndex.lookup_enum_value; the extension
-            //   only reaches this branch when mcc emits it (Step 3b).
-            "enum_value_ref" | "EnumValRef" => {
-                info!(
-                    "goto_def: enum_value_ref id={} looking up (class, value) -> span",
-                    interval.id
-                );
-                // Extract class + value names directly from the rope using
-                // the interval positions emitted by mcc. The enum_class_ref
-                // span covers the class name (e.g. "PKG") and sits immediately
-                // before the dot; the enum_value_ref span covers the member
-                // name (e.g. "QFN20").
-                //
-                // Previously we parsed the whole line by splitting on
-                // non-is_alphanumeric characters, but that breaks when there
-                // are CJK comments on the same line because is_alphanumeric()
-                // returns false for Chinese characters.
-                let value_name = rope.byte_slice(interval.start..interval.stop).to_string();
-                let value_name_opt = if value_name.is_empty() {
-                    None
-                } else {
-                    Some(value_name)
-                };
-                let class_name = symbols
-                    .lapper
-                    .iter()
-                    .find(|i| {
-                        (i.kind == "enum_class_ref" || i.kind == "EnumRef")
-                            && i.stop + 1 == interval.start
-                    })
-                    .map(|i| rope.byte_slice(i.start..i.stop).to_string())
-                    .and_then(|s| if s.is_empty() { None } else { Some(s) });
-                if let (Some(ref class_name), Some(ref value_name)) = (class_name, value_name_opt) {
-                    info!(
-                        "goto_def: enum_value_ref class={} value={}",
-                        class_name, value_name
-                    );
-                    if let Some(entry) = state
-                        .project
-                        .index
-                        .snapshot()
-                        .lookup_enum_value(&class_name, &value_name)
-                    {
-                        return cross_file_response(
-                            state,
-                            &entry.uri.to_string(),
-                            [entry.span.0, entry.span.1],
-                            &rope,
-                            uri,
-                        );
-                    }
-                    info!(
-                        "goto_def: enum_value_ref lookup FAILED for {}.{} (snapshot enum_values={})",
-                        class_name, value_name,
-                        state.project.index.snapshot().enum_value_len()
-                    );
-                }
-            }
-            // ── Definion kinds: self-locate ──
-            "function_def" | "FuncDef" | "define_def" | "DefineDef" | "role_def" | "RoleDef"
-            | "pin_name_def" | "PinNameDef" | "label_def" | "LabelDef" | "pin_id_def"
-            | "PinIdDef" | "pin_iface_def" | "PinIfaceDef" | "enum_def" | "EnumDef"
-            | "param_def" | "ParamDef" | "attr_def" | "AttrDef" => {
-                // Self-locate: cursor on definition itself → stay
-                return Some(GotoDefinitionResponse::Array(vec![]));
-            }
-            // ── Reference kinds: resolve via RefDefMap ──
-            "function_ref" | "FuncRef" | "class_ref" | "ClassRef" | "declare_class"
-            | "interface_ref" | "port_ref" | "PortRef" | "enum_ref" | "EnumRef"
-            | "pin_name_ref" | "PinNameRef" | "pin_id_ref" | "PinIdRef" | "pin_iface_ref"
-            | "PinIfaceRef" => {
-                let name = rope.byte_slice(interval.start..interval.stop).to_string();
-                if let Some(resp) = resolve_ref_to_def(
-                    state,
-                    &symbols,
-                    &rope,
-                    uri,
-                    interval.kind.as_str(),
-                    interval.id,
-                    &interval.scope,
-                    &name,
-                    (interval.start, interval.stop),
-                ) {
-                    return Some(resp);
-                }
-            }
-            _ => {}
+        // §4.2: All kinds → RefDefMap lookup (no fallback)
+        let name = rope.byte_slice(interval.start..interval.stop).to_string();
+        if let Some(resp) = resolve_ref_to_def(
+            state,
+            &symbols,
+            &rope,
+            uri,
+            interval.kind.as_str(),
+            interval.id,
+            &interval.scope,
+            &name,
+            (interval.start, interval.stop),
+        ) {
+            return Some(resp);
         }
+        // RefDefMap miss: self-locate
+        return Some(GotoDefinitionResponse::Array(vec![]));
     }
 
     None
@@ -403,7 +247,7 @@ mod tests {
         // Document has `enum PKG { SOP8, QFN20 }` and we place an
         // `enum_class_def` lapper entry on the whole line.
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(source, vec![("enum_class_def".into(), 0, 0, 9)]);
+        let (state, uri) = state_with_lapper(source, vec![("EnumDef".into(), 0, 0, 9)]);
         let response = resolve(
             &state,
             &uri,
@@ -420,7 +264,7 @@ mod tests {
         // `enum_value_def` self-locates with an empty Array to prevent
         // VS Code word-search fallback (mirrors `port_def` / `class_def`).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(source, vec![("enum_value_def".into(), 1, 11, 21)]);
+        let (state, uri) = state_with_lapper(source, vec![("EnumValDef".into(), 1, 11, 21)]);
         let response = resolve(&state, &uri, Position::new(1, 4));
         match response {
             Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
@@ -429,16 +273,15 @@ mod tests {
     }
 
     #[test]
-    fn enum_class_ref_no_index_entry_returns_none() {
-        // `enum_class_ref` resolves via the project index. When the class
-        // name isn't registered in the index, it returns None.
+    fn enum_class_ref_miss_self_locate() {
+        // §4.2: RefDefMap miss → self-locate (empty Array), never None.
         let source = "package = PKG.SOP8\n";
-        let (state, uri) = state_with_lapper(source, vec![("enum_class_ref".into(), 7, 10, 13)]);
+        let (state, uri) = state_with_lapper(source, vec![("EnumRef".into(), 7, 10, 13)]);
         let response = resolve(&state, &uri, Position::new(0, 11));
-        assert!(
-            response.is_none(),
-            "expected None for unregistered class, got {response:?}"
-        );
+        match response {
+            Some(GotoDefinitionResponse::Array(v)) if v.is_empty() => {}
+            other => panic!("expected empty Array for RefDefMap miss, got {other:?}"),
+        }
     }
 
     #[test]
@@ -450,7 +293,7 @@ mod tests {
         // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
         // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
         let source = "package = PKG.SOP8\n\n";
-        let (_state, _uri) = state_with_lapper(source, vec![("enum_value_ref".into(), 99, 14, 18)]);
+        let (_state, _uri) = state_with_lapper(source, vec![("EnumValRef".into(), 99, 14, 18)]);
 
         // Register the SOP8 row at span (90, 94) in another file. The
         //   State::index is a `IndexWorkerHandle`; in active mode it pulls
@@ -543,13 +386,7 @@ fn resolve_ref_to_def(
         info!("resolve_ref_to_def: RefDefMap is None");
     }
 
-    // Level 1: project index / library by name (fallback for RefDefMap misses)
-    if !name.is_empty() {
-        if let Some(resp) = lookup_index(state, name, rope, uri) {
-            return Some(resp);
-        }
-    }
-
+    // No Level 1 fallback — RefDefMap is the single source of truth (§4.2)
     None
 }
 
