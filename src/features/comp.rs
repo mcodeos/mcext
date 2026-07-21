@@ -111,16 +111,16 @@ fn collect_local_symbols(
     for entry in &symbols.lapper {
         // Fast-path: skip ref kinds without any allocation
         let (kind, detail) = match entry.kind {
-            0 => (CompletionItemKind::CLASS, "Class def"),              // ClassDef
-            2 => (CompletionItemKind::VALUE, "Instance"),               // InstDef
-            4 => (CompletionItemKind::PROPERTY, "Port"),                // PortDef
-            6 => (CompletionItemKind::VARIABLE, "Label"),               // LabelDef
-            8 => (CompletionItemKind::FUNCTION, "Function"),            // FuncDef
-            10 | 12 | 14 => (CompletionItemKind::ENUM_MEMBER, "Pin"),   // Pin*Def
-            16 => (CompletionItemKind::ENUM, "Enum"),                   // EnumDef
-            18 => (CompletionItemKind::ENUM_MEMBER, "Enum value"),      // EnumValDef
-            20 => (CompletionItemKind::INTERFACE, "Role"),              // RoleDef
-            22 => (CompletionItemKind::CONSTANT, "Define"),             // DefineDef
+            0 => (CompletionItemKind::CLASS, "Class def"), // ClassDef
+            2 => (CompletionItemKind::VALUE, "Instance"),  // InstDef
+            4 => (CompletionItemKind::PROPERTY, "Port"),   // PortDef
+            6 => (CompletionItemKind::VARIABLE, "Label"),  // LabelDef
+            8 => (CompletionItemKind::FUNCTION, "Function"), // FuncDef
+            10 | 12 | 14 => (CompletionItemKind::ENUM_MEMBER, "Pin"), // Pin*Def
+            16 => (CompletionItemKind::ENUM, "Enum"),      // EnumDef
+            18 => (CompletionItemKind::ENUM_MEMBER, "Enum value"), // EnumValDef
+            20 => (CompletionItemKind::INTERFACE, "Role"), // RoleDef
+            22 => (CompletionItemKind::CONSTANT, "Define"), // DefineDef
             _ => continue,
         };
 

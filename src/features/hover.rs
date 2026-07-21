@@ -152,8 +152,8 @@ fn resolve_reference_hover(
 
     // Determine the index kind to search
     let index_kind = match kind {
-        1 => Some(IndexKind::Component),   // ClassRef
-        17 => Some(IndexKind::Enum),        // EnumRef
+        1 => Some(IndexKind::Component), // ClassRef
+        17 => Some(IndexKind::Enum),     // EnumRef
         _ => None,
     };
 
@@ -196,24 +196,24 @@ fn resolve_reference_hover(
 fn kind_label(kind: u8) -> &'static str {
     // SymbolKind ordinals from mcc
     match kind {
-        0 => "component/module",           // ClassDef
-        1 => "→ class",                    // ClassRef
-        2 => "instance",                   // InstDef
-        3 => "→ instance",                 // InstRef
-        4 => "port",                       // PortDef
-        5 => "→ port",                     // PortRef
-        6 => "label",                      // LabelDef
-        7 => "→ label",                    // LabelRef
-        8 => "function",                   // FuncDef
-        9 => "→ function",                 // FuncRef
-        10 | 12 | 14 => "pin",             // Pin*Def
-        11 | 13 | 15 => "→ pin",           // Pin*Ref
-        16 | 18 => "enum",                 // EnumDef/EnumValDef
-        17 | 19 => "→ enum",               // EnumRef/EnumValRef
-        20 => "role",                      // RoleDef
-        21 => "param",                     // ParamDef
-        22 => "define",                    // DefineDef
-        23 => "attr",                      // AttrDef
+        0 => "component/module", // ClassDef
+        1 => "→ class",          // ClassRef
+        2 => "instance",         // InstDef
+        3 => "→ instance",       // InstRef
+        4 => "port",             // PortDef
+        5 => "→ port",           // PortRef
+        6 => "label",            // LabelDef
+        7 => "→ label",          // LabelRef
+        8 => "function",         // FuncDef
+        9 => "→ function",       // FuncRef
+        10 | 12 | 14 => "pin",   // Pin*Def
+        11 | 13 | 15 => "→ pin", // Pin*Ref
+        16 | 18 => "enum",       // EnumDef/EnumValDef
+        17 | 19 => "→ enum",     // EnumRef/EnumValRef
+        20 => "role",            // RoleDef
+        21 => "param",           // ParamDef
+        22 => "define",          // DefineDef
+        23 => "attr",            // AttrDef
         _ => "?",
     }
 }
