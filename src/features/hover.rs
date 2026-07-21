@@ -126,22 +126,17 @@ fn resolve_symbol_hover(
 ) -> Option<Hover> {
     let (info, name) = crate::features::symbols::find_symbol_at_offset(state, uri, offset)?;
 
-    match info.kind.as_str() {
+    match info.kind {
         // Self-defining symbols — show their type
-        "class_def" | "class_definition" | "function_def" | "port_def" | "define_def"
-        | "role_def" | "enum_class_def" | "enum_value_def" | "pin_name_def" | "label_def" => {
+        0 | 8 | 4 | 22 | 20 | 16 | 18 | 10 | 12 | 14 | 6 => {
             format_symbol_hover(&name, &info.kind_label, &info.scope)
         }
-
         // Reference symbols — try to resolve to definition
-        "class_ref" | "declare_class" | "instance_ref" | "interface_ref" | "enum_class_ref"
-        | "enum_value_ref" | "function_ref" | "pin_name_ref" | "label_ref" => {
-            resolve_reference_hover(state, &name, info.kind.as_str(), &info.scope)
+        1 | 3 | 17 | 19 | 9 | 11 | 13 | 15 | 7 => {
+            resolve_reference_hover(state, &name, info.kind, &info.scope)
         }
-
         // Instance definitions / declarations
-        "instance_def" | "declare_instance" => format_symbol_hover(&name, "instance", &info.scope),
-
+        2 => format_symbol_hover(&name, "instance", &info.scope),
         _ => None,
     }
 }
@@ -150,16 +145,15 @@ fn resolve_symbol_hover(
 fn resolve_reference_hover(
     state: &WorkspaceState,
     name: &str,
-    kind: &str,
+    kind: u8,
     scope: &str,
 ) -> Option<Hover> {
     let snap = state.project.index.snapshot();
 
     // Determine the index kind to search
     let index_kind = match kind {
-        "class_ref" | "declare_class" => Some(IndexKind::Component),
-        "interface_ref" => Some(IndexKind::Interface),
-        "enum_class_ref" => Some(IndexKind::Enum),
+        1 => Some(IndexKind::Component),   // ClassRef
+        17 => Some(IndexKind::Enum),        // EnumRef
         _ => None,
     };
 
@@ -198,26 +192,29 @@ fn resolve_reference_hover(
 // Helpers
 // ============================================================================
 
-/// Human-readable label for a lapper kind string.
-fn kind_label<'a>(kind: &'a str) -> &'a str {
+/// Human-readable label for a SymbolKind ordinal.
+fn kind_label(kind: u8) -> &'static str {
+    // SymbolKind ordinals from mcc
     match kind {
-        "class_def" | "class_definition" => "component/module",
-        "class_ref" | "declare_class" => "→ class",
-        "port_def" => "port",
-        "label_def" => "label",
-        "label_ref" => "→ label",
-        "function_def" => "function",
-        "function_ref" => "→ function",
-        "pin_name_def" => "pin",
-        "pin_name_ref" => "→ pin",
-        "enum_class_def" | "enum_value_def" => "enum",
-        "enum_class_ref" | "enum_value_ref" => "→ enum",
-        "instance_def" | "declare_instance" => "instance",
-        "instance_ref" => "→ instance",
-        "define_def" => "define",
-        "role_def" => "role",
-        "interface_ref" => "→ interface",
-        _ => kind,
+        0 => "component/module",           // ClassDef
+        1 => "→ class",                    // ClassRef
+        2 => "instance",                   // InstDef
+        3 => "→ instance",                 // InstRef
+        4 => "port",                       // PortDef
+        5 => "→ port",                     // PortRef
+        6 => "label",                      // LabelDef
+        7 => "→ label",                    // LabelRef
+        8 => "function",                   // FuncDef
+        9 => "→ function",                 // FuncRef
+        10 | 12 | 14 => "pin",             // Pin*Def
+        11 | 13 | 15 => "→ pin",           // Pin*Ref
+        16 | 18 => "enum",                 // EnumDef/EnumValDef
+        17 | 19 => "→ enum",               // EnumRef/EnumValRef
+        20 => "role",                      // RoleDef
+        21 => "param",                     // ParamDef
+        22 => "define",                    // DefineDef
+        23 => "attr",                      // AttrDef
+        _ => "?",
     }
 }
 

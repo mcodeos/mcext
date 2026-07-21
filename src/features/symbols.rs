@@ -14,8 +14,8 @@ pub struct SymbolInfo {
     pub uri: Url,
     /// Byte range in the source file.
     pub span: (usize, usize),
-    /// Lapper kind string (e.g. "instance_ref", "port_def").
-    pub kind: String,
+    /// Lapper kind as SymbolKind ordinal (u8). Maps to kind_names[] sent by mcc.
+    pub kind: u8,
     /// Declare / ref ID from the lapper.
     pub id: u32,
     /// Scope string.
@@ -25,18 +25,22 @@ pub struct SymbolInfo {
 }
 
 /// Priority rank for interval kinds (lower = more specific / preferred).
-/// Mirrors the sort order in gotodef.
-pub fn kind_rank(kind: &str) -> u8 {
-    // Kind strings come from SymbolKind::kind_name() (PascalCase).
-    // Lower number = higher priority when multiple intervals overlap.
+/// kind is a SymbolKind ordinal (u8) matching mcc's `kind_names` ordering.
+pub fn kind_rank(kind: u8) -> u8 {
+    // SymbolKind ordinals: ClassDef=0, ClassRef=1, InstDef=2, InstRef=3,
+    // PortDef=4, PortRef=5, LabelDef=6, LabelRef=7, FuncDef=8, FuncRef=9,
+    // PinIdDef=10, PinIdRef=11, PinNameDef=12, PinNameRef=13,
+    // PinIfaceDef=14, PinIfaceRef=15, EnumDef=16, EnumRef=17,
+    // EnumValDef=18, EnumValRef=19, RoleDef=20, ParamDef=21,
+    // DefineDef=22, AttrDef=23
     match kind {
-        "ClassDef" | "FuncDef" | "RoleDef" => 0,
-        "ClassRef" => 1,
-        "InstRef" | "PortRef" | "PortDef" | "LabelRef" | "FuncRef" => 2,
-        "PinNameDef" | "PinNameRef" | "PinIdDef" | "PinIdRef" | "PinIfaceDef" | "PinIfaceRef" => 3,
-        "InstDef" | "LabelDef" => 4,
-        "EnumValDef" | "EnumValRef" | "EnumRef" | "EnumDef" => 5,
-        "DefineDef" | "ParamDef" | "AttrDef" => 6,
+        0 | 8 | 20 => 0,             // ClassDef, FuncDef, RoleDef
+        1 => 1,                       // ClassRef
+        3 | 5 | 4 | 7 | 9 => 2,      // InstRef, PortRef, PortDef, LabelRef, FuncRef
+        10..=15 => 3,                 // Pin*Def/Pin*Ref
+        2 | 6 => 4,                   // InstDef, LabelDef
+        16..=19 => 5,                 // Enum*
+        21 | 22 | 23 => 6,            // ParamDef, DefineDef, AttrDef
         _ => 7,
     }
 }
@@ -47,7 +51,7 @@ pub fn find_intervals_at<'a>(lapper: &'a [LapperEntry], offset: usize) -> Vec<&'
         .iter()
         .filter(|e| offset >= e.start && offset <= e.stop)
         .collect();
-    entries.sort_by(|a, b| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)));
+    entries.sort_by(|a, b| kind_rank(a.kind).cmp(&kind_rank(b.kind)));
     entries
 }
 
@@ -69,10 +73,10 @@ pub fn find_symbol_at_offset(
     let info = SymbolInfo {
         uri: uri.clone(),
         span: (best.start, best.stop),
-        kind: best.kind.clone(),
+        kind: best.kind,
         id: best.id,
         scope: best.scope.clone(),
-        kind_label: kind_label(&best.kind),
+        kind_label: kind_label(best.kind),
     };
 
     Some((info, name))
@@ -91,24 +95,27 @@ pub fn find_symbol_at_cursor(
 }
 
 /// Human-readable label for a lapper kind.
-pub fn kind_label(kind: &str) -> String {
+/// kind is a SymbolKind ordinal (u8) matching mcc's `kind_names` ordering.
+pub fn kind_label(kind: u8) -> String {
     match kind {
-        "class_def" | "class_definition" => "component/module".into(),
-        "class_ref" | "declare_class" => "→ class".into(),
-        "port_def" => "port".into(),
-        "label_def" => "label".into(),
-        "label_ref" => "→ label".into(),
-        "function_def" => "function".into(),
-        "function_ref" => "→ function".into(),
-        "pin_name_def" => "pin".into(),
-        "pin_name_ref" => "→ pin".into(),
-        "enum_class_def" | "enum_value_def" => "enum".into(),
-        "enum_class_ref" | "enum_value_ref" => "→ enum".into(),
-        "instance_def" | "declare_instance" => "instance".into(),
-        "instance_ref" => "→ instance".into(),
-        "define_def" => "define".into(),
-        "role_def" => "role".into(),
-        "interface_ref" => "→ interface".into(),
-        _ => kind.into(),
+        0 => "component/module".into(),   // ClassDef
+        1 => "→ class".into(),             // ClassRef
+        2 => "instance".into(),            // InstDef
+        3 => "→ instance".into(),          // InstRef
+        4 => "port".into(),                // PortDef
+        5 => "→ port".into(),              // PortRef
+        6 => "label".into(),               // LabelDef
+        7 => "→ label".into(),             // LabelRef
+        8 => "function".into(),            // FuncDef
+        9 => "→ function".into(),          // FuncRef
+        10 | 12 | 14 => "pin".into(),      // PinDef
+        11 | 13 | 15 => "→ pin".into(),    // PinRef
+        16 | 18 => "enum".into(),          // EnumDef/EnumValDef
+        17 | 19 => "→ enum".into(),        // EnumRef/EnumValRef
+        20 => "role".into(),               // RoleDef
+        21 => "param".into(),              // ParamDef
+        22 => "define".into(),             // DefineDef
+        23 => "attr".into(),               // AttrDef
+        _ => "?".into(),
     }
 }

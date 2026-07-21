@@ -80,7 +80,7 @@ pub fn resolve(
     // (e.g. `[+, -]::DC(volt, Source)`), which would otherwise shadow
     // instance_ref entries for the param references inside.
     let mut sorted_intervals = intervals.clone();
-    sorted_intervals.sort_by(|a, b| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)));
+    sorted_intervals.sort_by(|a, b| kind_rank(a.kind).cmp(&kind_rank(b.kind)));
 
     for interval in &sorted_intervals {
         info!(
@@ -94,7 +94,7 @@ pub fn resolve(
             &symbols,
             &rope,
             uri,
-            interval.kind.as_str(),
+            interval.kind,
             interval.id,
             &interval.scope,
             &name,
@@ -475,15 +475,15 @@ mod f12_e2e_tests {
 
     #[test]
     fn kind_rank_puts_funcref_before_instref() {
-        // Verify FuncRef has priority >= InstRef to prevent shadowing.
-        assert!(kind_rank("FuncRef") <= kind_rank("InstRef"),
+        // FuncRef=9, InstRef=3 — FuncRef should have higher priority (lower rank)
+        assert!(kind_rank(9) <= kind_rank(3),
             "FuncRef must have priority >= InstRef to avoid shadowing");
     }
 
     #[test]
     fn all_known_kinds_have_explicit_rank() {
-        // Verify all SymbolKind names from mcc have explicit rank entries.
-        for &kind in KIND_NAMES {
+        // Verify all 24 SymbolKind ordinals have explicit rank entries.
+        for kind in 0u8..24 {
             let rank = kind_rank(kind);
             assert!(rank < 7, "kind '{kind}' has default rank 7, needs explicit entry");
         }
@@ -498,7 +498,7 @@ fn resolve_ref_to_def(
     symbols: &crate::state::RpcSemSymbols,
     rope: &Rope,
     uri: &Url,
-    kind: &str,
+    kind: u8,
     id: u32,
     _scope: &str,
     name: &str,
@@ -511,38 +511,29 @@ fn resolve_ref_to_def(
             map.entries.len(),
             map.kind_names,
         );
-        if let Some(ref_kind) = map_kind_from_str(kind, map) {
-            info!("resolve_ref_to_def: kind='{kind}' → ordinal={ref_kind}");
-            if let Some(entry) = map.lookup(ref_kind, id) {
-                let def_uri = &map.files[entry.file_id as usize];
-                eprintln!(
-                    "F12_DIAG resolve_ref_to_def name='{name}' kind={kind} id={id} \
-                     => RefDefMap MATCH: uri={def_uri} span=[{},{}] def_kind={}",
-                    entry.def_span[0], entry.def_span[1], entry.def_kind
-                );
-                // Skip self-references
-                if entry.def_span[0] as usize == ref_span.0
-                    && entry.def_span[1] as usize == ref_span.1
-                {
-                    eprintln!("F12_DIAG => RefDefMap SKIP (self-ref)");
-                } else {
-                    return cross_file_response(
-                        state,
-                        def_uri,
-                        [entry.def_span[0] as usize, entry.def_span[1] as usize],
-                        rope,
-                        uri,
-                    );
-                }
+        if let Some(entry) = map.lookup(kind, id) {
+            let def_uri = &map.files[entry.file_id as usize];
+            eprintln!(
+                "F12_DIAG resolve_ref_to_def name='{name}' kind={kind} id={id} \
+                 => RefDefMap MATCH: uri={def_uri} span=[{},{}] def_kind={}",
+                entry.def_span[0], entry.def_span[1], entry.def_kind
+            );
+            if entry.def_span[0] as usize == ref_span.0
+                && entry.def_span[1] as usize == ref_span.1
+            {
+                eprintln!("F12_DIAG => RefDefMap SKIP (self-ref)");
             } else {
-                info!(
-                    "resolve_ref_to_def: RefDefMap MISS for kind='{kind}' id={id} name='{name}' (no entry in map)"
+                return cross_file_response(
+                    state,
+                    def_uri,
+                    [entry.def_span[0] as usize, entry.def_span[1] as usize],
+                    rope,
+                    uri,
                 );
             }
         } else {
             info!(
-                "resolve_ref_to_def: kind='{kind}' NOT FOUND in kind_names={:?}",
-                map.kind_names
+                "resolve_ref_to_def: RefDefMap MISS for kind='{kind}' id={id} name='{name}' (no entry in map)"
             );
         }
     } else {
