@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # RPC client for mcc server
 reqwest = { version = "0.12", features = ["json"] }
+mc-rpc-types = { path = "../mc-rpc-types" }
 
 # TOML parsing for project.toml
 toml = "0.8"

@@ -102,8 +102,19 @@ pub fn resolve(
         ) {
             return Some(resp);
         }
-        // RefDefMap miss: self-locate
-        return Some(GotoDefinitionResponse::Array(vec![]));
+        // ★ P6: Self-locate with correct file URI from lapper entry
+        let def_uri_str = if !interval.file.is_empty() {
+            &interval.file
+        } else {
+            uri.as_str()
+        };
+        return cross_file_response(
+            state,
+            def_uri_str,
+            [interval.start, interval.stop],
+            &rope,
+            uri,
+        );
     }
 
     None
@@ -319,13 +330,6 @@ mod tests {
             Some(other_uri.to_string())
         );
     }
-}
-
-/// Resolve a lapper kind string to RefDefMap SymbolKind ordinal.
-/// Uses the dynamic `kind_names` mapping from mcc (rather than hardcoded ordinals),
-/// so mcc and mcext stay in sync automatically after enum changes (§7.6).
-fn map_kind_from_str(kind: &str, map: &crate::rpc::RefDefMapData) -> Option<u8> {
-    map.resolve_kind(kind)
 }
 
 #[cfg(test)]
