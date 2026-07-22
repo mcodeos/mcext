@@ -59,6 +59,8 @@ fn def_symbol_info(kind: u8) -> Option<(&'static str, SymbolKind)> {
         21 => Some(("param", SymbolKind::TYPE_PARAMETER)), // ParamDef
         22 => Some(("define", SymbolKind::CONSTANT)),  // DefineDef
         23 => Some(("attr", SymbolKind::KEY)),         // AttrDef
+        25 => Some(("bus", SymbolKind::PROPERTY)),     // BusDef
+        27 => Some(("unknown", SymbolKind::VARIABLE)), // UnknownDef
         _ => None,
     }
 }

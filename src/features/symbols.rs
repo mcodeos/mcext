@@ -116,6 +116,10 @@ pub fn kind_label(kind: u8) -> String {
         21 => "param".into(),           // ParamDef
         22 => "define".into(),          // DefineDef
         23 => "attr".into(),            // AttrDef
+        24 => "→ func param".into(),    // FuncParamRef
+        25 => "bus".into(),             // BusDef
+        26 => "→ bus".into(),           // BusRef
+        27 => "unknown".into(),         // UnknownDef
         _ => "?".into(),
     }
 }
