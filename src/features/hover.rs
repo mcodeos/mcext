@@ -214,6 +214,10 @@ fn kind_label(kind: u8) -> &'static str {
         21 => "param",           // ParamDef
         22 => "define",          // DefineDef
         23 => "attr",            // AttrDef
+        24 => "→ func param",    // FuncParamRef
+        25 => "bus",             // BusDef
+        26 => "→ bus",           // BusRef
+        27 => "unknown",         // UnknownDef
         _ => "?",
     }
 }

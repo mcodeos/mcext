@@ -365,6 +365,10 @@ mod f12_e2e_tests {
         "ParamDef",
         "DefineDef",
         "AttrDef",
+        "FuncParamRef",
+        "BusDef",
+        "BusRef",
+        "UnknownDef",
     ];
 
     fn kind_ordinal(name: &str) -> u8 {
@@ -548,7 +552,7 @@ mod f12_e2e_tests {
     #[test]
     fn all_known_kinds_have_explicit_rank() {
         // Verify all 24 SymbolKind ordinals have explicit rank entries.
-        for kind in 0u8..24 {
+        for kind in 0u8..27 {
             let rank = kind_rank(kind);
             assert!(
                 rank < 7,
