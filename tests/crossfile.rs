@@ -9,7 +9,7 @@
 //! Here we only verify LSP layer logic: position → offset → symbol lookup → response,
 //! running through the entire flow with fake state (empty parse).
 
-use mcodels::features::{goto_definition, references};
+use mcodels::features::{gotodef, refs};
 use mcodels::WorkspaceState;
 use ropey::Rope;
 use tower_lsp::lsp_types::{Position, Url};
@@ -41,8 +41,8 @@ fn goto_definition_does_not_panic_on_any_position() {
     // No panic at any position (all return None without parse)
     for line in 0..10 {
         for col in 0..40 {
-            let _ = goto_definition::resolve(&state, &main_url, Position::new(line, col));
-            let _ = goto_definition::resolve(&state, &helper_url, Position::new(line, col));
+            let _ = gotodef::resolve(&state, &main_url, Position::new(line, col));
+            let _ = gotodef::resolve(&state, &helper_url, Position::new(line, col));
         }
     }
 }
@@ -52,8 +52,8 @@ fn references_does_not_panic_on_any_position() {
     let (state, main_url, helper_url) = setup();
     for line in 0..10 {
         for col in 0..40 {
-            let _ = references::resolve(&state, &main_url, Position::new(line, col), true);
-            let _ = references::resolve(&state, &helper_url, Position::new(line, col), false);
+            let _ = refs::resolve(&state, &main_url, Position::new(line, col), true);
+            let _ = refs::resolve(&state, &helper_url, Position::new(line, col), false);
         }
     }
 }
@@ -62,13 +62,13 @@ fn references_does_not_panic_on_any_position() {
 fn goto_definition_returns_none_without_parse() {
     let (state, main_url, _helper_url) = setup();
     // No parse result, all resolve return None
-    let result = goto_definition::resolve(&state, &main_url, Position::new(0, 5));
+    let result = gotodef::resolve(&state, &main_url, Position::new(0, 5));
     assert!(result.is_none());
 }
 
 #[test]
 fn references_returns_none_without_parse() {
     let (state, main_url, _helper_url) = setup();
-    let result = references::resolve(&state, &main_url, Position::new(0, 5), true);
+    let result = refs::resolve(&state, &main_url, Position::new(0, 5), true);
     assert!(result.is_none());
 }

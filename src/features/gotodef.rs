@@ -102,6 +102,12 @@ pub fn resolve(
         ) {
             return Some(resp);
         }
+        // ★ Self-locating kinds: when no RefDefMap hit, return an empty Array
+        // (instead of a Scalar self-locate) to prevent VS Code's word-search
+        // fallback. Applies to *Def and Enum*Ref misses.
+        if matches!(interval.kind, 16..=19) {
+            return Some(GotoDefinitionResponse::Array(vec![]));
+        }
         // ★ P6: Self-locate with correct file URI from lapper entry
         let def_uri_str = if !interval.file.is_empty() {
             &interval.file
@@ -218,12 +224,7 @@ mod tests {
     /// given lapper entries (the rest of RpcSemSymbols is empty).
     fn state_with_lapper(
         source: &str,
-        lapper_entries: Vec<(
-            String, /*kind*/
-            u32,    /*id*/
-            usize,  /*start*/
-            usize,  /*stop*/
-        )>,
+        lapper_entries: Vec<(u8, /*kind*/ u32, /*id*/ usize, /*start*/ usize /*stop*/)>,
     ) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();
         let uri = Url::parse("file:///enum_test.mc").unwrap();
@@ -254,12 +255,48 @@ mod tests {
         (state, uri)
     }
 
+    /// Local kind-name → ordinal map (mirrors f12_e2e_tests::KIND_NAMES).
+    /// Must stay in sync with the canonical list in f12_e2e_tests.
+    const KIND_NAMES: &[&str] = &[
+        "ClassDef",
+        "ClassRef",
+        "InstDef",
+        "InstRef",
+        "PortDef",
+        "PortRef",
+        "LabelDef",
+        "LabelRef",
+        "FuncDef",
+        "FuncRef",
+        "PinIdDef",
+        "PinIdRef",
+        "PinNameDef",
+        "PinNameRef",
+        "PinIfaceDef",
+        "PinIfaceRef",
+        "EnumDef",
+        "EnumRef",
+        "EnumValDef",
+        "EnumValRef",
+        "RoleDef",
+        "ParamDef",
+        "DefineDef",
+        "AttrDef",
+        "FuncParamRef",
+        "BusDef",
+        "BusRef",
+        "UnknownDef",
+    ];
+    fn kind_ordinal(name: &str) -> u8 {
+        KIND_NAMES.iter().position(|&k| k == name).unwrap() as u8
+    }
+
     #[test]
     fn enum_class_def_returns_empty_array() {
         // Document has `enum PKG { SOP8, QFN20 }` and we place an
         // `enum_class_def` lapper entry on the whole line.
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(source, vec![("EnumDef".into(), 0, 0, 9)]);
+        let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumDef"), 0, 0, 9)]);
         let response = resolve(
             &state,
             &uri,
@@ -276,7 +313,7 @@ mod tests {
         // `enum_value_def` self-locates with an empty Array to prevent
         // VS Code word-search fallback (mirrors `port_def` / `class_def`).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
-        let (state, uri) = state_with_lapper(source, vec![("EnumValDef".into(), 1, 11, 21)]);
+        let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumValDef"), 1, 11, 21)]);
         let response = resolve(&state, &uri, Position::new(1, 4));
         match response {
             Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
@@ -288,7 +325,7 @@ mod tests {
     fn enum_class_ref_miss_self_locate() {
         // §4.2: RefDefMap miss → self-locate (empty Array), never None.
         let source = "package = PKG.SOP8\n";
-        let (state, uri) = state_with_lapper(source, vec![("EnumRef".into(), 7, 10, 13)]);
+        let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumRef"), 7, 10, 13)]);
         let response = resolve(&state, &uri, Position::new(0, 11));
         match response {
             Some(GotoDefinitionResponse::Array(v)) if v.is_empty() => {}
@@ -305,7 +342,7 @@ mod tests {
         // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
         // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
         let source = "package = PKG.SOP8\n\n";
-        let (_state, _uri) = state_with_lapper(source, vec![("EnumValRef".into(), 99, 14, 18)]);
+        let (_state, _uri) = state_with_lapper(source, vec![(kind_ordinal("EnumValRef"), 99, 14, 18)]);
 
         // Register the SOP8 row at span (90, 94) in another file. The
         //   State::index is a `IndexWorkerHandle`; in active mode it pulls
@@ -448,7 +485,7 @@ mod f12_e2e_tests {
         let funcref_kind = kind_ordinal("FuncRef");
         let lapper = vec![
             LapperEntry {
-                kind: "FuncDef".into(),
+                kind: funcdef_kind,
                 id: 56,
                 start: def_start,
                 stop: def_end,
@@ -456,7 +493,7 @@ mod f12_e2e_tests {
                 file: "file:///test.mc".into(),
             },
             LapperEntry {
-                kind: "FuncRef".into(),
+                kind: funcref_kind,
                 id: 56,
                 start: ref_start,
                 stop: ref_end,
@@ -501,7 +538,7 @@ mod f12_e2e_tests {
         let portref_kind = kind_ordinal("PortRef");
         let lapper = vec![
             LapperEntry {
-                kind: "PortDef".into(),
+                kind: portdef_kind,
                 id: 100,
                 start: def_start,
                 stop: def_end,
@@ -509,7 +546,7 @@ mod f12_e2e_tests {
                 file: "file:///test.mc".into(),
             },
             LapperEntry {
-                kind: "PortRef".into(),
+                kind: portref_kind,
                 id: 100,
                 start: ref_start,
                 stop: ref_end,
