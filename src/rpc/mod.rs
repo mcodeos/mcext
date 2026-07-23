@@ -433,7 +433,7 @@ mod tests {
                     "references": []
                 },
                 "lapper": [
-                    {"kind": "class_definition", "start": 0, "stop": 9, "id": 0}
+                    {"kind": 0, "start": 0, "stop": 9, "id": 0}
                 ],
                 "global": {
                     "declares": [],

@@ -336,7 +336,7 @@ mod tests {
     // ── Symbol hover ──
 
     fn state_with_lapper(
-        lapper_entries: Vec<(&str, usize, usize, u32, &str)>,
+        lapper_entries: Vec<(u8, usize, usize, u32, &str)>,
     ) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();
         let uri = Url::parse("file:///test.mc").unwrap();
@@ -345,7 +345,7 @@ mod tests {
         let lapper: Vec<LapperEntry> = lapper_entries
             .into_iter()
             .map(|(kind, start, stop, id, scope)| LapperEntry {
-                kind: kind.into(),
+                kind,
                 start,
                 stop,
                 id,
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn class_def_hover_shows_kind() {
         // "component main" — "main" from byte 10 to 14
-        let (state, uri) = state_with_lapper(vec![("class_def", 10, 14, 0, "")]);
+        let (state, uri) = state_with_lapper(vec![(0, 10, 14, 0, "")]);
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_position_returns_none() {
-        let (state, uri) = state_with_lapper(vec![("class_def", 0, 10, 0, "")]);
+        let (state, uri) = state_with_lapper(vec![(0, 0, 10, 0, "")]);
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },

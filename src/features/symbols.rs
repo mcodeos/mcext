@@ -32,7 +32,8 @@ pub fn kind_rank(kind: u8) -> u8 {
     // PinIdDef=10, PinIdRef=11, PinNameDef=12, PinNameRef=13,
     // PinIfaceDef=14, PinIfaceRef=15, EnumDef=16, EnumRef=17,
     // EnumValDef=18, EnumValRef=19, RoleDef=20, ParamDef=21,
-    // DefineDef=22, AttrDef=23
+    // DefineDef=22, AttrDef=23, FuncParamRef=24, BusDef=25,
+    // BusRef=26, UnknownDef=27
     match kind {
         0 | 8 | 20 => 0,        // ClassDef, FuncDef, RoleDef
         1 => 1,                 // ClassRef
@@ -40,7 +41,7 @@ pub fn kind_rank(kind: u8) -> u8 {
         10..=15 => 3,           // Pin*Def/Pin*Ref
         2 | 6 => 4,             // InstDef, LabelDef
         16..=19 => 5,           // Enum*
-        21 | 22 | 23 => 6,      // ParamDef, DefineDef, AttrDef
+        21 | 22 | 23 | 24 | 25 | 26 | 27 => 6, // ParamDef, DefineDef, AttrDef, FuncParamRef, BusDef, BusRef, UnknownDef
         _ => 7,
     }
 }
