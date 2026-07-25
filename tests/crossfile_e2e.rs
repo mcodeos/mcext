@@ -80,7 +80,9 @@ mod original {
         let helper_url = fixture_uri("helper.mc");
         load_into_state(&state, &helper_url, "helper.mc");
         let params = TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: helper_url.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: helper_url.clone(),
+            },
             position: Position::new(3, 12),
         };
         let result = completion::resolve(&state, &params);
@@ -93,7 +95,9 @@ mod original {
         let main_url = fixture_uri("main.mc");
         load_into_state(&state, &main_url, "main.mc");
         let params = TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: main_url.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: main_url.clone(),
+            },
             position: Position::new(5, 0),
         };
         let result = completion::resolve(&state, &params);
