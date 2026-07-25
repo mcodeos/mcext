@@ -224,7 +224,12 @@ mod tests {
     /// given lapper entries (the rest of RpcSemSymbols is empty).
     fn state_with_lapper(
         source: &str,
-        lapper_entries: Vec<(u8, /*kind*/ u32, /*id*/ usize, /*start*/ usize /*stop*/)>,
+        lapper_entries: Vec<(
+            u8,
+            /*kind*/ u32,
+            /*id*/ usize,
+            /*start*/ usize, /*stop*/
+        )>,
     ) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();
         let uri = Url::parse("file:///enum_test.mc").unwrap();
@@ -342,7 +347,8 @@ mod tests {
         // Document is "package = PKG.SOP8\n\n". `PKG` covers [10..13],
         // `SOP8` covers [14..18]. Cursor at column 16 (the 'O' of `SOP8`).
         let source = "package = PKG.SOP8\n\n";
-        let (_state, _uri) = state_with_lapper(source, vec![(kind_ordinal("EnumValRef"), 99, 14, 18)]);
+        let (_state, _uri) =
+            state_with_lapper(source, vec![(kind_ordinal("EnumValRef"), 99, 14, 18)]);
 
         // Register the SOP8 row at span (90, 94) in another file. The
         //   State::index is a `IndexWorkerHandle`; in active mode it pulls
