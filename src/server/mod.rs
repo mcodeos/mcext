@@ -341,6 +341,11 @@ async fn run_server_init(
             }
         }
     }
+
+    // ★ Mark libraries as loaded so any blocked parse_and_publish tasks
+    //   can proceed with full symbol resolution.
+    state.init.signal_libs_loaded();
+    info!("libs_loaded = true — interface/component validation is now complete");
 }
 
 /// Parse + publish diagnostics (executed in debounced task)
@@ -390,6 +395,23 @@ async fn parse_and_publish(
             info!("parse_and_publish: init not ready for {uri}, queuing for retry");
             state.diags.pending.insert(uri.clone(), version);
             return;
+        }
+    }
+
+    // ★ Also wait for project libraries (e.g. mcode) to be loaded before parsing,
+    //   so the first mcb_post_parse sees a complete workspace.interfaces set and
+    //   does not raise spurious "interface not loaded" warnings.
+    if !state.init.libs_loaded.load(Ordering::Acquire) {
+        info!("parse_and_publish: waiting for libs_loaded for {uri}");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            state.init.libs_notify.notified(),
+        )
+        .await;
+        if !state.init.libs_loaded.load(Ordering::Acquire) {
+            warn!("parse_and_publish: libs_loaded timeout for {uri}, proceeding anyway");
+        } else {
+            info!("parse_and_publish: libs_loaded signaled, proceeding with {uri}");
         }
     }
 
@@ -1058,6 +1080,7 @@ impl LanguageServer for Backend {
 
             // Auto-load project dependencies from project.toml
             let mcc_server = self.mcc_server.clone();
+            let state_clone = Arc::clone(&self.state);
             let root_clone = root.clone();
             tokio::spawn(async move {
                 // Wait for mcc server to be ready
@@ -1084,6 +1107,10 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
+                // ★ Signal libs_loaded so any blocked parse_and_publish tasks
+                //   (waiting for libraries) can proceed. Without this, every
+                //   didOpen event will time out after 15s and produce a warning.
+                state_clone.init.signal_libs_loaded();
             });
         }
     }

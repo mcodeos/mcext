@@ -224,17 +224,28 @@ impl ProjectContext {
 
 /// Initialization coordination: sticky flag + wakeup signal.
 pub struct InitState {
-    /// Sticky flag: true after project initialization completes.
+    /// Sticky flag: true after mcc server connected + basic init done.
+    /// parse_and_publish can make basic sem()/diagnostics() RPC calls
+    /// once this is set, but validations may be incomplete until
+    /// `libs_loaded` is also set.
     pub done: AtomicBool,
+    /// Sticky flag: true after all project dependencies (libs) are loaded.
+    /// parse_and_publish waits for this to ensure interface/component
+    /// bindings see the full mcode library set before validation.
+    pub libs_loaded: AtomicBool,
     /// Wakeup signal for tasks waiting on initialization (NOT sticky).
     pub notify: Notify,
+    /// Wakeup signal for tasks waiting on library loading (NOT sticky).
+    pub libs_notify: Notify,
 }
 
 impl InitState {
     pub fn new() -> Self {
         Self {
             done: AtomicBool::new(false),
+            libs_loaded: AtomicBool::new(false),
             notify: Notify::new(),
+            libs_notify: Notify::new(),
         }
     }
 
@@ -243,6 +254,13 @@ impl InitState {
     pub fn signal_done(&self) {
         self.done.store(true, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    /// Mark library loading as complete and wake all waiters.
+    /// Order: set flag first, then notify — so woken tasks see libs_loaded == true.
+    pub fn signal_libs_loaded(&self) {
+        self.libs_loaded.store(true, Ordering::Release);
+        self.libs_notify.notify_waiters();
     }
 }
 
