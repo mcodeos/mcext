@@ -315,9 +315,18 @@ async fn run_server_init(
         }
     }
 
-    // Phase 4: retry any diagnostics that were queued before load_project completed.
-    // After full project load, re-parse pending files so they get complete symbol
-    // resolution (dependencies, project-wide symbols).
+    // ★ Phase 4: Mark libraries as loaded BEFORE retrying pending diagnostics.
+    //   parse_and_publish waits for libs_loaded before making RPC calls.
+    //   Signalling first avoids a deadlock: if we retried pending diagnostics
+    //   while libs_loaded is still false, parse_and_publish would block on
+    //   libs_notify for 15s, and we'd never reach signal_libs_loaded() to
+    //   wake it — because we're awaiting parse_and_publish synchronously here.
+    state.init.signal_libs_loaded();
+    info!("libs_loaded = true — interface/component validation is now complete");
+
+    // Phase 5: retry any diagnostics that were queued before load_project completed.
+    // After full project load + libs_loaded, re-parse pending files so they get
+    // complete symbol resolution (dependencies, project-wide symbols).
     let pending: Vec<(Url, Option<i32>)> = state
         .diags
         .pending
@@ -341,11 +350,6 @@ async fn run_server_init(
             }
         }
     }
-
-    // ★ Mark libraries as loaded so any blocked parse_and_publish tasks
-    //   can proceed with full symbol resolution.
-    state.init.signal_libs_loaded();
-    info!("libs_loaded = true — interface/component validation is now complete");
 }
 
 /// Parse + publish diagnostics (executed in debounced task)
@@ -359,7 +363,7 @@ async fn parse_and_publish(
     let span = tracing::info_span!("parse_and_publish", uri = %uri.path(), ?version);
     let _guard = span.enter();
 
-    debug!("parse_and_publish ENTER: uri={}", uri.path());
+    info!("parse_and_publish ENTER: uri={}", uri.path());
     let mc_uri = String::from(uri.path());
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
@@ -417,7 +421,7 @@ async fn parse_and_publish(
 
     let server_guard = mcc_server.read().await;
     let Some(server) = server_guard.as_ref() else {
-        debug!("mcc server not available for {uri}, queuing for retry");
+        warn!("mcc server not available for {uri}, queuing for retry");
         state.diags.pending.insert(uri.clone(), version);
         return;
     };
@@ -431,7 +435,7 @@ async fn parse_and_publish(
             }
         }
         if !server.is_connected() {
-            debug!("mcc server still not connected for {uri}, queuing for retry");
+            warn!("mcc server still not connected for {uri}, queuing for retry");
             state.diags.pending.insert(uri.clone(), version);
             return;
         }
@@ -440,13 +444,66 @@ async fn parse_and_publish(
     let uri_str = uri.path();
     // Serialize RPC access: mcc is single-threaded, concurrent requests crash it.
     let _rpc_guard = state.rpc_lock.lock().await;
-    // Pass current document text so mcc parses live content (not stale disk file)
-    let content_for_rpc: Option<&str> = Some(&text);
-    let sem = match server.sem(uri_str, content_for_rpc).await {
-        Ok(sem) => sem,
+    // Strategy: try without content first (uses pre-loaded workspace data with
+    // correct lapper from load_project). Fall back to content-based parsing only
+    // if the workspace doesn't have the file yet (e.g. new files added after init).
+    //
+    // Content-based sem can produce 0 lapper entries when the workspace state
+    // is corrupted by prior in-memory parses. The no-content path uses the
+    // original load_project data which has a correctly built lapper.
+    let sem = match server.sem(uri_str, None).await {
+        Ok(s) if !s.tokens.is_empty() => {
+            info!(
+                "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries, result_id={:?}",
+                uri_str, s.tokens.len(), s.symbols.lapper.len(), s.result_id,
+            );
+            s
+        }
+        Ok(_empty) => {
+            // Empty tokens — file not in workspace yet, try with content
+            info!(
+                "sem RPC (no-content) returned empty for {}: trying with content",
+                uri_str,
+            );
+            let content_for_rpc: Option<&str> = Some(&text);
+            match server.sem(uri_str, content_for_rpc).await {
+                Ok(sem_with_content) => {
+                    info!(
+                        "sem RPC (content fallback) OK for {}: {} tokens, {} lapper entries",
+                        uri_str,
+                        sem_with_content.tokens.len(),
+                        sem_with_content.symbols.lapper.len(),
+                    );
+                    sem_with_content
+                }
+                Err(e) => {
+                    warn!("sem RPC (content fallback) FAILED for {uri}: {e}");
+                    return;
+                }
+            }
+        }
         Err(e) => {
-            debug!("sem RPC FAILED for {uri}: {e}");
-            return;
+            // No-content failed — file not in workspace, try with content
+            warn!("sem RPC (no-content) FAILED for {uri}: {e} — retrying with content");
+            let content_for_rpc: Option<&str> = Some(&text);
+            match server.sem(uri_str, content_for_rpc).await {
+                Ok(sem_with_content) => {
+                    info!(
+                        "sem RPC (content fallback) OK for {}: {} tokens, {} lapper entries",
+                        uri_str,
+                        sem_with_content.tokens.len(),
+                        sem_with_content.symbols.lapper.len(),
+                    );
+                    sem_with_content
+                }
+                Err(e2) => {
+                    warn!(
+                        "sem RPC FAILED for {uri} (both paths): no-content={}, content={}",
+                        e, e2,
+                    );
+                    return;
+                }
+            }
         }
     };
 
@@ -454,7 +511,7 @@ async fn parse_and_publish(
     let mut diagnostics = Vec::new();
     match server.diagnostics(uri_str).await {
         Ok(resp) => {
-            debug!(
+            info!(
                 "diagnostics RPC OK for {}: {} diags",
                 uri_str,
                 resp.diagnostics.len()
@@ -546,7 +603,7 @@ async fn parse_and_publish(
             }
         }
         Err(e) => {
-            debug!("diagnostics RPC FAILED for {uri}: {e}");
+            warn!("diagnostics RPC FAILED for {uri}: {e}");
         }
     }
 
