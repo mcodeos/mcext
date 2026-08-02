@@ -451,7 +451,12 @@ async fn parse_and_publish(
     // Content-based sem can produce 0 lapper entries when the workspace state
     // is corrupted by prior in-memory parses. The no-content path uses the
     // original load_project data which has a correctly built lapper.
-    let sem = match server.sem(uri_str, None).await {
+    //
+    // ★ When the file was edited (version.is_some()), use the content path to
+    //   force a fresh re-parse. Otherwise the no-content cache returns stale
+    //   diagnostics from the initial load and edits are never reflected.
+    let content_arg: Option<&str> = if version.is_some() { Some(&text) } else { None };
+    let sem = match server.sem(uri_str, content_arg).await {
         Ok(s) if !s.tokens.is_empty() => {
             info!(
                 "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries, result_id={:?}",
