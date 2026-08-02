@@ -389,7 +389,13 @@ pub fn adjust_lapper_for_changes(
     for change in changes {
         let range = match change.range {
             Some(r) => r,
-            None => return, // Full replace — drop all; fresh data arrives via reparse
+            None => {
+                // Full replace — all entries are stale, drop them.
+                // Fresh data arrives via the debounced reparse.
+                // entries was already taken above; leave it empty.
+                symbols.lapper = entries;
+                return;
+            }
         };
 
         let old_start = match position_to_offset(range.start, rope) {

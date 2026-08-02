@@ -444,70 +444,60 @@ async fn parse_and_publish(
     let uri_str = uri.path();
     // Serialize RPC access: mcc is single-threaded, concurrent requests crash it.
     let _rpc_guard = state.rpc_lock.lock().await;
-    // Strategy: try without content first (uses pre-loaded workspace data with
-    // correct lapper from load_project). Fall back to content-based parsing only
-    // if the workspace doesn't have the file yet (e.g. new files added after init).
-    //
-    // Content-based sem can produce 0 lapper entries when the workspace state
-    // is corrupted by prior in-memory parses. The no-content path uses the
-    // original load_project data which has a correctly built lapper.
-    //
-    // ★ When the file was edited (version.is_some()), use the content path to
-    //   force a fresh re-parse. Otherwise the no-content cache returns stale
-    //   diagnostics from the initial load and edits are never reflected.
-    let content_arg: Option<&str> = if version.is_some() { Some(&text) } else { None };
-    let sem = match server.sem(uri_str, content_arg).await {
-        Ok(s) if !s.tokens.is_empty() => {
-            info!(
-                "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries, result_id={:?}",
-                uri_str, s.tokens.len(), s.symbols.lapper.len(), s.result_id,
-            );
-            s
-        }
-        Ok(_empty) => {
-            // Empty tokens — file not in workspace yet, try with content
-            info!(
-                "sem RPC (no-content) returned empty for {}: trying with content",
-                uri_str,
-            );
-            let content_for_rpc: Option<&str> = Some(&text);
-            match server.sem(uri_str, content_for_rpc).await {
-                Ok(sem_with_content) => {
-                    info!(
-                        "sem RPC (content fallback) OK for {}: {} tokens, {} lapper entries",
-                        uri_str,
-                        sem_with_content.tokens.len(),
-                        sem_with_content.symbols.lapper.len(),
-                    );
-                    sem_with_content
-                }
-                Err(e) => {
-                    warn!("sem RPC (content fallback) FAILED for {uri}: {e}");
-                    return;
-                }
+
+    // ── Data source selection ──
+    // - Initial did_open: workspace data from load_project is authoritative.
+    // - did_change (reparse): content-based sem gives fresh symbols whose
+    //   offsets match the current editor text.  No fallback — if it fails,
+    //   keep the stale cache rather than overwriting with wrong data.
+    let is_reparse = state.symbols.sem_symbols.get(&uri).is_some();
+
+    let (sem, skip_symbols) = if is_reparse {
+        info!("sem RPC (content) for {} (reparse)", uri_str);
+        match server.sem(uri_str, Some(&text)).await {
+            Ok(s) if !s.tokens.is_empty() && !s.symbols.lapper.is_empty() => {
+                info!(
+                    "sem RPC (content) OK for {}: {} tokens, {} lapper entries",
+                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                );
+                (s, false)
+            }
+            Ok(s) => {
+                warn!(
+                    "sem RPC (content) returned tokens={} lapper={} for {} — keeping cached lapper, refreshing diagnostics only",
+                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                );
+                // Return the content-based result for TOKENS (semantic highlighting)
+                // but mark that we should NOT overwrite the lapper cache.
+                (s, true)
+            }
+            Err(e) => {
+                warn!("sem RPC (content) FAILED for {}: {} — skipping update", uri_str, e);
+                return;
             }
         }
-        Err(e) => {
-            // No-content failed — file not in workspace, try with content
-            warn!("sem RPC (no-content) FAILED for {uri}: {e} — retrying with content");
-            let content_for_rpc: Option<&str> = Some(&text);
-            match server.sem(uri_str, content_for_rpc).await {
-                Ok(sem_with_content) => {
-                    info!(
-                        "sem RPC (content fallback) OK for {}: {} tokens, {} lapper entries",
-                        uri_str,
-                        sem_with_content.tokens.len(),
-                        sem_with_content.symbols.lapper.len(),
-                    );
-                    sem_with_content
-                }
-                Err(e2) => {
-                    warn!(
-                        "sem RPC FAILED for {uri} (both paths): no-content={}, content={}",
-                        e, e2,
-                    );
-                    return;
-                }
+    } else {
+        info!("sem RPC (no-content) for {} (initial)", uri_str);
+        match server.sem(uri_str, None).await {
+            Ok(s) if !s.tokens.is_empty() => {
+                info!(
+                    "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries",
+                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                );
+                (s, false)
+            }
+            Ok(s) => {
+                info!(
+                    "sem RPC (no-content) empty for {}: tokens={} lapper={} — queuing for retry",
+                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                );
+                state.diags.pending.insert(uri.clone(), version);
+                return;
+            }
+            Err(e) => {
+                warn!("sem RPC (no-content) FAILED for {}: {} — queuing for retry", uri_str, e);
+                state.diags.pending.insert(uri.clone(), version);
+                return;
             }
         }
     };
@@ -634,13 +624,16 @@ async fn parse_and_publish(
         .registered_uris
         .insert(uri.clone(), mc_uri.clone());
 
-    // ★ §7.6: result_id dedup — skip recompute if mcc data unchanged
+    // ★ §7.6: result_id dedup — skip recompute if mcc data unchanged.
+    //   Only for initial load (not reparse), where the data comes from
+    //   the stable workspace.  Reparse always updates the cache.
     let mcc_result_id = sem.result_id.clone();
-    let should_skip = mcc_result_id
-        .as_ref()
-        .is_some_and(|rid| state.symbols.tokens.last_result_id(&uri).as_ref() == Some(rid));
+    let should_skip = !is_reparse
+        && mcc_result_id
+            .as_ref()
+            .is_some_and(|rid| state.symbols.tokens.last_result_id(&uri).as_ref() == Some(rid));
 
-    if !should_skip {
+    if !should_skip && !skip_symbols {
         // Store sem_symbols for goto_definition and other features
         let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
         state
@@ -938,6 +931,10 @@ impl LanguageServer for Backend {
         // ready), do an on-the-fly sem call to populate it.
         // Only do this AFTER init is complete — concurrent RPC during init
         // (e.g. with Phase 2's load_project) will crash the single-threaded mcc.
+        //
+        // ★ Use a short timeout on rpc_lock acquisition: if parse_and_publish
+        //   is holding the lock for a content-based re-parse, we don't want
+        //   F12 to hang. Return None and let the user retry.
         if self.state.symbols.sem_symbols.get(&uri).is_none()
             && self
                 .state
@@ -950,8 +947,16 @@ impl LanguageServer for Backend {
                 if let Some(server) = server_guard.as_ref() {
                     if server.is_connected() {
                         let text: String = rope.to_string();
-                        // Serialize with other RPC calls (init, parse_and_publish)
-                        let _rpc_guard = self.state.rpc_lock.lock().await;
+                        // Serialize with other RPC calls, but don't block forever
+                        let sem_result = tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            self.state.rpc_lock.lock(),
+                        )
+                        .await;
+                        let Ok(_rpc_guard) = sem_result else {
+                            info!("goto_definition: rpc_lock timeout for {}, skipping on-the-fly sem", uri.path());
+                            return Ok(crate::features::gotodef::resolve(&self.state, &uri, pos));
+                        };
                         if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
                             let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
                             info!(
