@@ -458,7 +458,9 @@ async fn parse_and_publish(
             Ok(s) if !s.tokens.is_empty() && !s.symbols.lapper.is_empty() => {
                 info!(
                     "sem RPC (content) OK for {}: {} tokens, {} lapper entries",
-                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                    uri_str,
+                    s.tokens.len(),
+                    s.symbols.lapper.len(),
                 );
                 (s, false)
             }
@@ -472,7 +474,10 @@ async fn parse_and_publish(
                 (s, true)
             }
             Err(e) => {
-                warn!("sem RPC (content) FAILED for {}: {} — skipping update", uri_str, e);
+                warn!(
+                    "sem RPC (content) FAILED for {}: {} — skipping update",
+                    uri_str, e
+                );
                 return;
             }
         }
@@ -482,20 +487,27 @@ async fn parse_and_publish(
             Ok(s) if !s.tokens.is_empty() => {
                 info!(
                     "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries",
-                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                    uri_str,
+                    s.tokens.len(),
+                    s.symbols.lapper.len(),
                 );
                 (s, false)
             }
             Ok(s) => {
                 info!(
                     "sem RPC (no-content) empty for {}: tokens={} lapper={} — queuing for retry",
-                    uri_str, s.tokens.len(), s.symbols.lapper.len(),
+                    uri_str,
+                    s.tokens.len(),
+                    s.symbols.lapper.len(),
                 );
                 state.diags.pending.insert(uri.clone(), version);
                 return;
             }
             Err(e) => {
-                warn!("sem RPC (no-content) FAILED for {}: {} — queuing for retry", uri_str, e);
+                warn!(
+                    "sem RPC (no-content) FAILED for {}: {} — queuing for retry",
+                    uri_str, e
+                );
                 state.diags.pending.insert(uri.clone(), version);
                 return;
             }
@@ -954,7 +966,10 @@ impl LanguageServer for Backend {
                         )
                         .await;
                         let Ok(_rpc_guard) = sem_result else {
-                            info!("goto_definition: rpc_lock timeout for {}, skipping on-the-fly sem", uri.path());
+                            info!(
+                                "goto_definition: rpc_lock timeout for {}, skipping on-the-fly sem",
+                                uri.path()
+                            );
                             return Ok(crate::features::gotodef::resolve(&self.state, &uri, pos));
                         };
                         if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
