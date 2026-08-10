@@ -4,14 +4,14 @@
 //! `textDocument/semanticTokens/delta`, we compute delta based on this.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 
 /// Tokens state
 #[derive(Debug)]
 pub struct TokensState {
-    next_id: AtomicU64,
+    next_id: AtomicU32,
     last: RwLock<HashMap<Url, TokenEntry>>,
 }
 
@@ -24,18 +24,18 @@ struct TokenEntry {
 impl TokensState {
     pub fn new() -> Self {
         Self {
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU32::new(1),
             last: RwLock::new(HashMap::new()),
         }
     }
 
     /// Get next result_id (monotonically increasing)
-    pub fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Store latest tokens for URI (with auto-generated numeric id)
-    pub fn store(&self, uri: Url, id: u64, tokens: Vec<SemanticToken>) {
+    pub fn store(&self, uri: Url, id: u32, tokens: Vec<SemanticToken>) {
         let result_id = id.to_string();
         let mut last = self.last.write().unwrap_or_else(|e| {
             tracing::warn!("tokens lock poisoned, attempting recovery");
