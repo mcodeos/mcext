@@ -218,6 +218,8 @@ fn kind_label(kind: u8) -> &'static str {
         25 => "bus",             // BusDef
         26 => "→ bus",           // BusRef
         27 => "unknown",         // UnknownDef
+        28 => "bus member",      // BusMemberDef
+        29 => "→ bus member",    // BusMemberRef
         _ => "?",
     }
 }
