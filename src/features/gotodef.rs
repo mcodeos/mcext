@@ -291,6 +291,8 @@ mod tests {
         "BusDef",
         "BusRef",
         "UnknownDef",
+        "BusMemberDef",
+        "BusMemberRef",
     ];
     fn kind_ordinal(name: &str) -> u8 {
         KIND_NAMES.iter().position(|&k| k == name).unwrap() as u8
@@ -412,6 +414,8 @@ mod f12_e2e_tests {
         "BusDef",
         "BusRef",
         "UnknownDef",
+        "BusMemberDef",
+        "BusMemberRef",
     ];
 
     fn kind_ordinal(name: &str) -> u8 {
@@ -594,8 +598,8 @@ mod f12_e2e_tests {
 
     #[test]
     fn all_known_kinds_have_explicit_rank() {
-        // Verify all 24 SymbolKind ordinals have explicit rank entries.
-        for kind in 0u8..27 {
+        // Verify all 30 SymbolKind ordinals have explicit rank entries.
+        for kind in 0u8..30 {
             let rank = kind_rank(kind);
             assert!(
                 rank < 7,

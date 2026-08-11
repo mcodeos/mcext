@@ -121,6 +121,8 @@ fn collect_local_symbols(
             18 => (CompletionItemKind::ENUM_MEMBER, "Enum value"), // EnumValDef
             20 => (CompletionItemKind::INTERFACE, "Role"), // RoleDef
             22 => (CompletionItemKind::CONSTANT, "Define"), // DefineDef
+            25 => (CompletionItemKind::PROPERTY, "Bus"),    // BusDef
+            28 => (CompletionItemKind::PROPERTY, "Bus member"), // BusMemberDef
             _ => continue,
         };
 
