@@ -133,7 +133,22 @@ fn resolve_symbol_hover(
         }
         // Reference symbols — try to resolve to definition
         1 | 3 | 17 | 19 | 9 | 11 | 13 | 15 | 7 => {
-            resolve_reference_hover(state, &name, info.kind, &info.scope)
+            // Carry the RefDefMap (same source as F12) so pin/port/label refs
+            // can show their definition instead of a bare `— → pin`.
+            let ref_def_map = {
+                let cell = state.symbols.sem_symbols.get(uri)?;
+                let guard = cell.lock().ok()?;
+                guard.ref_def_map.clone()
+            };
+            resolve_reference_hover(
+                state,
+                uri,
+                &name,
+                info.kind,
+                info.id,
+                &info.scope,
+                ref_def_map.as_ref(),
+            )
         }
         // Instance definitions / declarations
         2 => format_symbol_hover(&name, "instance", &info.scope),
@@ -144,9 +159,12 @@ fn resolve_symbol_hover(
 /// Resolve a reference (ref kind) to its definition for hover display.
 fn resolve_reference_hover(
     state: &WorkspaceState,
+    current_uri: &Url,
     name: &str,
     kind: u8,
+    id: u32,
     scope: &str,
+    ref_def_map: Option<&crate::rpc::RefDefMapData>,
 ) -> Option<Hover> {
     let snap = state.project.index.snapshot();
 
@@ -156,6 +174,17 @@ fn resolve_reference_hover(
         17 => Some(IndexKind::Enum),     // EnumRef
         _ => None,
     };
+
+    // ★ RefDefMap lookup — precise def file + span (same source as F12).
+    if let Some(map) = ref_def_map {
+        if let Some(entry) = map.lookup(kind, id) {
+            if let Some(hover) =
+                resolve_defmap_hover(state, current_uri, name, kind, entry, map)
+            {
+                return Some(hover);
+            }
+        }
+    }
 
     // Try index lookup first
     if let Some(ik) = index_kind {
@@ -186,6 +215,60 @@ fn resolve_reference_hover(
     } else {
         format_symbol_hover(name, kind_label(kind), "")
     }
+}
+
+/// Build a hover from a RefDefMap def entry: definition file + the source
+/// line containing the def (e.g. `io [16, 17, 21] = ADC::ADC.DIFF(Receiver)`).
+fn resolve_defmap_hover(
+    state: &WorkspaceState,
+    current_uri: &Url,
+    name: &str,
+    kind: u8,
+    entry: &crate::rpc::RefDefEntryData,
+    map: &crate::rpc::RefDefMapData,
+) -> Option<Hover> {
+    let def_uri_str = map.files.get(entry.file_id as usize)?;
+    let def_url = if def_uri_str.starts_with("file://") || def_uri_str.starts_with("untitled:") {
+        Url::parse(def_uri_str).ok()?
+    } else {
+        Url::from_file_path(def_uri_str).ok()?
+    };
+
+    let def_rope = if let Some(r) = state.document_rope(&def_url) {
+        r
+    } else if def_url == *current_uri {
+        state.document_rope(current_uri)?
+    } else {
+        read_file_to_rope(&def_url)?
+    };
+
+    let start = entry.def_span[0] as usize;
+    let pos = crate::common::position::offset_to_position(start, &def_rope)?;
+    let def_line = def_rope
+        .get_line(pos.line as usize)?
+        .to_string()
+        .trim()
+        .to_string();
+
+    let file_label = def_url
+        .to_file_path()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| def_uri_str.clone());
+    let ref_kind = kind_label(kind);
+    let lines = vec![
+        format!("→ `{}` ({})", name, ref_kind),
+        format!("```\n{}\n```", def_line),
+        format!("📄 {}:{}", file_label, pos.line + 1),
+    ];
+    format_markdown_hover(&lines)
+}
+
+/// Read a file into a rope (cross-file def lookup).
+fn read_file_to_rope(url: &Url) -> Option<Rope> {
+    let path = url.to_file_path().ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(Rope::from_str(&content))
 }
 
 // ============================================================================
@@ -416,5 +499,104 @@ mod tests {
         };
         let result = resolve(&state, &params);
         assert!(result.is_none(), "expected None for out-of-bounds");
+    }
+
+    #[test]
+    fn pinref_hover_shows_def_line_via_refdefmap() {
+        // `uC.ADC{P,N}` (PinIfaceRef) must resolve through the RefDefMap to
+        // its definition line and show it — not a bare `— → pin`.
+        use crate::rpc::{LapperEntry, RefDefEntryData, RefDefMapData};
+        use crate::state::RpcSemSymbols;
+        use std::sync::{Arc, Mutex};
+
+        let source = "module main\n{\n    MIC{P,N} -> uC.ADC{P,N}\n    MCU uC\n}\nio [16, 17, 21] = ADC::ADC.DIFF(Receiver)\n";
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///test.mc").unwrap();
+        state.insert_document(uri.clone(), Rope::from_str(source), 1);
+
+        // Ref: `uC.ADC{P,N}` → PinIfaceRef(15) id=7; def: `ADC` label → PinIfaceDef(14).
+        let ref_start = byte_offset(source, "uC.ADC{P,N}", 0).unwrap();
+        let ref_end = ref_start + "uC.ADC{P,N}".len();
+        let def_start = byte_offset(source, "ADC::ADC.DIFF", 0).unwrap();
+        let def_end = def_start + 3; // `ADC` label only
+
+        let lapper = vec![LapperEntry {
+            kind: 15,
+            id: 7,
+            start: ref_start,
+            stop: ref_end,
+            scope: "main".into(),
+            file: "file:///test.mc".into(),
+        }];
+        let ref_def_map = RefDefMapData {
+            entries: vec![RefDefEntryData {
+                ref_kind: 15,
+                ref_id: 7,
+                file_id: 0,
+                def_span: [def_start as u32, def_end as u32],
+                def_kind: 14,
+                container_id: 0,
+                cmie_kind: 255,
+            }],
+            files: vec!["file:///test.mc".to_string()],
+            containers: vec!["".to_string()],
+            func_names: vec![],
+            kind_names: vec![],
+            result_id: 0,
+            index: std::sync::OnceLock::new(),
+            kind_map: std::sync::OnceLock::new(),
+        };
+        let symbols = RpcSemSymbols {
+            lapper,
+            local_declares: vec![],
+            local_references: vec![],
+            global_declares: vec![],
+            global_references: vec![],
+            ref_def_map: Some(ref_def_map),
+        };
+        state
+            .symbols
+            .sem_symbols
+            .insert(uri.clone(), Arc::new(Mutex::new(symbols)));
+
+        // Hover on the middle of `uC.ADC{P,N}`.
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: pos_at(source, ref_start + 5),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hover = resolve(&state, &params).unwrap();
+        match &hover.contents {
+            HoverContents::Markup(mc) => {
+                assert!(
+                    mc.value.contains("→ pin"),
+                    "expected ref kind label, got: {}",
+                    mc.value
+                );
+                assert!(
+                    mc.value.contains("ADC::ADC.DIFF"),
+                    "expected def line in tooltip, got: {}",
+                    mc.value
+                );
+                assert!(
+                    mc.value.contains("test.mc"),
+                    "expected def file in tooltip, got: {}",
+                    mc.value
+                );
+            }
+            _ => panic!("expected Markup"),
+        }
+    }
+
+    fn byte_offset(source: &str, needle: &str, nth: usize) -> Option<usize> {
+        source.match_indices(needle).nth(nth).map(|(i, _)| i)
+    }
+
+    fn pos_at(source: &str, offset: usize) -> Position {
+        let rope = Rope::from_str(source);
+        crate::common::position::offset_to_position(offset, &rope)
+            .unwrap_or(Position::new(0, 0))
     }
 }
