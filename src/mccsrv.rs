@@ -322,6 +322,21 @@ impl MccServer {
             .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
+    /// Call `build.viz` RPC to render a circuit to a self-contained HTML string.
+    pub async fn build_viz(
+        &self,
+        entry: &str,
+        top: Option<&str>,
+        libs: &[String],
+        layouter: Option<&str>,
+    ) -> Result<String, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client
+            .build_viz(entry, top, libs, layouter)
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
+    }
+
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
         // Check MCC_PATH env var first

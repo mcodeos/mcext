@@ -35,12 +35,12 @@ pub fn kind_rank(kind: u8) -> u8 {
     // DefineDef=22, AttrDef=23, FuncParamRef=24, BusDef=25,
     // BusRef=26, UnknownDef=27, BusMemberDef=28, BusMemberRef=29
     match kind {
-        0 | 8 | 20 => 0,                       // ClassDef, FuncDef, RoleDef
-        1 => 1,                                // ClassRef
-        3 | 5 | 4 | 7 | 9 => 2,                // InstRef, PortRef, PortDef, LabelRef, FuncRef
-        10..=15 => 3,                          // Pin*Def/Pin*Ref
-        2 | 6 => 4,                            // InstDef, LabelDef
-        16..=19 => 5,                          // Enum*
+        0 | 8 | 20 => 0,                                 // ClassDef, FuncDef, RoleDef
+        1 => 1,                                          // ClassRef
+        3 | 5 | 4 | 7 | 9 => 2, // InstRef, PortRef, PortDef, LabelRef, FuncRef
+        10..=15 => 3,           // Pin*Def/Pin*Ref
+        2 | 6 => 4,             // InstDef, LabelDef
+        16..=19 => 5,           // Enum*
         21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 => 6, // ParamDef, DefineDef, AttrDef, FuncParamRef, BusDef, BusRef, UnknownDef, BusMemberDef, BusMemberRef
         _ => 7,
     }

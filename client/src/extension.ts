@@ -21,6 +21,7 @@ import {
   TextEdit,
   Selection,
   Uri,
+  ViewColumn,
 } from "vscode";
 
 import {
@@ -32,6 +33,7 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient;
+let clientStarted: Promise<void> | undefined;
 // type a = Parameters<>;
 
 export async function activate(context: ExtensionContext) {
@@ -68,7 +70,67 @@ export async function activate(context: ExtensionContext) {
   // Create the language client and start the client.
   client = new LanguageClient("mcode", "MCode", serverOptions, clientOptions);
   // activateInlayHints(context);
-  client.start();
+  clientStarted = client.start();
+
+  // viz circuit preview: build + render the active .mc file into a webview.
+  context.subscriptions.push(
+    commands.registerCommand("mcode.previewViz", previewViz)
+  );
+}
+
+async function previewViz(): Promise<void> {
+  const editor = window.activeTextEditor;
+  if (!editor || editor.document.languageId !== "mcode") {
+    window.showInformationMessage(
+      "MCode: open a .mc file to preview its circuit."
+    );
+    return;
+  }
+
+  const doc = editor.document;
+  const filePath = doc.uri.fsPath;
+  const title = `Circuit: ${filePath.split("/").pop() ?? filePath}`;
+
+  const panel = window.createWebviewPanel(
+    "mcodeViz",
+    title,
+    ViewColumn.Beside,
+    { enableScripts: true }
+  );
+  panel.webview.html = loadingHtml("Rendering circuit…");
+
+  try {
+    if (clientStarted) {
+      await clientStarted;
+    }
+    const result = (await client.sendRequest("workspace/executeCommand", {
+      command: "mcode.viz",
+      arguments: [filePath],
+    })) as { ok: boolean; html?: string; error?: string } | null;
+
+    if (result && result.ok && result.html) {
+      panel.webview.html = result.html;
+    } else {
+      panel.webview.html = errorHtml(result?.error ?? "build.viz returned no html");
+    }
+  } catch (e) {
+    panel.webview.html = errorHtml(String(e));
+  }
+}
+
+function loadingHtml(message: string): string {
+  return `<!DOCTYPE html><html><body><p>${escapeHtml(message)}</p></body></html>`;
+}
+
+function errorHtml(message: string): string {
+  return `<!DOCTYPE html><html><body><pre>${escapeHtml(message)}</pre></body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 export function deactivate(): Thenable<void> | undefined {

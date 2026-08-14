@@ -165,6 +165,10 @@ impl Backend {
             document_range_formatting_provider: Some(OneOf::Left(true)),
             inlay_hint_provider: Some(OneOf::Left(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec!["mcode.viz".to_string()],
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
             ..ServerCapabilities::default()
         }
     }
@@ -698,7 +702,7 @@ async fn parse_and_publish(
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        let cfg = params
+        let mut cfg = params
             .initialization_options
             .map(ServerConfig::from_initialization_options)
             .unwrap_or_default();
@@ -746,7 +750,7 @@ impl LanguageServer for Backend {
         }
 
         // Trigger project index scan
-        if let Some(root) = project_root {
+        if let Some(root) = &project_root {
             let _ = self
                 .state
                 .project
@@ -758,6 +762,10 @@ impl LanguageServer for Backend {
             );
         }
 
+        // Persist the *resolved* project root (workspace-folder fallback) so that
+        // execute_command's mcode.viz can locate project.toml even when the client
+        // doesn't pass initializationOptions.project_root.
+        cfg.project_root = project_root.clone();
         self.config.insert("current".to_string(), cfg);
 
         Ok(InitializeResult {
@@ -1197,9 +1205,101 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
-        debug!("execute_command");
-        Ok(None)
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        debug!("execute_command: {}", params.command);
+
+        if params.command != "mcode.viz" {
+            return Ok(None);
+        }
+
+        // arg[0] = entry .mc file path (absolute fsPath from the TS client) — optional.
+        let entry_arg = params
+            .arguments
+            .first()
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let project_root = self
+            .config
+            .get("current")
+            .and_then(|c| c.project_root.clone());
+
+        info!(
+            "mcode.viz: entry_arg={:?} project_root={:?}",
+            entry_arg, project_root
+        );
+
+        // Resolve entry + top + libs. The circuit viz renders the *project* top
+        // module, so when a project.toml exists we always use its entry/top_module
+        // (NOT the active file — a sub-file like us513.mc defines a component, not
+        // the top). Only a standalone .mc file (no project.toml) uses the active file.
+        let (entry, top, libs): (String, Option<String>, Vec<String>) = match &project_root {
+            Some(root) => match ProjectConfig::load_from(root) {
+                Some(c) => (
+                    c.entry_path(root),
+                    c.project.top_module.clone(),
+                    c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                ),
+                None => {
+                    // No project.toml: preview the standalone file itself.
+                    match &entry_arg {
+                        Some(e) => (normalize_entry_path(e), None, Vec::new()),
+                        None => {
+                            return Ok(Some(serde_json::json!({
+                                "ok": false,
+                                "error": "mcode.viz: no project.toml entry and no file argument",
+                            })))
+                        }
+                    }
+                }
+            },
+            None => match &entry_arg {
+                Some(e) => (normalize_entry_path(e), None, Vec::new()),
+                None => {
+                    return Ok(Some(serde_json::json!({
+                        "ok": false,
+                        "error": "mcode.viz: no project root and no file argument",
+                    })))
+                }
+            },
+        };
+
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.viz: mcc server not initialized",
+            })));
+        };
+        if !server.is_connected() {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.viz: mcc server not connected",
+            })));
+        }
+
+        info!(
+            "mcode.viz: building entry={entry} top={:?} libs={:?}",
+            top, libs
+        );
+
+        // Serialize with other RPC calls (mcc is single-threaded — see server/mod.rs:445).
+        let _rpc_guard = self.state.rpc_lock.lock().await;
+        match server.build_viz(&entry, top.as_deref(), &libs, None).await {
+            Ok(html) => {
+                info!("mcode.viz: ok, html_len={}", html.len());
+                Ok(Some(serde_json::json!({"ok": true, "html": html})))
+            }
+            Err(e) => {
+                warn!("mcode.viz: build failed: {e}");
+                Ok(Some(
+                    serde_json::json!({"ok": false, "error": e.to_string()}),
+                ))
+            }
+        }
     }
 
     // Phase 5: document links disabled — hover handles this now
@@ -1216,4 +1316,13 @@ impl LanguageServer for Backend {
         let _guard = span.enter();
         Ok(crate::features::hover::resolve(&self.state, &params))
     }
+}
+
+/// Strip a `file://` URI prefix so `build.viz` receives a plain filesystem path.
+/// The TS client normally passes `Uri.fsPath` already; this is a safety net.
+fn normalize_entry_path(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix("file://") {
+        return rest.to_string();
+    }
+    raw.to_string()
 }
