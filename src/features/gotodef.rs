@@ -4,12 +4,12 @@
 //! Data source: RpcSemSymbols from sem RPC
 
 use crate::common::position::{offset_to_position, position_to_offset};
-use crate::features::symbols::kind_rank;
+use crate::features::symbols::{kind_label, kind_rank};
 use crate::state::WorkspaceState;
 use crate::util::usechk::{parse_use_prefix, resolve_use_path, strip_use_keyword};
 use ropey::Rope;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Compute goto definition response.
 pub fn resolve(
@@ -102,25 +102,23 @@ pub fn resolve(
         ) {
             return Some(resp);
         }
-        // ★ Self-locating kinds: when no RefDefMap hit, return an empty Array
-        // (instead of a Scalar self-locate) to prevent VS Code's word-search
-        // fallback. Applies to *Def and Enum*Ref misses.
-        if matches!(interval.kind, 16..=19) {
-            return Some(GotoDefinitionResponse::Array(vec![]));
-        }
-        // ★ P6: Self-locate with correct file URI from lapper entry
-        let def_uri_str = if !interval.file.is_empty() {
-            &interval.file
-        } else {
-            uri.as_str()
-        };
-        return cross_file_response(
-            state,
-            def_uri_str,
-            [interval.start, interval.stop],
-            &rope,
+        // ★ Not found: never self-locate. Returning the symbol's own span
+        // (or an empty Array) makes VS Code treat the result as "no
+        // definition" and fall back to its built-in word search, jumping to
+        // the next occurrence of the same word in the file (e.g. F12 on the
+        // `USB_VBUS_1` base previously jumped to `USB_VBUS_1.GND`). Log a
+        // warning and return None so VS Code shows "No definition found".
+        warn!(
+            "goto_def: no definition found for {} '{}' (kind={} id={}) at [{},{}] in {}",
+            kind_label(interval.kind),
+            name,
+            interval.kind,
+            interval.id,
+            interval.start,
+            interval.stop,
             uri,
         );
+        return None;
     }
 
     None
@@ -299,45 +297,45 @@ mod tests {
     }
 
     #[test]
-    fn enum_class_def_returns_empty_array() {
-        // Document has `enum PKG { SOP8, QFN20 }` and we place an
-        // `enum_class_def` lapper entry on the whole line.
+    fn enum_class_def_returns_none_on_miss() {
+        // A definition kind has no RefDefMap entry: goto-def must return
+        // None (VS Code shows "No definition found") instead of self-locating
+        // (which makes VS Code fall back to word search and jump to the next
+        // occurrence of the same word in the file).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
         let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumDef"), 0, 0, 9)]);
-        let response = resolve(
-            &state,
-            &uri,
-            Position::new(0, 5), /* inside `enum PKG {` */
+        // Cursor inside `enum PKG {`
+        let response = resolve(&state, &uri, Position::new(0, 5));
+        assert!(
+            response.is_none(),
+            "expected None on RefDefMap miss, got {response:?}"
         );
-        match response {
-            Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
-            other => panic!("expected empty Array, got {other:?}"),
-        }
     }
 
     #[test]
-    fn enum_value_def_returns_local_self_response() {
-        // `enum_value_def` self-locates with an empty Array to prevent
-        // VS Code word-search fallback (mirrors `port_def` / `class_def`).
+    fn enum_value_def_returns_none_on_miss() {
+        // `enum_value_def` has no RefDefMap entry — same as above: None, no
+        // self-locate (mirrors `port_def` / `class_def`).
         let source = "enum PKG {\n    SOP8,\n    QFN20,\n}\n";
         let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumValDef"), 1, 11, 21)]);
         let response = resolve(&state, &uri, Position::new(1, 4));
-        match response {
-            Some(GotoDefinitionResponse::Array(v)) => assert!(v.is_empty()),
-            other => panic!("expected empty Array for self-locate, got {other:?}"),
-        }
+        assert!(
+            response.is_none(),
+            "expected None on RefDefMap miss, got {response:?}"
+        );
     }
 
     #[test]
-    fn enum_class_ref_miss_self_locate() {
-        // §4.2: RefDefMap miss → self-locate (empty Array), never None.
+    fn enum_class_ref_miss_returns_none() {
+        // §4.2: RefDefMap miss → None, never a self-locate (no word-search
+        // fallback trigger for VS Code).
         let source = "package = PKG.SOP8\n";
         let (state, uri) = state_with_lapper(source, vec![(kind_ordinal("EnumRef"), 7, 10, 13)]);
         let response = resolve(&state, &uri, Position::new(0, 11));
-        match response {
-            Some(GotoDefinitionResponse::Array(v)) if v.is_empty() => {}
-            other => panic!("expected empty Array for RefDefMap miss, got {other:?}"),
-        }
+        assert!(
+            response.is_none(),
+            "expected None on RefDefMap miss, got {response:?}"
+        );
     }
 
     #[test]
@@ -609,9 +607,10 @@ mod f12_e2e_tests {
     }
 }
 
-/// Unified ref→def resolution for handlers that follow the 4-level
-/// scope-priority lookup. Returns `None` if unresolved (caller may
-/// fall back to self-locate or error).
+/// Unified ref→def resolution via the RefDefMap. Returns `None` when the
+/// ref has no registered definition — callers must NOT self-locate (that
+/// makes VS Code fall back to word search and jump to the next occurrence);
+/// they log a warning and return a "no definition found" response.
 fn resolve_ref_to_def(
     state: &WorkspaceState,
     symbols: &crate::state::RpcSemSymbols,
