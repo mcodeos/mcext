@@ -178,9 +178,7 @@ fn resolve_reference_hover(
     // ★ RefDefMap lookup — precise def file + span (same source as F12).
     if let Some(map) = ref_def_map {
         if let Some(entry) = map.lookup(kind, id) {
-            if let Some(hover) =
-                resolve_defmap_hover(state, current_uri, name, kind, entry, map)
-            {
+            if let Some(hover) = resolve_defmap_hover(state, current_uri, name, kind, entry, map) {
                 return Some(hover);
             }
         }
@@ -596,7 +594,6 @@ mod tests {
 
     fn pos_at(source: &str, offset: usize) -> Position {
         let rope = Rope::from_str(source);
-        crate::common::position::offset_to_position(offset, &rope)
-            .unwrap_or(Position::new(0, 0))
+        crate::common::position::offset_to_position(offset, &rope).unwrap_or(Position::new(0, 0))
     }
 }

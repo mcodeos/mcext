@@ -154,6 +154,32 @@ impl MccRpcClient {
         let result = self.call("lib.info", json!({"name": name})).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
+
+    /// Build + render viz to a self-contained HTML string (circuit viewer).
+    ///
+    /// `libs` are pre-loaded by mcc via `lib.load` during init, but passing them
+    /// explicitly keeps `build.viz` deterministic (mirrors `mcc build --viz`).
+    pub async fn build_viz(
+        &self,
+        entry: &str,
+        top: Option<&str>,
+        libs: &[String],
+        layouter: Option<&str>,
+    ) -> Result<String, RpcError> {
+        let mut params = json!({"entry": entry, "libs": libs, "include_system": true});
+        if let Some(t) = top {
+            params["top"] = json!(t);
+        }
+        if let Some(l) = layouter {
+            params["layouter"] = json!(l);
+        }
+        let result = self.call("build.viz", params).await?;
+        result
+            .get("html")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| RpcError::Parse("build.viz response missing 'html'".into()))
+    }
 }
 
 /// Response from `diagnostics` RPC

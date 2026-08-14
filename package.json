@@ -22,10 +22,27 @@
 	},
 	"enabledApiProposals": [],
 	"activationEvents": [
-		"onLanguage:mcode"
+		"onLanguage:mcode",
+		"onCommand:mcode.previewViz"
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
+		"commands": [
+			{
+				"command": "mcode.previewViz",
+				"title": "MCode: Preview Circuit (viz)",
+				"category": "MCode"
+			}
+		],
+		"menus": {
+			"editor/title": [
+				{
+					"command": "mcode.previewViz",
+					"when": "resourceLangId == mcode",
+					"group": "navigation"
+				}
+			]
+		},
 		"languages": [
 			{
 				"id": "mcode",
