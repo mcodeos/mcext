@@ -73,12 +73,14 @@ export async function activate(context: ExtensionContext) {
   clientStarted = client.start();
 
   // viz circuit preview: build + render the active .mc file into a webview.
+  // Optional command argument = top module name for no-project files; when
+  // omitted, mcc falls back to the first module of the file (usually `main`).
   context.subscriptions.push(
-    commands.registerCommand("mcode.previewViz", previewViz)
+    commands.registerCommand("mcode.previewViz", (top?: string) => previewViz(top))
   );
 }
 
-async function previewViz(): Promise<void> {
+async function previewViz(top?: string): Promise<void> {
   const editor = window.activeTextEditor;
   if (!editor || editor.document.languageId !== "mcode") {
     window.showInformationMessage(
@@ -105,7 +107,7 @@ async function previewViz(): Promise<void> {
     }
     const result = (await client.sendRequest("workspace/executeCommand", {
       command: "mcode.viz",
-      arguments: [filePath],
+      arguments: top ? [filePath, top] : [filePath],
     })) as { ok: boolean; html?: string; error?: string } | null;
 
     if (result && result.ok && result.html) {

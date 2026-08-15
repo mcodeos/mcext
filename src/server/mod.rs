@@ -284,39 +284,62 @@ async fn run_server_init(
             } else {
                 info!("Successfully loaded project entry: {}", entry);
             }
-
-            // Fetch project symbols for the index (incl. enum values)
-            info!("Fetching project_symbols for index...");
-            let symbols_result = {
-                let _rpc_guard = state.rpc_lock.lock().await;
-                client.project_symbols().await
-            };
-            if let Ok(resp) = symbols_result {
-                let ec = resp.enums.clone();
-                let ev = resp.enum_values.clone();
-                if let Ok(mut cache) = state.symbols.project_symbols.lock() {
-                    cache.components = resp.components;
-                    cache.interfaces = resp.interfaces;
-                    cache.enums = ec.clone();
-                    cache.modules = resp.modules;
-                    cache.enum_values = ev.clone();
+        } else {
+            // ★ Non-project mode: no project.toml in the opened folder. Every .mc
+            // file is a peer. Preload the first .mc file to warm up the workspace
+            // so that later auto_load reuses the active root instead of creating
+            // a fresh workspace per sub-directory (mcc-side change 1/2).
+            if let Some(first_mc) = find_first_mc_file(root) {
+                info!("Non-project mode: preloading first .mc: {}", first_mc);
+                let load_result = {
+                    let _rpc_guard = state.rpc_lock.lock().await;
+                    client.load_project(&first_mc).await
+                };
+                if let Err(ref e) = load_result {
+                    warn!("Failed to preload '{}': {:?}", first_mc, e);
+                } else {
+                    info!("Successfully preloaded: {}", first_mc);
                 }
-                if let Ok(cache) = state.symbols.project_symbols.lock() {
-                    let _ = state.project.index.send(
-                        crate::index::worker::IndexCommand::UpdateProjectSymbols {
-                            components: cache.components.clone(),
-                            interfaces: cache.interfaces.clone(),
-                            enums: cache.enums.clone(),
-                            modules: cache.modules.clone(),
-                            enum_values: cache.enum_values.clone(),
-                        },
-                    );
-                }
-                info!("project_symbols done → worker updated");
-            } else {
-                warn!("project_symbols RPC failed");
             }
         }
+
+        // ★ Fetch project symbols for the index (incl. enum values) in both modes:
+        // the active workspace holds whatever files have been loaded, and mcc also
+        // returns system-library symbols, so completion is not empty.
+        info!("Fetching project_symbols for index...");
+        let symbols_result = {
+            let _rpc_guard = state.rpc_lock.lock().await;
+            client.project_symbols().await
+        };
+        if let Ok(resp) = symbols_result {
+            let ec = resp.enums.clone();
+            let ev = resp.enum_values.clone();
+            if let Ok(mut cache) = state.symbols.project_symbols.lock() {
+                cache.components = resp.components;
+                cache.interfaces = resp.interfaces;
+                cache.enums = ec.clone();
+                cache.modules = resp.modules;
+                cache.enum_values = ev.clone();
+            }
+            if let Ok(cache) = state.symbols.project_symbols.lock() {
+                let _ = state.project.index.send(
+                    crate::index::worker::IndexCommand::UpdateProjectSymbols {
+                        components: cache.components.clone(),
+                        interfaces: cache.interfaces.clone(),
+                        enums: cache.enums.clone(),
+                        modules: cache.modules.clone(),
+                        enum_values: cache.enum_values.clone(),
+                    },
+                );
+            }
+            info!("project_symbols done -> worker updated");
+        } else {
+            warn!("project_symbols RPC failed");
+        }
+    } else {
+        // No project root at all (no workspace folder and no cwd fallback):
+        // nothing to anchor loading to, so skip project warm-up entirely.
+        warn!("No project root configured - skipping project loading");
     }
 
     // ★ Phase 4: Mark libraries as loaded BEFORE retrying pending diagnostics.
@@ -354,6 +377,27 @@ async fn run_server_init(
             }
         }
     }
+}
+
+/// Recursively find the first `.mc` file under a folder (non-project mode
+/// workspace warm-up). DFS order, any file will do — it only anchors the
+/// workspace root.
+fn find_first_mc_file(root: &std::path::Path) -> Option<String> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().map_or(false, |e| e == "mc") {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Parse + publish diagnostics (executed in debounced task)
@@ -797,7 +841,24 @@ impl LanguageServer for Backend {
 
         // Notify index worker
         let mc_uri = String::from(uri.path());
-        let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
+        let _ = self
+            .state
+            .project
+            .index
+            .send(IndexCommand::AddFile(mc_uri.clone()));
+
+        // Explicitly load the opened file (file + its use closure) so loading is
+        // triggered at open time and anchored at the workspace root, instead of
+        // relying on auto_load scanning sibling files (non-project mode).
+        let server_guard = self.mcc_server.read().await;
+        if let Some(server) = server_guard.as_ref() {
+            if server.is_connected() {
+                if let Some(client) = server.client() {
+                    let _rpc_guard = self.state.rpc_lock.lock().await;
+                    let _ = client.load_project(&mc_uri).await;
+                }
+            }
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -1222,6 +1283,14 @@ impl LanguageServer for Backend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // arg[1] = top module name for no-project viz — optional. When omitted,
+        // mcc falls back to the first module of the entry file (usually `main`).
+        let top_arg = params
+            .arguments
+            .get(1)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         let project_root = self
             .config
             .get("current")
@@ -1246,7 +1315,7 @@ impl LanguageServer for Backend {
                 None => {
                     // No project.toml: preview the standalone file itself.
                     match &entry_arg {
-                        Some(e) => (normalize_entry_path(e), None, Vec::new()),
+                        Some(e) => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
                         None => {
                             return Ok(Some(serde_json::json!({
                                 "ok": false,
@@ -1257,7 +1326,7 @@ impl LanguageServer for Backend {
                 }
             },
             None => match &entry_arg {
-                Some(e) => (normalize_entry_path(e), None, Vec::new()),
+                Some(e) => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
                 None => {
                     return Ok(Some(serde_json::json!({
                         "ok": false,
