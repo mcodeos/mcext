@@ -242,21 +242,24 @@ fn resolve_defmap_hover(
 
     let start = entry.def_span[0] as usize;
     let pos = crate::common::position::offset_to_position(start, &def_rope)?;
-    let def_line = def_rope
-        .get_line(pos.line as usize)?
-        .to_string()
-        .trim()
-        .to_string();
+    // The def name comes from mcc's AST at registration (`RefDefEntryData.
+    // def_name`, e.g. `RES`) — never a text slice of the def line, which
+    // would drift from the real AST span.
+    let def_text = entry.def_name.clone();
 
     let file_label = def_url
         .to_file_path()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| def_uri_str.clone());
-    let ref_kind = kind_label(kind);
+    // ★ CMIE kind (0=Component, 1=Module, 2=Interface, 3=Enum) is more precise
+    // than the ref SymbolKind for class refs: a `::DC` ref whose def is an
+    // `interface` must hover as `→ interface`, not a generic `→ class`. Fall
+    // back to the SymbolKind label when the kind is unknown (255).
+    let ref_kind = cmie_label(entry.cmie_kind).unwrap_or_else(|| kind_label(kind));
     let lines = vec![
         format!("→ `{}` ({})", name, ref_kind),
-        format!("```\n{}\n```", def_line),
+        format!("```\n{}\n```", def_text),
         format!("📄 {}:{}", file_label, pos.line + 1),
     ];
     format_markdown_hover(&lines)
@@ -302,6 +305,19 @@ fn kind_label(kind: u8) -> &'static str {
         28 => "bus member",      // BusMemberDef
         29 => "→ bus member",    // BusMemberRef
         _ => "?",
+    }
+}
+
+/// Label from a CMIE kind ordinal (RefDefEntryData.cmie_kind) — the real kind
+/// of the class/def (0=Component, 1=Module, 2=Interface, 3=Enum). Returns
+/// None for UNKNOWN (255) so callers fall back to the SymbolKind label.
+fn cmie_label(cmie_kind: u8) -> Option<&'static str> {
+    match cmie_kind {
+        0 => Some("→ component"),
+        1 => Some("→ module"),
+        2 => Some("→ interface"),
+        3 => Some("→ enum"),
+        _ => None,
     }
 }
 
@@ -500,9 +516,10 @@ mod tests {
     }
 
     #[test]
-    fn pinref_hover_shows_def_line_via_refdefmap() {
+    fn pinref_hover_shows_def_name_via_refdefmap() {
         // `uC.ADC{P,N}` (PinIfaceRef) must resolve through the RefDefMap to
-        // its definition line and show it — not a bare `— → pin`.
+        // its def and show the def name captured by mcc from the AST node
+        // (RefDefEntryData.def_name) — not a bare `— → pin`.
         use crate::rpc::{LapperEntry, RefDefEntryData, RefDefMapData};
         use crate::state::RpcSemSymbols;
         use std::sync::{Arc, Mutex};
@@ -535,6 +552,7 @@ mod tests {
                 def_kind: 14,
                 container_id: 0,
                 cmie_kind: 255,
+                def_name: "ADC".into(),
             }],
             files: vec!["file:///test.mc".to_string()],
             containers: vec!["".to_string()],
@@ -574,8 +592,13 @@ mod tests {
                     mc.value
                 );
                 assert!(
-                    mc.value.contains("ADC::ADC.DIFF"),
-                    "expected def line in tooltip, got: {}",
+                    mc.value.contains("ADC"),
+                    "expected def name in tooltip, got: {}",
+                    mc.value
+                );
+                assert!(
+                    !mc.value.contains("ADC::ADC.DIFF"),
+                    "expected def name only, got def line: {}",
                     mc.value
                 );
                 assert!(

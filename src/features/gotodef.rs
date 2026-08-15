@@ -441,6 +441,7 @@ mod f12_e2e_tests {
                         def_kind,
                         container_id: 0,
                         cmie_kind: 255,
+                        def_name: String::new(),
                     },
                 )
                 .collect(),
