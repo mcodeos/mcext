@@ -23,6 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 reqwest = { version = "0.12", features = ["json"] }
 mc-rpc-types = { path = "../mc-rpc-types" }
 
-# TOML parsing for project.toml
+# TOML parsing for project manifests (project.toml / manifest.toml / mcc.toml)
 toml = "0.8"
 
