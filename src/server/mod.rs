@@ -238,7 +238,7 @@ async fn run_server_init(
     if let Some(ref root) = project_root {
         if let Some(config) = ProjectConfig::load_from(root) {
             info!(
-                "Auto-loading {} dependencies from project.toml...",
+                "Auto-loading {} dependencies from project manifest...",
                 config.dependency_names().len()
             );
             for lib_name in config.dependency_names() {
@@ -285,7 +285,7 @@ async fn run_server_init(
                 info!("Successfully loaded project entry: {}", entry);
             }
         } else {
-            // ★ Non-project mode: no project.toml in the opened folder. Every .mc
+            // ★ Non-project mode: no project manifest in the opened folder. Every .mc
             // file is a peer. Preload the first .mc file to warm up the workspace
             // so that later auto_load reuses the active root instead of creating
             // a fresh workspace per sub-directory (mcc-side change 1/2).
@@ -807,8 +807,8 @@ impl LanguageServer for Backend {
         }
 
         // Persist the *resolved* project root (workspace-folder fallback) so that
-        // execute_command's mcode.viz can locate project.toml even when the client
-        // doesn't pass initializationOptions.project_root.
+        // execute_command's mcode.viz can locate the project manifest even when
+        // the client doesn't pass initializationOptions.project_root.
         cfg.project_root = project_root.clone();
         self.config.insert("current".to_string(), cfg);
 
@@ -1229,7 +1229,7 @@ impl LanguageServer for Backend {
                 .index
                 .send(IndexCommand::ParseAll(root.clone()));
 
-            // Auto-load project dependencies from project.toml
+            // Auto-load project dependencies from the project manifest
             let mcc_server = self.mcc_server.clone();
             let state_clone = Arc::clone(&self.state);
             let root_clone = root.clone();
@@ -1302,9 +1302,10 @@ impl LanguageServer for Backend {
         );
 
         // Resolve entry + top + libs. The circuit viz renders the *project* top
-        // module, so when a project.toml exists we always use its entry/top_module
-        // (NOT the active file — a sub-file like us513.mc defines a component, not
-        // the top). Only a standalone .mc file (no project.toml) uses the active file.
+        // module, so when a project manifest exists we always use its
+        // entry/top_module (NOT the active file — a sub-file like us513.mc
+        // defines a component, not the top). Only a standalone .mc file (no
+        // project manifest) uses the active file.
         let (entry, top, libs): (String, Option<String>, Vec<String>) = match &project_root {
             Some(root) => match ProjectConfig::load_from(root) {
                 Some(c) => (
@@ -1313,13 +1314,13 @@ impl LanguageServer for Backend {
                     c.dependency_names().iter().map(|s| s.to_string()).collect(),
                 ),
                 None => {
-                    // No project.toml: preview the standalone file itself.
+                    // No project manifest: preview the standalone file itself.
                     match &entry_arg {
                         Some(e) => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
                         None => {
                             return Ok(Some(serde_json::json!({
                                 "ok": false,
-                                "error": "mcode.viz: no project.toml entry and no file argument",
+                                "error": "mcode.viz: no project manifest entry and no file argument",
                             })))
                         }
                     }

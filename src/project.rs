@@ -1,7 +1,9 @@
-//! Project configuration parsing from project.toml
+//! Project configuration parsing from the project manifest
 //!
 //! Handles:
-//! - Detecting project.toml in workspace root
+//! - Detecting the project manifest in workspace root, trying
+//!   project.toml / manifest.toml / mcc.toml in priority order (same as the
+//!   mcc CLI)
 //! - Parsing [project] section (name, version, entry, top_module)
 //! - Parsing [dependencies] section
 //! - Auto-loading dependencies when opening a workspace folder
@@ -11,7 +13,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-/// Project configuration loaded from project.toml
+/// Project manifest file names, in priority order. Kept in sync with the mcc
+/// CLI (`mcc::cli::datadir::PROJECT_MANIFEST_NAMES`); the mcc server parses
+/// any of them with the same TOML schema ([project] + [dependencies]).
+pub const PROJECT_MANIFEST_NAMES: [&str; 3] = ["project.toml", "manifest.toml", "mcc.toml"];
+
+/// Project configuration loaded from a project manifest
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
     pub project: ProjectSection,
@@ -36,45 +43,39 @@ fn default_version() -> String {
 }
 
 impl ProjectConfig {
-    /// Try to find system root by looking for mclibs directory
-    /// Searches upward from project_root until finding a directory containing mclibs/
-    pub fn find_system_root(project_root: &Path) -> Option<PathBuf> {
-        let mut current = project_root.to_path_buf();
-        loop {
-            if current.join("mclibs").exists() {
-                return Some(current.clone());
-            }
-            if !current.pop() {
+    /// Load the project manifest from a directory. Tries the manifest names
+    /// in [`PROJECT_MANIFEST_NAMES`] priority order (same as the mcc CLI).
+    pub fn load_from(root: &Path) -> Option<Self> {
+        let mut toml_path: Option<PathBuf> = None;
+        for name in PROJECT_MANIFEST_NAMES {
+            let p = root.join(name);
+            if p.exists() {
+                if name != "project.toml" {
+                    tracing::warn!(
+                        "deprecated project manifest name '{}'; rename it to project.toml",
+                        p.display()
+                    );
+                }
+                toml_path = Some(p);
                 break;
             }
         }
-        // Fallback: check sibling directory (e.g., project_root/../mclibs)
-        if let Some(parent) = project_root.parent() {
-            let mut current = parent.to_path_buf();
-            loop {
-                if current.join("mclibs").exists() {
-                    return Some(current.clone());
-                }
-                if !current.pop() {
-                    break;
-                }
+        let toml_path = match toml_path {
+            Some(p) => p,
+            None => {
+                debug!("no project manifest found in {}", root.display());
+                return None;
             }
-        }
-        None
-    }
-
-    /// Load project.toml from a directory
-    pub fn load_from(root: &Path) -> Option<Self> {
-        let toml_path = root.join("project.toml");
-        if !toml_path.exists() {
-            debug!("project.toml not found in {}", root.display());
-            return None;
-        }
+        };
 
         let content = match std::fs::read_to_string(&toml_path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read project.toml: {}", e);
+                tracing::warn!(
+                    "Failed to read project manifest {}: {}",
+                    toml_path.display(),
+                    e
+                );
                 return None;
             }
         };
@@ -90,7 +91,11 @@ impl ProjectConfig {
                 Some(config)
             }
             Err(e) => {
-                tracing::warn!("Failed to parse project.toml: {}", e);
+                tracing::warn!(
+                    "Failed to parse project manifest {}: {}",
+                    toml_path.display(),
+                    e
+                );
                 None
             }
         }
@@ -128,5 +133,40 @@ mcode = "*"
         assert_eq!(config.project.name, "hbl");
         assert_eq!(config.project.entry, "src/hbl.mc");
         assert!(config.dependencies.contains_key("mcode"));
+    }
+
+    #[test]
+    fn test_load_manifest_names_priority() {
+        let dir =
+            std::env::temp_dir().join(format!("mcext_manifest_priority_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.toml"),
+            "[project]\nname = \"mt\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            "[project]\nname = \"pt\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n",
+        )
+        .unwrap();
+        // project.toml wins over manifest.toml, matching the mcc CLI order.
+        let config = ProjectConfig::load_from(&dir).expect("project.toml should be found");
+        assert_eq!(config.project.name, "pt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_mcc_toml_fallback() {
+        let dir = std::env::temp_dir().join(format!("mcext_manifest_mcc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcc.toml"),
+            "[project]\nname = \"mcc\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load_from(&dir).expect("mcc.toml should be found");
+        assert_eq!(config.project.name, "mcc");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
