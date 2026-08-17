@@ -192,6 +192,13 @@ pub struct SymbolCache {
     pub project_symbols: Arc<Mutex<ProjectSymbolsCache>>,
     /// §7.6: URIs whose Use table needs refresh (dependency changed)
     pub sem_dirty: std::sync::Mutex<std::collections::HashSet<Url>>,
+    /// §7.6: document version each parse was computed from. Completion uses
+    /// it to detect a lapper that lags the edited rope.
+    pub parse_versions: DashMap<Url, i32>,
+    /// §7.3: monotonic content epoch — bumped on every sem_symbols update
+    /// (reparse, library load). Completion snapshots keyed on it stay valid
+    /// only while it is unchanged.
+    pub parse_revision: std::sync::atomic::AtomicU32,
 }
 
 impl SymbolCache {
@@ -202,6 +209,8 @@ impl SymbolCache {
             tokens: TokensState::new(),
             project_symbols: Arc::new(Mutex::new(ProjectSymbolsCache::default())),
             sem_dirty: std::sync::Mutex::new(std::collections::HashSet::new()),
+            parse_versions: DashMap::new(),
+            parse_revision: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
@@ -308,6 +317,9 @@ pub struct WorkspaceState {
     /// Queued diagnostics awaiting retry after init.
     pub diags: DiagnosticQueue,
 
+    /// Layered completion snapshot cache (§7.3 / §8.3).
+    pub(crate) completion: crate::features::comp::CompletionCache,
+
     /// Serializes RPC calls to mcc (single-threaded server).
     pub rpc_lock: TokioMutex<()>,
 }
@@ -321,6 +333,7 @@ impl WorkspaceState {
             project: ProjectContext::new(IndexWorkerHandle::inactive()),
             init: InitState::new(),
             diags: DiagnosticQueue::new(),
+            completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
         }
     }
@@ -333,6 +346,7 @@ impl WorkspaceState {
             project: ProjectContext::new(IndexWorkerHandle::spawn()),
             init: InitState::new(),
             diags: DiagnosticQueue::new(),
+            completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
         }
     }
@@ -356,7 +370,9 @@ impl WorkspaceState {
         self.symbols.sem_tokens.remove(uri);
         self.symbols.sem_symbols.remove(uri);
         self.symbols.tokens.remove(uri);
+        self.symbols.parse_versions.remove(uri);
         self.project.scheduler.remove(uri);
+        self.completion.remove_uri(uri);
     }
 }
 

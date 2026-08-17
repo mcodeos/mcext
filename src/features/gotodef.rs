@@ -82,7 +82,9 @@ pub fn resolve(
     let mut sorted_intervals = intervals.clone();
     sorted_intervals.sort_by(|a, b| kind_rank(a.kind).cmp(&kind_rank(b.kind)));
 
-    for interval in &sorted_intervals {
+    // The loop below always returns on its first iteration — only the
+    // highest-ranked interval is ever consulted.
+    if let Some(interval) = sorted_intervals.first() {
         info!(
             "goto_def: interval kind={}, id={}, start={}, stop={}, scope='{}'",
             interval.kind, interval.id, interval.start, interval.stop, interval.scope
