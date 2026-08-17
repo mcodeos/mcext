@@ -244,3 +244,43 @@ async fn completion_returns_keywords() {
     let result = mcodels::features::comp::resolve(&state, &params);
     assert!(result.is_some(), "completion should return keyword items");
 }
+
+/// Layered completion RPC round-trip (§8.1): the authoritative scope comes
+/// from mcc (`main.i2c`), P1 surfaces the func param, and member access on
+/// the `hc` instance returns helper_chip's pins in the `Member` layer.
+#[tokio::test]
+async fn completion_layered_rpc_roundtrip() {
+    let server = shared_server().await;
+    assert!(wait_connected(&server).await);
+
+    let path = fixture_path("comp.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    let _ = client.lib_load("mcode").await;
+    let _ = client.set_project_root(&path).await;
+    let _ = client.load_project(&path).await;
+
+    let content = std::fs::read_to_string(&path).expect("fixture exists");
+
+    // Cursor at the start of `GND` inside `func i2c(a)`.
+    let pos = content.find("a -> GND").expect("marker") + "a -> ".len();
+
+    // Layered P1-P5: scope must be the func, P1 must surface the param `a`.
+    let resp = client.completion(&path, pos, None, None).await;
+    assert!(resp.is_ok(), "completion RPC failed: {:?}", resp.err());
+    let resp = resp.unwrap();
+    assert_eq!(resp.scope_path, "main.i2c", "func-body scope");
+    let p1 = resp.layers.get("P1").expect("P1 layer");
+    assert!(p1.iter().any(|i| i.name == "a"), "P1 must contain param a");
+
+    // Member access: root `hc` → helper_chip instance → its pins.
+    let mem = client
+        .completion(&path, pos, None, Some("hc"))
+        .await
+        .expect("member completion RPC failed");
+    let member = mem.layers.get("Member").expect("Member layer");
+    assert!(
+        member.iter().any(|i| i.name == "IN_A"),
+        "Member must contain helper_chip pin IN_A"
+    );
+}

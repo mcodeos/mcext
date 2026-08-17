@@ -696,6 +696,16 @@ async fn parse_and_publish(
     if !should_skip && !skip_symbols {
         // Store sem_symbols for goto_definition and other features
         let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
+        // §7.6: record the doc version this parse reflects and bump the
+        // completion content epoch (§7.3) so stale snapshots re-collect.
+        state
+            .symbols
+            .parse_versions
+            .insert(uri.clone(), state.docs.version(&uri).unwrap_or(-1));
+        state
+            .symbols
+            .parse_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state
             .symbols
             .sem_symbols
@@ -924,6 +934,24 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let span = tracing::debug_span!("completion", uri = %params.text_document_position.text_document.uri.path());
         let _guard = span.enter();
+        // Layered completion via mcc RPC first (§8.1): authoritative P1-P5 +
+        // Member layers, 300 ms budget, falls back to the local P1-P4 path
+        // when the server is busy or unavailable (§8.4).
+        let server_guard = self.mcc_server.read().await;
+        if let Some(server) = server_guard.as_ref() {
+            if let Some(rpc) = server.client() {
+                if let Some(resp) = crate::features::comp::resolve_with_rpc(
+                    &self.state,
+                    rpc,
+                    &params.text_document_position,
+                )
+                .await
+                {
+                    return Ok(Some(resp));
+                }
+            }
+        }
+        drop(server_guard);
         Ok(crate::features::comp::resolve(
             &self.state,
             &params.text_document_position,

@@ -180,6 +180,28 @@ impl MccRpcClient {
             .map(|s| s.to_string())
             .ok_or_else(|| RpcError::Parse("build.viz response missing 'html'".into()))
     }
+
+    /// Layered completion for a cursor position (design §8.1).
+    ///
+    /// When `member_root` is present (e.g. `uC` or `this`), mcc returns the
+    /// `Member` layer instead of P1-P5 (§5.6).
+    pub async fn completion(
+        &self,
+        uri: &str,
+        position: usize,
+        prefix: Option<&str>,
+        member_root: Option<&str>,
+    ) -> Result<CompletionResponse, RpcError> {
+        let mut params = json!({"uri": uri, "position": position});
+        if let Some(p) = prefix {
+            params["prefix"] = json!(p);
+        }
+        if let Some(m) = member_root {
+            params["member_root"] = json!(m);
+        }
+        let result = self.call("completion", params).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
 }
 
 /// Response from `diagnostics` RPC
@@ -243,6 +265,41 @@ pub struct EnumValueEntry {
     /// Byte span [start, end) of the value row (e.g. `SOP8,` inside the body).
     #[serde(default)]
     pub span: [usize; 2],
+}
+
+/// Response from `completion` RPC with a cursor position (layered, §8.1).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionResponse {
+    /// P1..P5 path of the cursor, e.g. "US513.i2c".
+    pub scope_path: String,
+    /// Layer name → candidates. mcc omits layers with no items.
+    pub layers: HashMap<String, Vec<CompletionLayerItem>>,
+    /// Layers truncated at the per-layer cap (§8.5).
+    #[serde(default)]
+    pub truncated_layers: Vec<String>,
+}
+
+/// One layered completion candidate (§8.1).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionLayerItem {
+    pub name: String,
+    /// Symbol kind string, e.g. "function", "port", "component".
+    pub kind: String,
+    #[serde(default)]
+    pub scope: String,
+    pub uri: String,
+    /// Byte span [start, end) of the def. Object form `{"start":N,"end":N}`.
+    #[serde(default)]
+    pub span: CompletionSpan,
+}
+
+/// Byte span of a completion candidate.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CompletionSpan {
+    #[serde(default)]
+    pub start: usize,
+    #[serde(default)]
+    pub end: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -471,5 +528,44 @@ mod tests {
         let resp: SemResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.tokens.len(), 1);
         assert_eq!(resp.symbols.lapper.len(), 1);
+    }
+
+    #[test]
+    fn parse_completion_response() {
+        let json = serde_json::json!({
+            "scope_path": "US513.i2c",
+            "layers": {
+                "P2": [
+                    {
+                        "name": "uC",
+                        "kind": "instance",
+                        "scope": "US513",
+                        "uri": "file:///p/us513.mc",
+                        "span": {"start": 7345, "end": 7350}
+                    }
+                ],
+                "Member": [
+                    {
+                        "name": "I2C0",
+                        "kind": "port",
+                        "scope": "US513.i2c",
+                        "uri": "file:///p/us513.mc",
+                        "span": {"start": 7390, "end": 7395}
+                    }
+                ]
+            },
+            "truncated_layers": ["P5"]
+        });
+
+        let resp: CompletionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.scope_path, "US513.i2c");
+        assert_eq!(resp.truncated_layers, vec!["P5"]);
+        let p2 = resp.layers.get("P2").unwrap();
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].name, "uC");
+        assert_eq!(p2[0].span.start, 7345);
+        let mem = resp.layers.get("Member").unwrap();
+        assert_eq!(mem[0].name, "I2C0");
+        assert_eq!(mem[0].span.end, 7395);
     }
 }

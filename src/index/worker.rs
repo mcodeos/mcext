@@ -82,6 +82,20 @@ impl IndexWorkerHandle {
             None => ProjectIndex::new(),
         }
     }
+
+    /// Cheap content fingerprint of the project index (file count + entry
+    /// count). Used in the completion snapshot cache key (§7.7) so P4
+    /// candidates refresh when libraries load / unload — without cloning the
+    /// whole snapshot on every keystroke.
+    pub fn fingerprint(&self) -> (usize, usize) {
+        match &self.inner {
+            Some(inner) => {
+                let snap = inner.snapshot_rx.borrow();
+                (snap.files.len(), snap.len())
+            }
+            None => (0, 0),
+        }
+    }
 }
 
 /// Worker main loop (in separate thread)
