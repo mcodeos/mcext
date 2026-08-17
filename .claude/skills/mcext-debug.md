@@ -57,7 +57,7 @@ info!("publish_diagnostics: {} diags for {}", n, uri.path());
 ### Build
 
 ```bash
-cd /Users/dan/work/mo/mcext
+cd ~/work/mo/mcext
 cargo build
 ```
 
