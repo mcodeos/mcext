@@ -4,15 +4,12 @@
 //! grouped by container (scope). Uses SymbolKind ordinals from mcc.
 
 use crate::rpc::LapperEntry;
-use tower_lsp::lsp_types::{DocumentSymbol, Position, Range, SymbolKind, Url};
+use tower_lsp::lsp_types::{DocumentSymbol, Position, Range, SymbolKind};
 
 /// Build document symbols from lapper entries.
 /// Only DEF kinds are included (not refs).
-pub fn document_symbols(
-    lapper: &[LapperEntry],
-    uri: &Url,
-    rope: &ropey::Rope,
-) -> Vec<DocumentSymbol> {
+#[allow(deprecated)] // lsp-types marks `deprecated` field deprecated but requires it
+pub fn document_symbols(lapper: &[LapperEntry], rope: &ropey::Rope) -> Vec<DocumentSymbol> {
     let mut symbols: Vec<DocumentSymbol> = Vec::new();
 
     for entry in lapper {

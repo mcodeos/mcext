@@ -1121,7 +1121,7 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        let result = crate::features::docsym::document_symbols(&symbols.lapper, &uri, &rope);
+        let result = crate::features::docsym::document_symbols(&symbols.lapper, &rope);
         Ok(Some(DocumentSymbolResponse::Nested(result)))
     }
 
