@@ -31,7 +31,8 @@
 			{
 				"command": "mcode.previewViz",
 				"title": "MCode: Preview Circuit (viz)",
-				"category": "MCode"
+				"category": "MCode",
+				"icon": "$(circuit-board)"
 			}
 		],
 		"menus": {
