@@ -3,6 +3,9 @@
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 
+import * as fs from "fs";
+import * as path from "path";
+
 import {
   languages,
   workspace,
@@ -22,6 +25,7 @@ import {
   Selection,
   Uri,
   ViewColumn,
+  WebviewPanel,
 } from "vscode";
 
 import {
@@ -35,6 +39,43 @@ import {
 let client: LanguageClient;
 let clientStarted: Promise<void> | undefined;
 // type a = Parameters<>;
+
+// Circuit preview state: the open panel + the project (nearest manifest dir)
+// it currently renders, so we can auto-refresh on cross-project file switches.
+let previewPanel: WebviewPanel | undefined;
+let previewProjectId: string | null = null;
+let previewRenderSeq = 0;
+
+const PROJECT_MANIFEST_NAMES = ["project.toml", "manifest.toml", "mcc.toml"];
+
+// Nearest ancestor directory containing a project manifest, else null.
+// Mirrors the server's find_project_root_from_file so client & server agree
+// (both require an actual file — a directory named `project.toml` doesn't count).
+function projectIdFor(filePath: string): string | null {
+  let dir = path.dirname(filePath);
+  for (;;) {
+    for (const name of PROJECT_MANIFEST_NAMES) {
+      if (isFile(path.join(dir, name))) return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // reached filesystem root
+    dir = parent;
+  }
+}
+
+function isFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// "Same project" per design: both resolve to a manifest dir AND they match.
+// A standalone file (null id) is its own project → never "same".
+function sameProject(a: string | null, b: string | null): boolean {
+  return a !== null && b !== null && a === b;
+}
 
 export async function activate(context: ExtensionContext) {
 
@@ -78,6 +119,21 @@ export async function activate(context: ExtensionContext) {
   context.subscriptions.push(
     commands.registerCommand("mcode.previewViz", (top?: string) => previewViz(top))
   );
+
+  // Auto-refresh an already-open preview when the active .mc file switches to
+  // a different project (by nearest project manifest). Same project → no
+  // refresh. Does NOT auto-open a preview (only acts when one is tracked).
+  context.subscriptions.push(
+    window.onDidChangeActiveTextEditor((editor) => {
+      if (!editor || editor.document.languageId !== "mcode") return;
+      if (!previewPanel) return;
+      const filePath = editor.document.uri.fsPath;
+      const newProjectId = projectIdFor(filePath);
+      if (sameProject(previewProjectId, newProjectId)) return;
+      previewProjectId = newProjectId;
+      void renderPreview(filePath);
+    })
+  );
 }
 
 async function previewViz(top?: string): Promise<void> {
@@ -89,33 +145,55 @@ async function previewViz(top?: string): Promise<void> {
     return;
   }
 
-  const doc = editor.document;
-  const filePath = doc.uri.fsPath;
-  const title = `Circuit: ${filePath.split("/").pop() ?? filePath}`;
+  const filePath = editor.document.uri.fsPath;
 
-  const panel = window.createWebviewPanel(
-    "mcodeViz",
-    title,
-    ViewColumn.Beside,
-    { enableScripts: true }
-  );
+  // Reuse an existing panel instead of stacking duplicates on repeated invocations.
+  if (!previewPanel) {
+    previewPanel = window.createWebviewPanel(
+      "mcodeViz",
+      `Circuit: ${path.basename(filePath)}`,
+      ViewColumn.Beside,
+      { enableScripts: true }
+    );
+    previewPanel.onDidDispose(() => {
+      previewPanel = undefined;
+      previewProjectId = null;
+    });
+  }
+
+  // Record the project BEFORE rendering: creating the panel focuses it, which
+  // fires onDidChangeActiveTextEditor; setting the id first avoids a spurious
+  // immediate re-render.
+  previewProjectId = projectIdFor(filePath);
+  await renderPreview(filePath, top);
+}
+
+// Shared by the previewViz command and the cross-project auto-refresh listener.
+async function renderPreview(filePath: string, top?: string): Promise<void> {
+  const seq = ++previewRenderSeq;
+  const panel = previewPanel;
+  if (!panel) return;
+
+  panel.title = `Circuit: ${path.basename(filePath)}`;
   panel.webview.html = loadingHtml("Rendering circuit…");
 
   try {
     if (clientStarted) {
       await clientStarted;
     }
+    // Drop stale renders and guard against a panel disposed mid-flight.
+    if (seq !== previewRenderSeq || previewPanel !== panel) return;
     const result = (await client.sendRequest("workspace/executeCommand", {
       command: "mcode.viz",
       arguments: top ? [filePath, top] : [filePath],
     })) as { ok: boolean; html?: string; error?: string } | null;
-
-    if (result && result.ok && result.html) {
-      panel.webview.html = result.html;
-    } else {
-      panel.webview.html = errorHtml(result?.error ?? "build.viz returned no html");
-    }
+    if (seq !== previewRenderSeq || previewPanel !== panel) return;
+    panel.webview.html =
+      result && result.ok && result.html
+        ? result.html
+        : errorHtml(result?.error ?? "build.viz returned no html");
   } catch (e) {
+    if (seq !== previewRenderSeq || previewPanel !== panel) return;
     panel.webview.html = errorHtml(String(e));
   }
 }

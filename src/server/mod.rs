@@ -11,11 +11,12 @@
 use crate::common::ServerConfig;
 use crate::index::IndexCommand;
 use crate::mccsrv::MccServer;
-use crate::project::ProjectConfig;
+use crate::project::{find_project_root_from_file, ProjectConfig};
 use crate::state::WorkspaceState;
 use dashmap::DashMap;
 // Note: McURI is just String, no need to import mcc
 use ropey::Rope;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
@@ -1329,33 +1330,51 @@ impl LanguageServer for Backend {
             entry_arg, project_root
         );
 
-        // Resolve entry + top + libs. The circuit viz renders the *project* top
-        // module, so when a project manifest exists we always use its
-        // entry/top_module (NOT the active file — a sub-file like us513.mc
-        // defines a component, not the top). Only a standalone .mc file (no
-        // project manifest) uses the active file.
-        let (entry, top, libs): (String, Option<String>, Vec<String>) = match &project_root {
-            Some(root) => match ProjectConfig::load_from(root) {
-                Some(c) => (
-                    c.entry_path(root),
-                    c.project.top_module.clone(),
-                    c.dependency_names().iter().map(|s| s.to_string()).collect(),
-                ),
-                None => {
-                    // No project manifest: preview the standalone file itself.
-                    match &entry_arg {
-                        Some(e) => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
-                        None => {
-                            return Ok(Some(serde_json::json!({
-                                "ok": false,
-                                "error": "mcode.viz: no project manifest entry and no file argument",
-                            })))
-                        }
-                    }
+        // Resolve entry + top + libs FROM THE ENTRY FILE: walk up from the
+        // active file to its nearest project manifest and use that project's
+        // entry/top_module/libs. This lets the preview follow the active file
+        // across multiple projects in one workspace (vs. the old behavior of
+        // always rendering the single configured project_root). The circuit viz
+        // renders the *project* top module, so when a manifest exists above the
+        // file we always use its entry/top_module (NOT the active file — a
+        // sub-file like us513.mc defines a component, not the top). Only a
+        // standalone .mc file (no manifest anywhere above) uses the active file.
+        // build.viz reloads libs (params) and the project graph (from the
+        // absolute entry) on every call, so per-project entry+libs is
+        // sufficient — no set_project_root/load_project needed.
+        let (entry, top, libs): (String, Option<String>, Vec<String>) = match &entry_arg {
+            Some(e) => {
+                let file = normalize_entry_path(e);
+                let file_path = Path::new(&file);
+                match find_project_root_from_file(file_path) {
+                    Some(root) => match ProjectConfig::load_from(&root) {
+                        Some(c) => (
+                            c.entry_path(&root),
+                            c.project.top_module.clone(),
+                            c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                        ),
+                        // Nearest manifest exists but won't parse → render the file standalone.
+                        None => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
+                    },
+                    // No manifest above the file → render the standalone file itself.
+                    None => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
                 }
-            },
-            None => match &entry_arg {
-                Some(e) => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
+            }
+            // Backward compat: no file argument → keep the old project_root logic.
+            None => match &project_root {
+                Some(root) => match ProjectConfig::load_from(root) {
+                    Some(c) => (
+                        c.entry_path(root),
+                        c.project.top_module.clone(),
+                        c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                    ),
+                    None => {
+                        return Ok(Some(serde_json::json!({
+                            "ok": false,
+                            "error": "mcode.viz: no project manifest entry and no file argument",
+                        })))
+                    }
+                },
                 None => {
                     return Ok(Some(serde_json::json!({
                         "ok": false,
