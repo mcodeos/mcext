@@ -202,8 +202,9 @@ fn resolve_reference_hover(
             // ★ Full definition first — same source-line lead as the RefDefMap
             // path. Best-effort: an unreadable def file (e.g. a dependency
             // outside the workspace) just keeps the bare arrow lines.
-            if let Some(rope) =
-                state.document_rope(&entry.uri).or_else(|| read_file_to_rope(&entry.uri))
+            if let Some(rope) = state
+                .document_rope(&entry.uri)
+                .or_else(|| read_file_to_rope(&entry.uri))
             {
                 if let Some(line) = def_text_from_rope(&rope, entry.span.0) {
                     lines.insert(0, format!("```\n{}\n```", line));

@@ -23,7 +23,8 @@
 	"enabledApiProposals": [],
 	"activationEvents": [
 		"onLanguage:mcode",
-		"onCommand:mcode.previewViz"
+		"onCommand:mcode.previewViz",
+		"onCommand:mcode.build"
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
@@ -33,6 +34,12 @@
 				"title": "MCode: Preview Circuit (viz)",
 				"category": "MCode",
 				"icon": "$(circuit-board)"
+			},
+			{
+				"command": "mcode.build",
+				"title": "MCode: Build Project",
+				"category": "MCode",
+				"icon": "$(tools)"
 			}
 		],
 		"menus": {
@@ -41,6 +48,17 @@
 					"command": "mcode.previewViz",
 					"when": "resourceLangId == mcode",
 					"group": "navigation"
+				},
+				{
+					"command": "mcode.build",
+					"when": "resourceLangId == mcode",
+					"group": "navigation"
+				}
+			],
+			"statusBar": [
+				{
+					"command": "mcode.build",
+					"when": "resourceLangId == mcode"
 				}
 			]
 		},
