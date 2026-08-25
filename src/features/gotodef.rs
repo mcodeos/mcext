@@ -6,7 +6,9 @@
 use crate::common::position::{offset_to_position, position_to_offset};
 use crate::features::symbols::{kind_label, kind_rank};
 use crate::state::WorkspaceState;
-use crate::util::usechk::{parse_use_prefix, resolve_use_path, strip_use_keyword};
+use crate::util::usechk::{
+    parse_use_prefix, resolve_system_use_path, resolve_use_path, strip_use_keyword,
+};
 use ropey::Rope;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
 use tracing::{info, warn};
@@ -136,12 +138,18 @@ fn resolve_use_jump(
     let line_text = rope.get_line(line_idx)?.to_string();
 
     let path = strip_use_keyword(&line_text)?;
-    let (_prefix, use_path) = parse_use_prefix(path)?;
 
-    let current_file = uri.to_file_path().ok()?;
-    let current_dir = current_file.parent()?;
-
-    let candidates = resolve_use_path(current_dir, use_path);
+    let candidates = if let Some((_prefix, use_path)) = parse_use_prefix(path) {
+        // Relative path (`./x`, `../x`): resolve against the current file's dir.
+        let current_file = uri.to_file_path().ok()?;
+        let current_dir = current_file.parent()?;
+        resolve_use_path(current_dir, use_path)
+    } else {
+        // Unprefixed / `$` path (`mclibs.power/ams1117.mc`, `$conn`): system
+        // library. parse_use_prefix returns None for these, which previously
+        // made jump silently fail. Resolve against MCC_SYSTEM_ROOT / ~/.mcode.
+        resolve_system_use_path(path)
+    };
     let Some(target) = candidates.iter().find(|p| p.exists()) else {
         return None;
     };
