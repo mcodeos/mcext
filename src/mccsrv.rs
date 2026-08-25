@@ -337,6 +337,21 @@ impl MccServer {
             .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
+    /// Call `build.full` RPC to build the whole project (equivalent of
+    /// `mcc build`), returning the structured per-phase envelope.
+    pub async fn build_full(
+        &self,
+        entry: &str,
+        top: Option<&str>,
+        libs: &[String],
+    ) -> Result<crate::rpc::BuildFullResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client
+            .build_full(entry, top, libs)
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
+    }
+
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
         // Check MCC_PATH env var first

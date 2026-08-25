@@ -31,6 +31,20 @@ impl MccRpcClient {
 
     /// Call an RPC method with params
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.call_with_timeout(method, params, None).await
+    }
+
+    /// Call an RPC method with an optional per-request timeout override.
+    ///
+    /// The client's default request timeout is 60s (set in [`MccRpcClient::new`]).
+    /// Long-running methods like `build.full` pass an explicit longer timeout so
+    /// a whole-project build isn't cut off mid-pass.
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, RpcError> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
@@ -38,10 +52,11 @@ impl MccRpcClient {
             id: Some(serde_json::json!(1)),
         };
 
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .json(&request)
+        let mut req = self.client.post(&self.base_url).json(&request);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| RpcError::Network(e.to_string()))?;
@@ -181,6 +196,33 @@ impl MccRpcClient {
             .ok_or_else(|| RpcError::Parse("build.viz response missing 'html'".into()))
     }
 
+    /// Build the whole project (equivalent of `mcc build`), returning the
+    /// structured per-phase envelope (pass0/pass1/pass2 diagnostics + summary).
+    ///
+    /// `libs` are pre-loaded by mcc via `lib.load` during init, but passing them
+    /// explicitly keeps `build.full` deterministic (mirrors `mcc build`). A full
+    /// project build can exceed the default 60s request timeout, so this uses a
+    /// 300s per-request timeout.
+    pub async fn build_full(
+        &self,
+        entry: &str,
+        top: Option<&str>,
+        libs: &[String],
+    ) -> Result<BuildFullResponse, RpcError> {
+        let mut params = json!({"entry": entry, "libs": libs, "include_system": true});
+        if let Some(t) = top {
+            params["top"] = json!(t);
+        }
+        let result = self
+            .call_with_timeout(
+                "build.full",
+                params,
+                Some(std::time::Duration::from_secs(300)),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
     /// Layered completion for a cursor position (design §8.1).
     ///
     /// When `member_root` is present (e.g. `uC` or `this`), mcc returns the
@@ -316,6 +358,75 @@ pub struct DiagLocation {
     pub len: u32,
     pub line: u32,
     pub column: u32,
+}
+
+/// Response from `build.full` RPC (equivalent of `mcc build`).
+///
+/// The mcc backend returns a per-phase envelope: pass0 (lib-load diagnostics),
+/// pass1 (parse/definitions), pass2 (instantiation) plus a summary. Unknown
+/// envelope fields are ignored by serde.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildFullResponse {
+    pub workspace: BuildWorkspaceInfo,
+    pub pass0: BuildPass,
+    pub pass1: BuildPass,
+    pub pass2: BuildPass,
+    pub summary: BuildSummary,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildWorkspaceInfo {
+    pub kind: String,
+    pub name: String,
+}
+
+/// One pipeline phase (pass0/pass1/pass2). Only the diagnostics are consumed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildPass {
+    #[serde(default)]
+    pub diagnostics: Vec<BuildDiag>,
+}
+
+/// One diagnostic in the build envelope. `line`/`column` are 1-based (mcc
+/// `Location::row`/`col`); `file` is an `McURI` (plain path or `file://…`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildDiag {
+    pub phase: String,
+    pub severity: String,
+    pub code: u32,
+    pub message: String,
+    pub location: BuildLoc,
+    #[serde(default)]
+    pub suggestions: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub related: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildLoc {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub pos: u32,
+    pub len: u32,
+}
+
+/// Build summary counters, mirroring the envelope's `summary` object.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildSummary {
+    pub errors: u64,
+    pub warnings: u64,
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub module_count: u64,
+    #[serde(default)]
+    pub component_count: u64,
+    #[serde(default)]
+    pub interface_count: u64,
+    #[serde(default)]
+    pub instance_count: u64,
+    #[serde(default)]
+    pub net_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -567,5 +678,64 @@ mod tests {
         let mem = resp.layers.get("Member").unwrap();
         assert_eq!(mem[0].name, "I2C0");
         assert_eq!(mem[0].span.end, 7395);
+    }
+
+    #[test]
+    fn parse_build_full_response() {
+        let json = serde_json::json!({
+            "command": "mcc build",
+            "workspace": {"kind": "project", "name": "demo"},
+            "pass0": {
+                "loaded_files": [],
+                "diagnostics": [
+                    {
+                        "phase": "pass0",
+                        "severity": "warning",
+                        "code": 1001,
+                        "message": "lib stub",
+                        "location": {"file": "/sys/lib.mc", "line": 3, "column": 1, "pos": 80, "len": 4},
+                        "suggestions": [],
+                        "related": []
+                    }
+                ]
+            },
+            "pass1": {
+                "definitions": {"modules": [], "components": [], "interfaces": []},
+                "diagnostics": [
+                    {
+                        "phase": "pass1",
+                        "severity": "error",
+                        "code": 2002,
+                        "message": "undefined ref",
+                        "location": {"file": "/p/main.mc", "line": 12, "column": 7, "pos": 320, "len": 5},
+                        "suggestions": [],
+                        "related": [{"message": "here", "location": {"file": "/p/other.mc", "line": 1, "column": 1, "pos": 0, "len": 1}}]
+                    }
+                ]
+            },
+            "pass2": {"diagnostics": []},
+            "summary": {
+                "module_count": 1, "component_count": 2, "interface_count": 0,
+                "instance_count": 10, "net_count": 5,
+                "errors": 1, "warnings": 1, "elapsed_ms": 42
+            }
+        });
+
+        let resp: BuildFullResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.workspace.kind, "project");
+        assert_eq!(resp.pass0.diagnostics.len(), 1);
+        assert_eq!(resp.pass1.diagnostics.len(), 1);
+        assert!(resp.pass2.diagnostics.is_empty());
+        let d = &resp.pass1.diagnostics[0];
+        assert_eq!(d.phase, "pass1");
+        assert_eq!(d.severity, "error");
+        assert_eq!(d.code, 2002);
+        assert_eq!(d.location.file, "/p/main.mc");
+        assert_eq!(d.location.line, 12);
+        assert_eq!(d.location.column, 7);
+        assert_eq!(d.related.len(), 1);
+        assert_eq!(resp.summary.errors, 1);
+        assert_eq!(resp.summary.warnings, 1);
+        assert_eq!(resp.summary.elapsed_ms, 42);
     }
 }

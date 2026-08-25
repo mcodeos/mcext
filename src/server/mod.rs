@@ -45,6 +45,177 @@ impl Backend {
         }
     }
 
+    /// Resolve the project context (entry, top, libs) for a command invoked from
+    /// a file. Shared by `mcode.viz` and `mcode.buildProject`.
+    ///
+    /// Walk up from the active file to its nearest project manifest and use that
+    /// project's entry/top_module/libs. This lets commands follow the active file
+    /// across multiple projects in one workspace (vs. always using the single
+    /// configured project_root). Commands build/render the *project* top module,
+    /// so when a manifest exists above the file we always use its entry/top_module
+    /// (NOT the active file — a sub-file like us513.mc defines a component, not
+    /// the top). Only a standalone .mc file (no manifest anywhere above) uses the
+    /// active file. `build.*` reloads libs (params) and the project graph (from
+    /// the absolute entry) on every call, so per-project entry+libs is sufficient
+    /// — no set_project_root/load_project needed.
+    fn resolve_project_context(
+        &self,
+        entry_arg: Option<&str>,
+        top_arg: Option<&str>,
+    ) -> std::result::Result<(String, Option<String>, Vec<String>), String> {
+        let project_root = self
+            .config
+            .get("current")
+            .and_then(|c| c.project_root.clone());
+
+        debug!(
+            "resolve_project_context: entry_arg={:?} project_root={:?}",
+            entry_arg, project_root
+        );
+
+        match entry_arg {
+            Some(e) => {
+                let file = normalize_entry_path(e);
+                let file_path = Path::new(&file);
+                match find_project_root_from_file(file_path) {
+                    Some(root) => match ProjectConfig::load_from(&root) {
+                        Some(c) => Ok((
+                            c.entry_path(&root),
+                            c.project.top_module.clone(),
+                            c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                        )),
+                        // Nearest manifest exists but won't parse → treat as standalone.
+                        None => Ok((
+                            normalize_entry_path(e),
+                            top_arg.map(|s| s.to_string()),
+                            Vec::new(),
+                        )),
+                    },
+                    // No manifest above the file → treat the file as standalone.
+                    None => Ok((
+                        normalize_entry_path(e),
+                        top_arg.map(|s| s.to_string()),
+                        Vec::new(),
+                    )),
+                }
+            }
+            // Backward compat: no file argument → keep the old project_root logic.
+            None => match &project_root {
+                Some(root) => match ProjectConfig::load_from(root) {
+                    Some(c) => Ok((
+                        c.entry_path(root),
+                        c.project.top_module.clone(),
+                        c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                    )),
+                    None => Err("no project manifest entry and no file argument".into()),
+                },
+                None => Err("no project root and no file argument".into()),
+            },
+        }
+    }
+
+    /// Handle `mcode.buildProject`: run a full project build (daemon `build.full`
+    /// RPC) and return the envelope (summary + flattened per-phase diagnostics) to
+    /// the client, which renders it to the Output console and Problems tab.
+    async fn execute_build_project(
+        &self,
+        params: &tower_lsp::lsp_types::ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        // arg[0] = entry .mc file path (absolute fsPath from the TS client) — optional.
+        let entry_arg = params
+            .arguments
+            .first()
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // arg[1] = top module name — optional, matches mcode.viz.
+        let top_arg = params
+            .arguments
+            .get(1)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let (entry, top, libs) =
+            match self.resolve_project_context(entry_arg.as_deref(), top_arg.as_deref()) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Ok(Some(serde_json::json!({
+                        "ok": false,
+                        "error": format!("mcode.buildProject: {e}"),
+                    })))
+                }
+            };
+
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.buildProject: mcc server not initialized",
+            })));
+        };
+        if !server.is_connected() {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.buildProject: mcc server not connected",
+            })));
+        }
+
+        info!(
+            "mcode.buildProject: building entry={entry} top={:?} libs={:?}",
+            top, libs
+        );
+
+        // Serialize with other RPC calls (mcc is single-threaded — see server/mod.rs:445).
+        let _rpc_guard = self.state.rpc_lock.lock().await;
+        match server.build_full(&entry, top.as_deref(), &libs).await {
+            Ok(resp) => {
+                // Flatten pass0/pass1/pass2 diagnostics into one list for the client.
+                let diagnostics: Vec<serde_json::Value> = [&resp.pass0, &resp.pass1, &resp.pass2]
+                    .iter()
+                    .flat_map(|p| &p.diagnostics)
+                    .map(|d| {
+                        serde_json::json!({
+                            "phase": d.phase,
+                            "severity": d.severity,
+                            "code": d.code,
+                            "message": d.message,
+                            "file": d.location.file,
+                            "line": d.location.line,
+                            "column": d.location.column,
+                            "pos": d.location.pos,
+                            "len": d.location.len,
+                        })
+                    })
+                    .collect();
+                let s = &resp.summary;
+                info!(
+                    "mcode.buildProject: ok, errors={} warnings={} elapsed_ms={}",
+                    s.errors, s.warnings, s.elapsed_ms
+                );
+                Ok(Some(serde_json::json!({
+                    "ok": true,
+                    "summary": {
+                        "module_count": s.module_count,
+                        "component_count": s.component_count,
+                        "interface_count": s.interface_count,
+                        "instance_count": s.instance_count,
+                        "net_count": s.net_count,
+                        "errors": s.errors,
+                        "warnings": s.warnings,
+                        "elapsed_ms": s.elapsed_ms,
+                    },
+                    "diagnostics": diagnostics,
+                })))
+            }
+            Err(e) => {
+                warn!("mcode.buildProject: build failed: {e}");
+                Ok(Some(
+                    serde_json::json!({"ok": false, "error": e.to_string()}),
+                ))
+            }
+        }
+    }
+
     /// Synchronous path for did_save: immediate parse + publish
     async fn on_change_full(&self, uri: Url, text: &str, version: Option<i32>) {
         debug!("on_change_full: {}", uri.path());
@@ -167,7 +338,7 @@ impl Backend {
             inlay_hint_provider: Some(OneOf::Left(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             execute_command_provider: Some(ExecuteCommandOptions {
-                commands: vec!["mcode.viz".to_string()],
+                commands: vec!["mcode.viz".to_string(), "mcode.buildProject".to_string()],
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
             ..ServerCapabilities::default()
@@ -1301,6 +1472,9 @@ impl LanguageServer for Backend {
     ) -> Result<Option<serde_json::Value>> {
         debug!("execute_command: {}", params.command);
 
+        if params.command == "mcode.buildProject" {
+            return self.execute_build_project(&params).await;
+        }
         if params.command != "mcode.viz" {
             return Ok(None);
         }
@@ -1320,69 +1494,16 @@ impl LanguageServer for Backend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let project_root = self
-            .config
-            .get("current")
-            .and_then(|c| c.project_root.clone());
-
-        info!(
-            "mcode.viz: entry_arg={:?} project_root={:?}",
-            entry_arg, project_root
-        );
-
-        // Resolve entry + top + libs FROM THE ENTRY FILE: walk up from the
-        // active file to its nearest project manifest and use that project's
-        // entry/top_module/libs. This lets the preview follow the active file
-        // across multiple projects in one workspace (vs. the old behavior of
-        // always rendering the single configured project_root). The circuit viz
-        // renders the *project* top module, so when a manifest exists above the
-        // file we always use its entry/top_module (NOT the active file — a
-        // sub-file like us513.mc defines a component, not the top). Only a
-        // standalone .mc file (no manifest anywhere above) uses the active file.
-        // build.viz reloads libs (params) and the project graph (from the
-        // absolute entry) on every call, so per-project entry+libs is
-        // sufficient — no set_project_root/load_project needed.
-        let (entry, top, libs): (String, Option<String>, Vec<String>) = match &entry_arg {
-            Some(e) => {
-                let file = normalize_entry_path(e);
-                let file_path = Path::new(&file);
-                match find_project_root_from_file(file_path) {
-                    Some(root) => match ProjectConfig::load_from(&root) {
-                        Some(c) => (
-                            c.entry_path(&root),
-                            c.project.top_module.clone(),
-                            c.dependency_names().iter().map(|s| s.to_string()).collect(),
-                        ),
-                        // Nearest manifest exists but won't parse → render the file standalone.
-                        None => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
-                    },
-                    // No manifest above the file → render the standalone file itself.
-                    None => (normalize_entry_path(e), top_arg.clone(), Vec::new()),
-                }
-            }
-            // Backward compat: no file argument → keep the old project_root logic.
-            None => match &project_root {
-                Some(root) => match ProjectConfig::load_from(root) {
-                    Some(c) => (
-                        c.entry_path(root),
-                        c.project.top_module.clone(),
-                        c.dependency_names().iter().map(|s| s.to_string()).collect(),
-                    ),
-                    None => {
-                        return Ok(Some(serde_json::json!({
-                            "ok": false,
-                            "error": "mcode.viz: no project manifest entry and no file argument",
-                        })))
-                    }
-                },
-                None => {
+        let (entry, top, libs) =
+            match self.resolve_project_context(entry_arg.as_deref(), top_arg.as_deref()) {
+                Ok(t) => t,
+                Err(e) => {
                     return Ok(Some(serde_json::json!({
                         "ok": false,
-                        "error": "mcode.viz: no project root and no file argument",
+                        "error": format!("mcode.viz: {e}"),
                     })))
                 }
-            },
-        };
+            };
 
         let server_guard = self.mcc_server.read().await;
         let Some(server) = server_guard.as_ref() else {

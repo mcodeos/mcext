@@ -26,6 +26,10 @@ import {
   Uri,
   ViewColumn,
   WebviewPanel,
+  Diagnostic,
+  DiagnosticSeverity,
+  Position,
+  ProgressLocation,
 } from "vscode";
 
 import {
@@ -45,6 +49,43 @@ let clientStarted: Promise<void> | undefined;
 let previewPanel: WebviewPanel | undefined;
 let previewProjectId: string | null = null;
 let previewRenderSeq = 0;
+
+// Whole-project build state: the Output console the `mcc build` report is
+// written to, and a dedicated DiagnosticCollection so build warnings/errors
+// appear in the Problems tab WITHOUT clobbering the live per-file diagnostics
+// published by the language server during editing.
+const buildOutput = window.createOutputChannel("MCode Build");
+const buildDiags = languages.createDiagnosticCollection("mcode-build");
+
+// One diagnostic in the `mcode.buildProject` executeCommand response
+// (flattened from the build.full pass0/pass1/pass2 envelope).
+interface BuildDiag {
+  phase: string;
+  severity: string; // "error" | "warning" | "info" | "hint"
+  code: number;
+  message: string;
+  file: string; // plain path or file:// URI
+  line: number; // 1-based
+  column: number; // 1-based
+  pos: number;
+  len: number;
+}
+
+interface BuildResult {
+  ok: boolean;
+  summary?: {
+    module_count?: number;
+    component_count?: number;
+    interface_count?: number;
+    instance_count?: number;
+    net_count?: number;
+    errors?: number;
+    warnings?: number;
+    elapsed_ms?: number;
+  };
+  diagnostics?: BuildDiag[];
+  error?: string;
+}
 
 const PROJECT_MANIFEST_NAMES = ["project.toml", "manifest.toml", "mcc.toml"];
 
@@ -119,6 +160,18 @@ export async function activate(context: ExtensionContext) {
   context.subscriptions.push(
     commands.registerCommand("mcode.previewViz", (top?: string) => previewViz(top))
   );
+
+  // Whole-project build: run `mcc build` on the active file's project, write
+  // the report to the "MCode Build" output channel and push warnings/errors
+  // into the Problems tab.
+  // NOTE: the client command is `mcode.build`, the server executeCommand is
+  // `mcode.buildProject`. They must differ: vscode-languageclient auto-registers
+  // every executeCommandProvider command (see ExecuteCommandFeature), so a
+  // same-named client command would throw "command ... already exists".
+  context.subscriptions.push(
+    commands.registerCommand("mcode.build", () => buildProject())
+  );
+  context.subscriptions.push(buildOutput, buildDiags);
 
   // Auto-refresh an already-open preview when the active .mc file switches to
   // a different project (by nearest project manifest). Same project → no
@@ -195,6 +248,115 @@ async function renderPreview(filePath: string, top?: string): Promise<void> {
   } catch (e) {
     if (seq !== previewRenderSeq || previewPanel !== panel) return;
     panel.webview.html = errorHtml(String(e));
+  }
+}
+
+// Run a whole-project build via the language server (daemon `build.full` RPC),
+// then render the report to the Output console and warnings/errors to the
+// Problems tab.
+async function buildProject(): Promise<void> {
+  const editor = window.activeTextEditor;
+  if (!editor || editor.document.languageId !== "mcode") {
+    window.showInformationMessage(
+      "MCode: open a .mc file to build its project."
+    );
+    return;
+  }
+
+  const filePath = editor.document.uri.fsPath;
+
+  // Fresh build → drop the previous build's Problems entries.
+  buildDiags.clear();
+
+  await window.withProgress(
+    { location: ProgressLocation.Window, title: "MCC: Building project…" },
+    async () => {
+      if (clientStarted) {
+        await clientStarted;
+      }
+      try {
+        const result = (await client.sendRequest("workspace/executeCommand", {
+          // Server-side executeCommand id (advertised in executeCommandProvider).
+          command: "mcode.buildProject",
+          arguments: [filePath],
+        })) as BuildResult | null;
+
+        if (!result || !result.ok) {
+          const msg = result?.error ?? "buildProject returned no result";
+          buildOutput.appendLine(`[mcc build] FAILED: ${msg}`);
+          buildOutput.show(true);
+          window.showErrorMessage(`MCC build failed: ${msg}`);
+          return;
+        }
+        renderBuildResult(filePath, result);
+      } catch (e) {
+        buildOutput.appendLine(`[mcc build] RPC error: ${String(e)}`);
+        buildOutput.show(true);
+        window.showErrorMessage(`MCC build error: ${String(e)}`);
+      }
+    }
+  );
+}
+
+// Write the build report to the "MCode Build" output channel and map the
+// build's warnings/errors into the Problems tab.
+function renderBuildResult(entryFile: string, result: BuildResult): void {
+  const s = result.summary ?? {};
+  const diags = result.diagnostics ?? [];
+
+  // ── Output console ──
+  buildOutput.appendLine("");
+  buildOutput.appendLine(`[mcc build] entry: ${entryFile}`);
+  buildOutput.appendLine(
+    `[mcc build] modules: ${s.module_count ?? 0}, components: ${
+      s.component_count ?? 0
+    }, interfaces: ${s.interface_count ?? 0}, instances: ${
+      s.instance_count ?? 0
+    }, nets: ${s.net_count ?? 0}`
+  );
+  buildOutput.appendLine(
+    `[mcc build] errors: ${s.errors ?? 0}, warnings: ${
+      s.warnings ?? 0
+    } (${s.elapsed_ms ?? 0} ms)`
+  );
+  for (const d of diags) {
+    buildOutput.appendLine(
+      `  ${d.severity} [${d.code}] ${d.file}:${d.line}:${d.column}: ${d.message}`
+    );
+  }
+  buildOutput.show(true);
+
+  // ── Problems tab (own collection, never clobbers live editing diagnostics) ──
+  const byFile = new Map<string, Diagnostic[]>();
+  for (const d of diags) {
+    const uri = d.file.startsWith("file://") ? Uri.parse(d.file) : Uri.file(d.file);
+    const line = Math.max(0, (d.line || 1) - 1);
+    const column = Math.max(0, (d.column || 1) - 1);
+    const len = Math.max(1, d.len || 1);
+    const range = new Range(new Position(line, column), new Position(line, column + len));
+    const diag = new Diagnostic(range, d.message, severityFor(d.severity));
+    diag.source = "mcc build";
+    diag.code = d.code;
+    const arr = byFile.get(uri.toString()) ?? [];
+    arr.push(diag);
+    byFile.set(uri.toString(), arr);
+  }
+  buildDiags.clear();
+  for (const [key, ds] of byFile) {
+    buildDiags.set(Uri.parse(key), ds);
+  }
+}
+
+function severityFor(s: string): DiagnosticSeverity {
+  switch (s) {
+    case "warning":
+      return DiagnosticSeverity.Warning;
+    case "info":
+      return DiagnosticSeverity.Information;
+    case "hint":
+      return DiagnosticSeverity.Hint;
+    default:
+      return DiagnosticSeverity.Error;
   }
 }
 
