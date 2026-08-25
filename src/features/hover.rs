@@ -134,7 +134,7 @@ fn resolve_symbol_hover(
         // Reference symbols — try to resolve to definition
         1 | 3 | 17 | 19 | 9 | 11 | 13 | 15 | 7 => {
             // Carry the RefDefMap (same source as F12) so pin/port/label refs
-            // can show their definition instead of a bare `— → pin`.
+            // can show their definition instead of a bare resolved name.
             let ref_def_map = {
                 let cell = state.symbols.sem_symbols.get(uri)?;
                 let guard = cell.lock().ok()?;
@@ -195,10 +195,20 @@ fn resolve_reference_hover(
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                 .unwrap_or_default();
             let ref_kind = kind_label(kind);
-            let lines = vec![
-                format!("→ `{}` ({})", name, ref_kind),
+            let mut lines = vec![
+                format!("`{}` ({})", name, ref_kind),
                 format!("📄 {}", source),
             ];
+            // ★ Full definition first — same source-line lead as the RefDefMap
+            // path. Best-effort: an unreadable def file (e.g. a dependency
+            // outside the workspace) just keeps the bare arrow lines.
+            if let Some(rope) =
+                state.document_rope(&entry.uri).or_else(|| read_file_to_rope(&entry.uri))
+            {
+                if let Some(line) = def_text_from_rope(&rope, entry.span.0) {
+                    lines.insert(0, format!("```\n{}\n```", line));
+                }
+            }
             return format_markdown_hover(&lines);
         }
     }
@@ -242,10 +252,12 @@ fn resolve_defmap_hover(
 
     let start = entry.def_span[0] as usize;
     let pos = crate::common::position::offset_to_position(start, &def_rope)?;
-    // The def name comes from mcc's AST at registration (`RefDefEntryData.
-    // def_name`, e.g. `RES`) — never a text slice of the def line, which
-    // would drift from the real AST span.
-    let def_text = entry.def_name.clone();
+    // ★ Full definition — the source line containing the def span, e.g.
+    // `io 7 = NRST, "NRST"` for a pin, `component RES(v, r)` for a
+    // component, or the func signature line. `entry.def_name` carries only
+    // the bare symbol name (no params / pin numbers); the enclosing line is
+    // the user's own complete declaration, which is what a hover leads with.
+    let def_text = def_text_from_rope(&def_rope, start)?;
 
     let file_label = def_url
         .to_file_path()
@@ -254,12 +266,13 @@ fn resolve_defmap_hover(
         .unwrap_or_else(|| def_uri_str.clone());
     // ★ CMIE kind (0=Component, 1=Module, 2=Interface, 3=Enum) is more precise
     // than the ref SymbolKind for class refs: a `::DC` ref whose def is an
-    // `interface` must hover as `→ interface`, not a generic `→ class`. Fall
-    // back to the SymbolKind label when the kind is unknown (255).
+    // `interface` must tag as `interface`, not a generic `class`. Fall back to
+    // the SymbolKind label when the kind is unknown (255).
     let ref_kind = cmie_label(entry.cmie_kind).unwrap_or_else(|| kind_label(kind));
+    // Definition first, then the resolved symbol and its location.
     let lines = vec![
-        format!("→ `{}` ({})", name, ref_kind),
         format!("```\n{}\n```", def_text),
+        format!("`{}` ({})", name, ref_kind),
         format!("📄 {}:{}", file_label, pos.line + 1),
     ];
     format_markdown_hover(&lines)
@@ -272,51 +285,96 @@ fn read_file_to_rope(url: &Url) -> Option<Rope> {
     Some(Rope::from_str(&content))
 }
 
+/// Extract the user's complete definition text at `byte_offset` — the source
+/// line containing the def, extended across continuation lines until the
+/// `()`/`[]` brackets balance: `component CAP(\n    cap::UV.CAP, ...)` for a
+/// multi-line component header, `io 7 = NRST, "NRST"` for a pin, or a func
+/// signature line. The bare symbol name alone (no params / pin numbers) isn't
+/// the definition, so the enclosing declaration text leads the hover.
+fn def_text_from_rope(rope: &Rope, byte_offset: usize) -> Option<String> {
+    const MAX_LINES: usize = 15;
+    const MAX_CHARS: usize = 300;
+
+    let start_line = rope.try_byte_to_line(byte_offset).ok()?;
+    let mut depth: i32 = 0;
+    let mut out: Vec<String> = Vec::new();
+    let end_line = (start_line + MAX_LINES).min(rope.len_lines());
+
+    for line_idx in start_line..end_line {
+        let line = rope.get_line(line_idx)?.to_string();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        for c in line.chars() {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        out.push(trimmed.to_string());
+        if depth <= 0 {
+            break;
+        }
+    }
+
+    let mut text = out.join("\n");
+    if text.chars().count() > MAX_CHARS {
+        text = text.chars().take(MAX_CHARS).collect::<String>();
+        text.push('…');
+    }
+    Some(text)
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/// Human-readable label for a SymbolKind ordinal.
+/// Human-readable label for a SymbolKind ordinal — no `→` prefix; the hover
+/// already leads with the full definition line, so the kind tag is plain
+/// (`pin`, `instance`, …) rather than a reference arrow.
 fn kind_label(kind: u8) -> &'static str {
     // SymbolKind ordinals from mcc
     match kind {
         0 => "component/module", // ClassDef
-        1 => "→ class",          // ClassRef
+        1 => "class",            // ClassRef
         2 => "instance",         // InstDef
-        3 => "→ instance",       // InstRef
+        3 => "instance",         // InstRef
         4 => "port",             // PortDef
-        5 => "→ port",           // PortRef
+        5 => "port",             // PortRef
         6 => "label",            // LabelDef
-        7 => "→ label",          // LabelRef
+        7 => "label",            // LabelRef
         8 => "function",         // FuncDef
-        9 => "→ function",       // FuncRef
+        9 => "function",         // FuncRef
         10 | 12 | 14 => "pin",   // Pin*Def
-        11 | 13 | 15 => "→ pin", // Pin*Ref
+        11 | 13 | 15 => "pin",   // Pin*Ref
         16 | 18 => "enum",       // EnumDef/EnumValDef
-        17 | 19 => "→ enum",     // EnumRef/EnumValRef
+        17 | 19 => "enum",       // EnumRef/EnumValRef
         20 => "role",            // RoleDef
         21 => "param",           // ParamDef
         22 => "define",          // DefineDef
         23 => "attr",            // AttrDef
-        24 => "→ func param",    // FuncParamRef
+        24 => "func param",      // FuncParamRef
         25 => "bus",             // BusDef
-        26 => "→ bus",           // BusRef
+        26 => "bus",             // BusRef
         27 => "unknown",         // UnknownDef
         28 => "bus member",      // BusMemberDef
-        29 => "→ bus member",    // BusMemberRef
+        29 => "bus member",      // BusMemberRef
         _ => "?",
     }
 }
 
 /// Label from a CMIE kind ordinal (RefDefEntryData.cmie_kind) — the real kind
-/// of the class/def (0=Component, 1=Module, 2=Interface, 3=Enum). Returns
-/// None for UNKNOWN (255) so callers fall back to the SymbolKind label.
+/// of the class/def (0=Component, 1=Module, 2=Interface, 3=Enum), plain
+/// (no `→` prefix, matching `kind_label`). Returns None for UNKNOWN (255) so
+/// callers fall back to the SymbolKind label.
 fn cmie_label(cmie_kind: u8) -> Option<&'static str> {
     match cmie_kind {
-        0 => Some("→ component"),
-        1 => Some("→ module"),
-        2 => Some("→ interface"),
-        3 => Some("→ enum"),
+        0 => Some("component"),
+        1 => Some("module"),
+        2 => Some("interface"),
+        3 => Some("enum"),
         _ => None,
     }
 }
@@ -432,6 +490,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn def_text_from_rope_extracts_full_trimmed_line() {
+        // Any byte offset inside a definition line returns the user's whole
+        // declaration text — the pin's `io` statement here, not just `NRST`.
+        let source = "module main\n{\n    io 7 = NRST, \"NRST\"\n}";
+        let rope = Rope::from_str(source);
+        let offset = byte_offset(source, "io 7 = NRST", 0).unwrap();
+        let line = def_text_from_rope(&rope, offset).unwrap();
+        assert_eq!(line, "io 7 = NRST, \"NRST\"");
+    }
+
+    #[test]
+    fn def_text_from_rope_handles_byte_offset_inside_token() {
+        // Offset lands mid-name (`NRST`) — still the whole definition line.
+        let source = "component MCU\n{\n    io 7 = NRST, \"NRST\"\n}";
+        let rope = Rope::from_str(source);
+        let offset = byte_offset(source, "NRST", 0).unwrap() + 2;
+        let line = def_text_from_rope(&rope, offset).unwrap();
+        assert_eq!(line, "io 7 = NRST, \"NRST\"");
+    }
+
+    #[test]
+    fn def_text_from_rope_follows_multiline_component_header() {
+        // A multi-line `component CAP(...)` must include the full parameter
+        // list, not just the truncated `component CAP(` opening line.
+        let source = "component CAP(\n    cap::UV.CAP,\n    volt::UV.VOLT\n)\n{\n    name = \"Capacitor\"\n}";
+        let rope = Rope::from_str(source);
+        let offset = byte_offset(source, "component CAP", 0).unwrap() + 10;
+        let text = def_text_from_rope(&rope, offset).unwrap();
+        assert!(text.contains("component CAP("), "got: {text}");
+        assert!(text.contains("cap::UV.CAP"), "got: {text}");
+        assert!(text.contains("volt::UV.VOLT"), "got: {text}");
+        // Stops once the header's brackets balance — the body is not included.
+        assert!(!text.contains("Capacitor"), "got: {text}");
+    }
+
     // ── Symbol hover ──
 
     fn state_with_lapper(
@@ -516,10 +610,11 @@ mod tests {
     }
 
     #[test]
-    fn pinref_hover_shows_def_name_via_refdefmap() {
+    fn pinref_hover_shows_full_def_line_via_refdefmap() {
         // `uC.ADC{P,N}` (PinIfaceRef) must resolve through the RefDefMap to
-        // its def and show the def name captured by mcc from the AST node
-        // (RefDefEntryData.def_name) — not a bare `— → pin`.
+        // its def and LEAD with the def's full source line (`io [16, 17, 21]
+        // = ADC::ADC.DIFF(Receiver)`) — the pin's original definition, not a
+        // bare def name nor a bare `— → pin`.
         use crate::rpc::{LapperEntry, RefDefEntryData, RefDefMapData};
         use crate::state::RpcSemSymbols;
         use std::sync::{Arc, Mutex};
@@ -587,8 +682,14 @@ mod tests {
         match &hover.contents {
             HoverContents::Markup(mc) => {
                 assert!(
-                    mc.value.contains("→ pin"),
+                    mc.value.contains("(pin)"),
                     "expected ref kind label, got: {}",
+                    mc.value
+                );
+                // No reference arrows anywhere in the tooltip.
+                assert!(
+                    !mc.value.contains('→'),
+                    "expected no → arrows in tooltip, got: {}",
                     mc.value
                 );
                 assert!(
@@ -596,9 +697,12 @@ mod tests {
                     "expected def name in tooltip, got: {}",
                     mc.value
                 );
+                // ★ The definition leads the tooltip as a full source line —
+                // the pin's original `io` statement, not just the name `ADC`.
                 assert!(
-                    !mc.value.contains("ADC::ADC.DIFF"),
-                    "expected def name only, got def line: {}",
+                    mc.value
+                        .starts_with("```\nio [16, 17, 21] = ADC::ADC.DIFF(Receiver)\n```"),
+                    "expected the full def line to lead the tooltip, got: {}",
                     mc.value
                 );
                 assert!(
