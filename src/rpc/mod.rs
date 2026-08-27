@@ -427,6 +427,44 @@ pub struct BuildSummary {
     pub instance_count: u64,
     #[serde(default)]
     pub net_count: u64,
+    /// Categorized statistics (system/project splits + used classes + instance
+    /// breakdown), mirroring `mcc build`'s Summary block. Absent when the daemon
+    /// is older than the build.full change that added it.
+    #[serde(default)]
+    pub stats: Option<BuildStats>,
+}
+
+/// Categorized build statistics — the same numbers `mcc build` renders in its
+/// Summary block. `ns_*` split the *namespace classes* (all defined modules /
+/// components / interfaces) by definition space; `used_*` split the classes
+/// *actually instantiated*; `module_insts`/`component_insts` are the instance
+/// counts by kind.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BuildStats {
+    #[serde(default)]
+    pub ns_modules_system: u64,
+    #[serde(default)]
+    pub ns_modules_project: u64,
+    #[serde(default)]
+    pub ns_components_system: u64,
+    #[serde(default)]
+    pub ns_components_project: u64,
+    #[serde(default)]
+    pub ns_interfaces_system: u64,
+    #[serde(default)]
+    pub ns_interfaces_project: u64,
+    #[serde(default)]
+    pub used_modules_system: u64,
+    #[serde(default)]
+    pub used_modules_project: u64,
+    #[serde(default)]
+    pub used_components_system: u64,
+    #[serde(default)]
+    pub used_components_project: u64,
+    #[serde(default)]
+    pub module_insts: u64,
+    #[serde(default)]
+    pub component_insts: u64,
 }
 
 #[derive(Debug, Serialize)]

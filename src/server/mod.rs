@@ -203,6 +203,7 @@ impl Backend {
                         "errors": s.errors,
                         "warnings": s.warnings,
                         "elapsed_ms": s.elapsed_ms,
+                        "stats": s.stats,
                     },
                     "diagnostics": diagnostics,
                 })))
@@ -1069,12 +1070,18 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         debug!("did_close: {}", params.text_document.uri.path());
-        self.state.remove_document(&params.text_document.uri);
-        self.state
-            .project
-            .scheduler
-            .remove(&params.text_document.uri);
-        let mc_uri = String::from(params.text_document.uri.path());
+        let uri = params.text_document.uri.clone();
+        // Publish empty diagnostics so the closed file's entries leave the
+        // Problems panel instead of lingering (VSCode keeps the last published
+        // set until the server publishes a new one). Capture the version before
+        // removing the document so the clear isn't dropped as stale.
+        let version = self.state.document_version(&uri);
+        self.client
+            .publish_diagnostics(uri.clone(), Vec::new(), version)
+            .await;
+        self.state.remove_document(&uri);
+        self.state.project.scheduler.remove(&uri);
+        let mc_uri = String::from(uri.path());
         let _ = self
             .state
             .project
@@ -1093,6 +1100,13 @@ impl LanguageServer for Backend {
                         .project
                         .index
                         .send(IndexCommand::RemoveFile(mc_uri));
+                    // Publish empty diagnostics so a deleted file's entries
+                    // (e.g. a closed-then-deleted _scratch_*.mc) leave the
+                    // Problems panel instead of lingering.
+                    let version = self.state.document_version(&change.uri);
+                    self.client
+                        .publish_diagnostics(change.uri.clone(), Vec::new(), version)
+                        .await;
                 }
                 FileChangeType::CREATED | FileChangeType::CHANGED => {
                     let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));

@@ -82,9 +82,28 @@ interface BuildResult {
     errors?: number;
     warnings?: number;
     elapsed_ms?: number;
+    stats?: BuildStats;
   };
   diagnostics?: BuildDiag[];
   error?: string;
+}
+
+// Categorized build statistics — the same numbers `mcc build` prints in its
+// Summary block: namespace classes and used classes each split into
+// system (`/mcode/` library) vs project space, plus the instance breakdown.
+interface BuildStats {
+  ns_modules_system?: number;
+  ns_modules_project?: number;
+  ns_components_system?: number;
+  ns_components_project?: number;
+  ns_interfaces_system?: number;
+  ns_interfaces_project?: number;
+  used_modules_system?: number;
+  used_modules_project?: number;
+  used_components_system?: number;
+  used_components_project?: number;
+  module_insts?: number;
+  component_insts?: number;
 }
 
 const PROJECT_MANIFEST_NAMES = ["project.toml", "manifest.toml", "mcc.toml"];
@@ -314,6 +333,56 @@ function renderBuildResult(entryFile: string, result: BuildResult): void {
       s.instance_count ?? 0
     }, nets: ${s.net_count ?? 0}`
   );
+
+  // ── Categorized statistics (mirrors `mcc build`'s Summary block) ──
+  // namespace classes / used classes split into system (`/mcode/`) vs project
+  // space, and the instance breakdown by kind.
+  const st = s.stats;
+  if (st) {
+    const z = (n?: number) => n ?? 0;
+    buildOutput.appendLine(
+      `[mcc build]   namespace classes: modules=${
+        z(st.ns_modules_system) + z(st.ns_modules_project)
+      }, components=${
+        z(st.ns_components_system) + z(st.ns_components_project)
+      }, interfaces=${
+        z(st.ns_interfaces_system) + z(st.ns_interfaces_project)
+      }`
+    );
+    buildOutput.appendLine(
+      `[mcc build]     system:  modules=${z(st.ns_modules_system)}, components=${z(
+        st.ns_components_system
+      )}, interfaces=${z(st.ns_interfaces_system)}`
+    );
+    buildOutput.appendLine(
+      `[mcc build]     project: modules=${z(st.ns_modules_project)}, components=${z(
+        st.ns_components_project
+      )}, interfaces=${z(st.ns_interfaces_project)}`
+    );
+    buildOutput.appendLine(
+      `[mcc build]   used classes:      modules=${
+        z(st.used_modules_system) + z(st.used_modules_project)
+      }, components=${
+        z(st.used_components_system) + z(st.used_components_project)
+      }`
+    );
+    buildOutput.appendLine(
+      `[mcc build]     system:  modules=${z(st.used_modules_system)}, components=${z(
+        st.used_components_system
+      )}`
+    );
+    buildOutput.appendLine(
+      `[mcc build]     project: modules=${z(st.used_modules_project)}, components=${z(
+        st.used_components_project
+      )}`
+    );
+    buildOutput.appendLine(
+      `[mcc build]   instances:         ${
+        s.instance_count ?? 0
+      } (modules=${z(st.module_insts)}, components=${z(st.component_insts)})`
+    );
+  }
+
   buildOutput.appendLine(
     `[mcc build] errors: ${s.errors ?? 0}, warnings: ${
       s.warnings ?? 0
@@ -327,11 +396,31 @@ function renderBuildResult(entryFile: string, result: BuildResult): void {
   buildOutput.show(true);
 
   // ── Problems tab (own collection, never clobbers live editing diagnostics) ──
+  // Open files already get their diagnostics from the language server's
+  // per-file collection. Skip build entries that duplicate a live one (same
+  // code at the same position), so a warning like E5501 doesn't appear twice.
+  const liveKeys = new Map<string, Set<string>>();
+  const liveKey = (code: unknown, line: number, col: number) => `${code}|${line}|${col}`;
+  const isLive = (uri: Uri, code: unknown, line: number, col: number): boolean => {
+    let set = liveKeys.get(uri.toString());
+    if (!set) {
+      set = new Set();
+      for (const d of languages.getDiagnostics(uri)) {
+        set.add(liveKey(d.code, d.range.start.line, d.range.start.character));
+      }
+      liveKeys.set(uri.toString(), set);
+    }
+    return set.has(liveKey(code, line, col));
+  };
+
   const byFile = new Map<string, Diagnostic[]>();
   for (const d of diags) {
     const uri = d.file.startsWith("file://") ? Uri.parse(d.file) : Uri.file(d.file);
     const line = Math.max(0, (d.line || 1) - 1);
     const column = Math.max(0, (d.column || 1) - 1);
+    if (isLive(uri, d.code, line, column)) {
+      continue; // already reported by the live per-file diagnostics
+    }
     const len = Math.max(1, d.len || 1);
     const range = new Range(new Position(line, column), new Position(line, column + len));
     const diag = new Diagnostic(range, d.message, severityFor(d.severity));
