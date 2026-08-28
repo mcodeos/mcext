@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+mod types;
+
 /// RPC client for mcc server
 #[derive(Clone)]
 pub struct MccRpcClient {
@@ -566,8 +568,8 @@ pub struct RefDefMapData {
     pub(crate) kind_map: OnceLock<HashMap<String, u8>>,
 }
 
-/// §14.4: Shared RPC type from mc-rpc-types crate.
-pub use mc_rpc_types::RefDefEntryData;
+/// Ref→def mapping entry — RPC wire type (see `types` module).
+pub use types::RefDefEntryData;
 
 impl RefDefMapData {
     /// O(1) lookup by (ref_kind, ref_id). Builds HashMap index on first call.
@@ -622,8 +624,8 @@ pub struct LocalReference {
     pub declare_id: Option<u32>,
 }
 
-/// §14.4: Shared RPC type from mc-rpc-types crate.
-pub use mc_rpc_types::LapperEntry;
+/// Lapper interval entry — RPC wire type (see `types` module).
+pub use types::LapperEntry;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GlobalSymbols {
