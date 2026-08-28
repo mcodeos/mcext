@@ -45,6 +45,7 @@ pub enum UseCheckResult {
 /// # Examples
 ///
 /// ```
+/// use mcodels::util::usechk::strip_use_keyword;
 /// assert_eq!(strip_use_keyword("use ./helper"), Some("./helper"));
 /// assert_eq!(strip_use_keyword("pub use ./helper as h"), Some("./helper"));
 /// assert_eq!(strip_use_keyword("not a use"), None);
