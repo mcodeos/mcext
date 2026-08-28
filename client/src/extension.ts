@@ -260,10 +260,7 @@ async function renderPreview(filePath: string, top?: string): Promise<void> {
       arguments: top ? [filePath, top] : [filePath],
     })) as { ok: boolean; html?: string; error?: string } | null;
     if (seq !== previewRenderSeq || previewPanel !== panel) return;
-    panel.webview.html =
-      result && result.ok && result.html
-        ? result.html
-        : errorHtml(result?.error ?? "build.viz returned no html");
+    panel.webview.html = previewResultHtml(result);
   } catch (e) {
     if (seq !== previewRenderSeq || previewPanel !== panel) return;
     panel.webview.html = errorHtml(String(e));
@@ -455,6 +452,28 @@ function loadingHtml(message: string): string {
 
 function errorHtml(message: string): string {
   return `<!DOCTYPE html><html><body><pre>${escapeHtml(message)}</pre></body></html>`;
+}
+
+// RPC error → webview content. A file that declares no module, component, or
+// interface (e.g. a pure reference file like units.mc) is not an error worth
+// showing: the server reports "no module, component, or interface found"
+// (virtual_inst.rs resolve_targets), which just means there is nothing to
+// render — show a neutral notice instead of the raw RPC error.
+function previewResultHtml(
+  result: { ok: boolean; html?: string; error?: string } | null
+): string {
+  if (result && result.ok && result.html) {
+    return result.html;
+  }
+  const err = result?.error ?? "";
+  if (/no module, component, or interface found/i.test(err)) {
+    return noCircuitHtml();
+  }
+  return errorHtml(err || "build.viz returned no html");
+}
+
+function noCircuitHtml(): string {
+  return `<!DOCTYPE html><html><body><p>No circuit to display — this file declares no module, component, or interface.</p></body></html>`;
 }
 
 function escapeHtml(s: string): string {
