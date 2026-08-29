@@ -271,15 +271,35 @@ async function renderPreview(filePath: string, top?: string): Promise<void> {
 // then render the report to the Output console and warnings/errors to the
 // Problems tab.
 async function buildProject(): Promise<void> {
+  // Unified principle (mcd use-design §19.5 rule 3): Build Project targets a
+  // *file* when the active editor is an .mc file, otherwise a *folder*. The
+  // server's build.full directory branch batch-parses every .mc file under the
+  // folder (including subfolders) when it has no project.toml/manifest.toml/
+  // mcc.toml, or builds the project when one is present.
   const editor = window.activeTextEditor;
-  if (!editor || editor.document.languageId !== "mcode") {
+  let entryPath: string | undefined;
+
+  if (editor && editor.document.languageId === "mcode") {
+    entryPath = editor.document.uri.fsPath;
+  } else {
+    // No active .mc editor → build the opened workspace folder (or, failing
+    // that, the directory containing the active file).
+    const folder = workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (folder) {
+      entryPath = folder;
+    } else if (editor) {
+      entryPath = path.dirname(editor.document.uri.fsPath);
+    }
+  }
+
+  if (!entryPath) {
     window.showInformationMessage(
-      "MCode: open a .mc file to build its project."
+      "MCode: open a .mc file or a folder to build."
     );
     return;
   }
 
-  const filePath = editor.document.uri.fsPath;
+  const filePath = entryPath;
 
   // Fresh build → drop the previous build's Problems entries.
   buildDiags.clear();

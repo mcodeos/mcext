@@ -54,14 +54,21 @@ impl Backend {
     /// configured project_root). Commands build/render the *project* top module,
     /// so when a manifest exists above the file we always use its entry/top_module
     /// (NOT the active file — a sub-file like us513.mc defines a component, not
-    /// the top). Only a standalone .mc file (no manifest anywhere above) uses the
-    /// active file. `build.*` reloads libs (params) and the project graph (from
+    /// the top). `build.*` reloads libs (params) and the project graph (from
     /// the absolute entry) on every call, so per-project entry+libs is sufficient
     /// — no set_project_root/load_project needed.
+    ///
+    /// `batch_fallback` enables the unified "no-manifest folder" semantics
+    /// (mcd use-design §19.5 rule 3): when there is no project manifest for the
+    /// target, return the *folder* to batch-parse (all `.mc` files recursively,
+    /// each file's default top) instead of a single standalone file. `mcode.viz`
+    /// passes `false` (it always renders one entry); `mcode.buildProject` passes
+    /// `true`.
     fn resolve_project_context(
         &self,
         entry_arg: Option<&str>,
         top_arg: Option<&str>,
+        batch_fallback: bool,
     ) -> std::result::Result<(String, Option<String>, Vec<String>), String> {
         let project_root = self
             .config
@@ -69,14 +76,26 @@ impl Backend {
             .and_then(|c| c.project_root.clone());
 
         debug!(
-            "resolve_project_context: entry_arg={:?} project_root={:?}",
-            entry_arg, project_root
+            "resolve_project_context: entry_arg={:?} project_root={:?} batch_fallback={}",
+            entry_arg, project_root, batch_fallback
         );
 
         match entry_arg {
             Some(e) => {
                 let file = normalize_entry_path(e);
                 let file_path = Path::new(&file);
+                // Folder entry (Build Project with no active .mc editor): project
+                // if it has a manifest, else batch-parse the whole folder.
+                if batch_fallback && file_path.is_dir() {
+                    return match ProjectConfig::load_from(file_path) {
+                        Some(c) => Ok((
+                            c.entry_path(file_path),
+                            c.project.top_module.clone(),
+                            c.dependency_names().iter().map(|s| s.to_string()).collect(),
+                        )),
+                        None => Ok((file, None, Vec::new())),
+                    };
+                }
                 match find_project_root_from_file(file_path) {
                     Some(root) => match ProjectConfig::load_from(&root) {
                         Some(c) => Ok((
@@ -91,12 +110,30 @@ impl Backend {
                             Vec::new(),
                         )),
                     },
-                    // No manifest above the file → treat the file as standalone.
-                    None => Ok((
-                        normalize_entry_path(e),
-                        top_arg.map(|s| s.to_string()),
-                        Vec::new(),
-                    )),
+                    // No manifest above the file.
+                    None => {
+                        if batch_fallback {
+                            // Unified principle: batch-parse the opened folder
+                            // (workspace project_root) if any, else the file's own
+                            // directory — the mcc server's build.full directory
+                            // branch recurses over every `.mc` file.
+                            let batch_root = match &project_root {
+                                Some(r) if r.is_dir() => r.to_string_lossy().to_string(),
+                                _ => file_path
+                                    .parent()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| normalize_entry_path(e)),
+                            };
+                            Ok((batch_root, None, Vec::new()))
+                        } else {
+                            // Standalone file (viz etc.): build just this file.
+                            Ok((
+                                normalize_entry_path(e),
+                                top_arg.map(|s| s.to_string()),
+                                Vec::new(),
+                            ))
+                        }
+                    }
                 }
             }
             // Backward compat: no file argument → keep the old project_root logic.
@@ -107,7 +144,14 @@ impl Backend {
                         c.project.top_module.clone(),
                         c.dependency_names().iter().map(|s| s.to_string()).collect(),
                     )),
-                    None => Err("no project manifest entry and no file argument".into()),
+                    // project_root exists but has no manifest → batch-parse it.
+                    None => {
+                        if batch_fallback {
+                            Ok((root.to_string_lossy().to_string(), None, Vec::new()))
+                        } else {
+                            Err("no project manifest entry and no file argument".into())
+                        }
+                    }
                 },
                 None => Err("no project root and no file argument".into()),
             },
@@ -135,16 +179,19 @@ impl Backend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let (entry, top, libs) =
-            match self.resolve_project_context(entry_arg.as_deref(), top_arg.as_deref()) {
-                Ok(t) => t,
-                Err(e) => {
-                    return Ok(Some(serde_json::json!({
-                        "ok": false,
-                        "error": format!("mcode.buildProject: {e}"),
-                    })))
-                }
-            };
+        let (entry, top, libs) = match self.resolve_project_context(
+            entry_arg.as_deref(),
+            top_arg.as_deref(),
+            true, // buildProject: no-manifest folder → batch-parse all .mc files
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(Some(serde_json::json!({
+                    "ok": false,
+                    "error": format!("mcode.buildProject: {e}"),
+                })))
+            }
+        };
 
         let server_guard = self.mcc_server.read().await;
         let Some(server) = server_guard.as_ref() else {
@@ -1508,13 +1555,16 @@ impl LanguageServer for Backend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let (entry, top, libs) =
-            match self.resolve_project_context(entry_arg.as_deref(), top_arg.as_deref()) {
-                Ok(t) => t,
-                Err(e) => {
-                    return Ok(Some(serde_json::json!({
-                        "ok": false,
-                        "error": format!("mcode.viz: {e}"),
+        let (entry, top, libs) = match self.resolve_project_context(
+            entry_arg.as_deref(),
+            top_arg.as_deref(),
+            false, // viz renders a single entry; never batch-parse a folder
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(Some(serde_json::json!({
+                    "ok": false,
+                    "error": format!("mcode.viz: {e}"),
                     })))
                 }
             };
