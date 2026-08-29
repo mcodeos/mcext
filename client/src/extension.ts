@@ -206,6 +206,23 @@ export async function activate(context: ExtensionContext) {
       void renderPreview(filePath);
     })
   );
+
+  // Auto-show the circuit preview on startup: when VSCode opens with an .mc
+  // file active — or the first .mc document becomes active — render the active
+  // file's viz without a manual button click. One-shot per activation: after it
+  // fires, later switches are covered by the cross-project refresh listener
+  // above (which only acts while a panel is open), so a panel the user closed
+  // deliberately stays closed.
+  let autoPreviewFired = false;
+  const autoOpenPreview = (): void => {
+    if (autoPreviewFired) return;
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "mcode") return;
+    autoPreviewFired = true;
+    void previewViz();
+  };
+  autoOpenPreview();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(autoOpenPreview));
 }
 
 async function previewViz(top?: string): Promise<void> {
