@@ -85,6 +85,25 @@ interface BuildResult {
     stats?: BuildStats;
   };
   diagnostics?: BuildDiag[];
+  // Failure ledger (resolve-gate-design.md §7.1-2): cross-pass record of
+  // non-clean parses — silent fallbacks, phantoms, floating wires.
+  ledger?: {
+    total: number;
+    by_kind_form: { [kind: string]: { [form: string]: number } };
+    resolved_late: number;
+    detail?: {
+      kind: string;
+      form: string;
+      site: string;
+      action: string;
+      refs?: number;
+      file?: string;
+      line?: number;
+      column?: number;
+      pos?: number;
+      len?: number;
+    }[];
+  };
   error?: string;
 }
 
@@ -422,6 +441,24 @@ function renderBuildResult(entryFile: string, result: BuildResult): void {
       s.warnings ?? 0
     } (${s.elapsed_ms ?? 0} ms)`
   );
+
+  // ── Failure ledger (resolve-gate-design.md §7.1): silent non-clean parses ──
+  const ledger = result.ledger;
+  if (ledger) {
+    buildOutput.appendLine(
+      `[mcc build] ledger: ${ledger.total} non-clean ${
+        ledger.total === 1 ? "parse" : "parses"
+      } (deferred resolved late: ${ledger.resolved_late ?? 0})`
+    );
+    for (const [kind, forms] of Object.entries(ledger.by_kind_form)) {
+      const entries = Object.entries(forms);
+      if (entries.length === 0) continue;
+      const count = entries.reduce((a, [, c]) => a + c, 0);
+      const formsStr = entries.map(([f, c]) => `${f}×${c}`).join(", ");
+      buildOutput.appendLine(`[mcc build]   ${kind}: ${count} [${formsStr}]`);
+    }
+  }
+
   for (const d of diags) {
     buildOutput.appendLine(
       `  ${d.severity} [${d.code}] ${d.file}:${d.line}:${d.column}: ${d.message}`

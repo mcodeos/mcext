@@ -239,7 +239,7 @@ impl Backend {
                     "mcode.buildProject: ok, errors={} warnings={} elapsed_ms={}",
                     s.errors, s.warnings, s.elapsed_ms
                 );
-                Ok(Some(serde_json::json!({
+                let mut payload = serde_json::json!({
                     "ok": true,
                     "summary": {
                         "module_count": s.module_count,
@@ -253,7 +253,15 @@ impl Backend {
                         "stats": s.stats,
                     },
                     "diagnostics": diagnostics,
-                })))
+                });
+                // Failure ledger (resolve-gate-design.md §7.1-2) — omit when the
+                // backend didn't return one (older mcc daemon).
+                if let Some(ledger) = &resp.ledger {
+                    if let Ok(v) = serde_json::to_value(ledger) {
+                        payload["ledger"] = v;
+                    }
+                }
+                Ok(Some(payload))
             }
             Err(e) => {
                 warn!("mcode.buildProject: build failed: {e}");

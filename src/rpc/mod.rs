@@ -374,6 +374,49 @@ pub struct BuildFullResponse {
     pub pass1: BuildPass,
     pub pass2: BuildPass,
     pub summary: BuildSummary,
+    /// Failure ledger (resolve-gate-design.md §7.1-2): cross-pass record of
+    /// non-clean parses (silent fallbacks, phantoms, floating wires). Optional
+    /// so a backend that doesn't emit it still deserializes.
+    #[serde(default)]
+    pub ledger: Option<LedgerReport>,
+}
+
+/// Failure ledger summary (resolve-gate-design.md §7.1-2): kind×form counts
+/// plus per-row detail. Mirrors the mcc backend's `LedgerReport` shape.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LedgerReport {
+    pub total: usize,
+    /// kind → form → count (all six kinds present; empty inner map = none).
+    #[serde(default)]
+    pub by_kind_form: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, usize>,
+    >,
+    #[serde(default)]
+    pub resolved_late: usize,
+    /// Per-row detail, only when the backend was asked for it (`--ledger`).
+    #[serde(default)]
+    pub detail: Vec<LedgerDetailRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LedgerDetailRow {
+    pub kind: String,
+    pub form: String,
+    pub site: String,
+    pub action: String,
+    #[serde(default)]
+    pub refs: Option<u32>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub column: Option<u32>,
+    #[serde(default)]
+    pub pos: Option<u32>,
+    #[serde(default)]
+    pub len: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
