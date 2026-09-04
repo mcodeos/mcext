@@ -125,15 +125,12 @@ fn emit_single_token(
 
     // Reclassify KEYWORD-typed identifiers: check if it's a real language keyword
     let final_type = if type_ == type_map::T_KEYWORD as i16 {
-        if end <= rope.len_bytes() {
-            let text = rope.byte_slice(pos..end).to_string();
-            if is_mcode_keyword(&text) {
-                type_map::T_KEYWORD
-            } else {
-                type_map::T_VARIABLE // identifier, not a keyword
-            }
-        } else {
-            type_ as u32
+        match extract_aligned_text(rope, pos, end) {
+            Some(text) if is_mcode_keyword(&text) => type_map::T_KEYWORD,
+            Some(_) => type_map::T_VARIABLE, // identifier, not a keyword
+            // Range doesn't map to whole chars (stale/mis-measured token data
+            // against the current buffer) — keep mcc's classification.
+            None => type_ as u32,
         }
     } else {
         type_ as u32
@@ -146,6 +143,53 @@ fn emit_single_token(
         token_type: final_type,
         token_modifiers_bitset: 0,
     });
+}
+
+/// Returns the document text covered by byte range `[start, end)`, or `None`
+/// when the range cannot be mapped to whole UTF-8 chars.
+///
+/// mcc reports token positions/lengths as byte offsets, but those can drift out
+/// of alignment with the live `Rope` (the analysis snapshot races the buffer).
+/// `ropey`'s `byte_slice` panics on ranges that split a multi-byte char, while
+/// its `try_byte_to_char`/`try_byte_to_line` silently round interior bytes down
+/// to the containing char — so neither is a usable boundary check.  Instead we
+/// first try the non-panicking `get_byte_slice`, then, when a boundary cuts a
+/// char, snap inward to the maximal char-aligned sub-range still inside the
+/// token (dropping the partial edge chars) so the keyword reclassification
+/// below can still run on a sane prefix.
+fn extract_aligned_text(rope: &Rope, start: usize, end: usize) -> Option<String> {
+    // Fast path: range already falls on char boundaries (in-sync, ASCII, ...).
+    if let Some(s) = rope.get_byte_slice(start..end) {
+        return Some(s.to_string());
+    }
+
+    let rope_len = rope.len_bytes();
+    if start >= rope_len {
+        return None;
+    }
+    let end = end.min(rope_len);
+
+    // A byte index is on a char boundary iff it is at the rope end or its byte
+    // is not a UTF-8 continuation byte (0x80..0xBF).
+    let is_boundary =
+        |b: usize| b >= rope_len || (rope.byte(b) & 0xC0) != 0x80;
+
+    // Move `start` up to the next boundary (excludes the char cut at the left).
+    let mut lo = start;
+    while !is_boundary(lo) {
+        lo += 1;
+    }
+    // Move `end` down to the last boundary strictly inside the range.
+    let mut hi = end;
+    while hi > lo && !is_boundary(hi) {
+        hi -= 1;
+    }
+
+    if hi <= lo {
+        return None;
+    }
+    // `lo`/`hi` are char boundaries now, so this cannot panic.
+    Some(rope.byte_slice(lo..hi).to_string())
 }
 
 /// Known mcode language keywords
@@ -484,6 +528,45 @@ mod tests {
             result.iter().all(|t| t.token_type != type_map::T_KEYWORD),
             "non-keyword should not have KEYWORD type"
         );
+    }
+
+    // Regression: a KEYWORD-typed token whose byte range cuts through a
+    // multi-byte UTF-8 char (stale mcc token data vs. the live buffer) used to
+    // panic inside ropey's byte_slice. It must degrade to a token instead.
+    #[test]
+    fn multibyte_split_span_does_not_panic() {
+        // "ab中文cd\n": CJK chars occupy bytes 2..8, so a byte range ending
+        // mid-char no longer has both ends on char boundaries.
+        let text = "ab中文cd\n";
+        let (state, uri) = state_with_tokens(text, vec![(13, 1, 6)]);
+        let result = compute(&state, &uri).unwrap();
+        assert_eq!(result.len(), 1);
+        // The recoverable prefix "b中" is not a keyword.
+        assert_eq!(result[0].token_type, type_map::T_VARIABLE);
+    }
+
+    #[test]
+    fn multibyte_split_start_does_not_panic() {
+        // "a中bc\n": token starts on byte 2, which is a continuation byte of
+        // the 3-byte CJK char 中.
+        let text = "a中bc\n";
+        let (state, uri) = state_with_tokens(text, vec![(13, 2, 3)]);
+        let result = compute(&state, &uri).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].token_type, type_map::T_VARIABLE);
+    }
+
+    #[test]
+    fn aligned_keyword_after_multibyte_kept() {
+        // A real ASCII keyword on a line that also holds CJK earlier must still
+        // be classified as KEYWORD (both byte ends are on char boundaries).
+        let text = "//中注释\ncomponent X\n";
+        let pos = text.find("component").unwrap() as i32;
+        let (state, uri) =
+            state_with_tokens(text, vec![(13, pos, 9)]);
+        let result = compute(&state, &uri).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].token_type, type_map::T_KEYWORD);
     }
 
     #[test]

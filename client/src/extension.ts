@@ -57,6 +57,29 @@ let previewRenderSeq = 0;
 const buildOutput = window.createOutputChannel("MCode Build");
 const buildDiags = languages.createDiagnosticCollection("mcode-build");
 
+// Live-vs-build dedup identity: a language-server diagnostic (source "mcc") and
+// a whole-project build diagnostic (source "mcc build") that share the same code
+// and 0-based start position describe the same problem — showing both in the
+// Problems tab is duplication.
+function diagnosticKey(code: unknown, line: number, col: number): string {
+  return `${code}|${line}|${col}`;
+}
+
+// True when the language server has already published a per-file diagnostic
+// matching the build entry at (code, line, col). The live collection is the
+// language client's own `client.diagnostics` (created lazily on the first
+// publishDiagnostics), kept separate from buildDiags so a build never clobbers
+// editing-time diagnostics.
+function hasLiveDiag(uri: Uri, code: unknown, line: number, col: number): boolean {
+  const target = diagnosticKey(code, line, col);
+  for (const d of client.diagnostics?.get(uri) ?? []) {
+    if (diagnosticKey(d.code, d.range.start.line, d.range.start.character) === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // One diagnostic in the `mcode.buildProject` executeCommand response
 // (flattened from the build.full pass0/pass1/pass2 envelope).
 interface BuildDiag {
@@ -210,6 +233,38 @@ export async function activate(context: ExtensionContext) {
     commands.registerCommand("mcode.build", () => buildProject())
   );
   context.subscriptions.push(buildOutput, buildDiags);
+
+  // Reconcile build diagnostics against live ones after the fact. The language
+  // server publishes per-file diagnostics asynchronously (debounced reparse
+  // after open/change/save, serialized behind mcc's single-threaded RPC lock),
+  // so a build can finish before the live copy of a problem exists — the
+  // pre-filter inside buildProject couldn't see it, and both a "mcc" and a
+  // "mcc build" entry would end up in Problems. Whenever a document's live
+  // diagnostics change, drop any build entry for it that now duplicates one.
+  // Idempotent: if nothing is removed we don't touch the collection, so this
+  // never re-triggers itself in a loop.
+  context.subscriptions.push(
+    languages.onDidChangeDiagnostics((e) => {
+      for (const uri of e.uris) {
+        const build = buildDiags.get(uri);
+        if (!build || build.length === 0) continue;
+        const live = client.diagnostics?.get(uri);
+        if (!live || live.length === 0) continue;
+        const liveKeys = new Set(
+          live.map((d) => diagnosticKey(d.code, d.range.start.line, d.range.start.character))
+        );
+        const kept = build.filter(
+          (d) => !liveKeys.has(diagnosticKey(d.code, d.range.start.line, d.range.start.character))
+        );
+        if (kept.length === build.length) continue; // nothing duplicated
+        if (kept.length === 0) {
+          buildDiags.delete(uri);
+        } else {
+          buildDiags.set(uri, kept);
+        }
+      }
+    })
+  );
 
   // Auto-refresh an already-open preview when the active .mc file switches to
   // a different project (by nearest project manifest). Same project → no
@@ -470,26 +525,16 @@ function renderBuildResult(entryFile: string, result: BuildResult): void {
   // Open files already get their diagnostics from the language server's
   // per-file collection. Skip build entries that duplicate a live one (same
   // code at the same position), so a warning like E5501 doesn't appear twice.
-  const liveKeys = new Map<string, Set<string>>();
-  const liveKey = (code: unknown, line: number, col: number) => `${code}|${line}|${col}`;
-  const isLive = (uri: Uri, code: unknown, line: number, col: number): boolean => {
-    let set = liveKeys.get(uri.toString());
-    if (!set) {
-      set = new Set();
-      for (const d of languages.getDiagnostics(uri)) {
-        set.add(liveKey(d.code, d.range.start.line, d.range.start.character));
-      }
-      liveKeys.set(uri.toString(), set);
-    }
-    return set.has(liveKey(code, line, col));
-  };
-
+  // This pre-filter only sees live diagnostics published so far — live ones that
+  // land *after* the build completes are handled by the onDidChangeDiagnostics
+  // reconciler registered in activate() (which prunes duplicate build entries
+  // whenever the language server re-publishes a document's diagnostics).
   const byFile = new Map<string, Diagnostic[]>();
   for (const d of diags) {
     const uri = d.file.startsWith("file://") ? Uri.parse(d.file) : Uri.file(d.file);
     const line = Math.max(0, (d.line || 1) - 1);
     const column = Math.max(0, (d.column || 1) - 1);
-    if (isLive(uri, d.code, line, column)) {
+    if (hasLiveDiag(uri, d.code, line, column)) {
       continue; // already reported by the live per-file diagnostics
     }
     const len = Math.max(1, d.len || 1);
