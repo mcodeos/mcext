@@ -202,7 +202,11 @@ export async function activate(context: ExtensionContext) {
   // The per-file circuit custom editor provider. retainContextWhenHidden keeps
   // the JS-rendered schematic alive across tab switches, so the preview doesn't
   // blank and re-render every time you go to a code tab and back.
-  const previewProvider = new CircuitPreviewProvider(client, clientStarted);
+  const previewProvider = new CircuitPreviewProvider(
+    client,
+    clientStarted,
+    context.extensionUri
+  );
   context.subscriptions.push(
     window.registerCustomEditorProvider(VIZ_VIEW_TYPE, previewProvider, {
       webviewOptions: { retainContextWhenHidden: true },
@@ -355,11 +359,21 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
   // Pending debounced re-render timers per source uri.
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly changeSub: Disposable;
+  // Tab icon, so a circuit tab reads as "the schematic of this file" rather than
+  // as a second copy of the .mc source tab. Light/dark variants keep the glyph
+  // legible on both themes (the SVG is drawn as an image, so it can't use
+  // currentColor).
+  private readonly iconPath: { light: Uri; dark: Uri };
 
   constructor(
     private readonly client: LanguageClient,
-    private readonly clientStarted: Promise<void> | undefined
+    private readonly clientStarted: Promise<void> | undefined,
+    extensionUri: Uri
   ) {
+    this.iconPath = {
+      light: Uri.joinPath(extensionUri, "media", "circuit-preview-light.svg"),
+      dark: Uri.joinPath(extensionUri, "media", "circuit-preview-dark.svg"),
+    };
     this.changeSub = workspace.onDidChangeTextDocument((e) => {
       const key = e.document.uri.toString();
       if (e.document.languageId !== "mcode" || !this.panels.has(key)) return;
@@ -389,6 +403,8 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
     // The returned schematic is a small self-contained JS app (mcc viz renders
     // its SVG into the DOM via <script>), so scripts must be enabled.
     panel.webview.options = { ...panel.webview.options, enableScripts: true };
+    // Circuit glyph in front of the document name on the tab.
+    panel.iconPath = this.iconPath;
     const key = document.uri.toString();
     const entry = { panel, seq: 0 };
     this.panels.set(key, entry);

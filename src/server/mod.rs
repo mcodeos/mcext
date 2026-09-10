@@ -48,15 +48,24 @@ impl Backend {
     /// Resolve the project context (entry, top, libs) for a command invoked from
     /// a file. Shared by `mcode.viz` and `mcode.buildProject`.
     ///
-    /// Walk up from the active file to its nearest project manifest and use that
-    /// project's entry/top_module/libs. This lets commands follow the active file
-    /// across multiple projects in one workspace (vs. always using the single
-    /// configured project_root). Commands build/render the *project* top module,
-    /// so when a manifest exists above the file we always use its entry/top_module
-    /// (NOT the active file — a sub-file like us513.mc defines a component, not
-    /// the top). `build.*` reloads libs (params) and the project graph (from
-    /// the absolute entry) on every call, so per-project entry+libs is sufficient
-    /// — no set_project_root/load_project needed.
+    /// Walk up from the active file to its nearest project manifest. Two scopes,
+    /// selected by `batch_fallback`:
+    ///
+    /// - **Build Project** (`batch_fallback = true`): *project* scope — use the
+    ///   manifest's entry/top_module, so the whole project is built rather than
+    ///   the active sub-file (a file like us513.mc defines a component, not the
+    ///   top).
+    /// - **viz** (`batch_fallback = false`): *file* scope — render the active
+    ///   file's own entities. The file is passed through as the entry and `top`
+    ///   is suppressed (empty) so mcc resolves targets from that file itself
+    ///   (its modules → components → interfaces), not the project top. The
+    ///   manifest still supplies the dependency `libs` so references into other
+    ///   project files/libraries resolve. An explicit `top` argument still wins
+    ///   (renders just that named target).
+    ///
+    /// `build.*` reloads libs (params) and the project graph (from the absolute
+    /// entry) on every call, so per-call entry+libs is sufficient — no
+    /// set_project_root/load_project needed.
     ///
     /// `batch_fallback` enables the unified "no-manifest folder" semantics
     /// (mcd use-design §19.5 rule 3): when there is no project manifest for the
@@ -98,11 +107,27 @@ impl Backend {
                 }
                 match find_project_root_from_file(file_path) {
                     Some(root) => match ProjectConfig::load_from(&root) {
-                        Some(c) => Ok((
-                            c.entry_path(&root),
-                            c.project.top_module.clone(),
-                            c.dependency_names().iter().map(|s| s.to_string()).collect(),
-                        )),
+                        Some(c) => {
+                            let libs: Vec<String> =
+                                c.dependency_names().iter().map(|s| s.to_string()).collect();
+                            if batch_fallback {
+                                // Build Project: project scope — the manifest's
+                                // entry/top_module is the thing being built.
+                                Ok((c.entry_path(&root), c.project.top_module.clone(), libs))
+                            } else {
+                                // viz: file scope — render the active file's own
+                                // entities. Pass the file through as the entry and
+                                // suppress the project top (empty `top`) so mcc's
+                                // resolve_targets reads this file's modules →
+                                // components → interfaces. `libs` still loads the
+                                // project's dependencies so cross-file refs resolve.
+                                Ok((
+                                    normalize_entry_path(e),
+                                    Some(top_arg.unwrap_or_default().to_string()),
+                                    libs,
+                                ))
+                            }
+                        }
                         // Nearest manifest exists but won't parse → treat as standalone.
                         None => Ok((
                             normalize_entry_path(e),
@@ -1571,11 +1596,11 @@ impl LanguageServer for Backend {
             Ok(t) => t,
             Err(e) => {
                 return Ok(Some(serde_json::json!({
-                    "ok": false,
-                    "error": format!("mcode.viz: {e}"),
-                    })))
-                }
-            };
+                "ok": false,
+                "error": format!("mcode.viz: {e}"),
+                })))
+            }
+        };
 
         let server_guard = self.mcc_server.read().await;
         let Some(server) = server_guard.as_ref() else {
