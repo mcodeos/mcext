@@ -24,7 +24,8 @@
 	"activationEvents": [
 		"onLanguage:mcode",
 		"onCommand:mcode.previewViz",
-		"onCommand:mcode.build"
+		"onCommand:mcode.build",
+		"onCustomEditor:mcode.viz"
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
@@ -62,6 +63,18 @@
 				}
 			]
 		},
+		"customEditors": [
+			{
+				"viewType": "mcode.viz",
+				"displayName": "MCode Circuit Preview",
+				"selector": [
+					{
+						"filenamePattern": "*.mc"
+					}
+				],
+				"priority": "option"
+			}
+		],
 		"languages": [
 			{
 				"id": "mcode",
