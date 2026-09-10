@@ -752,9 +752,9 @@ mod tests {
 
     #[test]
     fn curly_param_does_not_mask_body() {
-        // module US513(dc{VDD,GND}::DC(3.3V)) { IO1 -> ... } — the `{VDD,GND}`
+        // module US513(psnk dc{VDD,GND}::DC(3.3V)) { IO1 -> ... } — the `{VDD,GND}`
         // param group must not be mistaken for the container body brace.
-        let src = "module US513(dc{VDD,GND}::DC(3.3V)) {\n    IO1 -> \n}";
+        let src = "module US513(psnk dc{VDD,GND}::DC(3.3V)) {\n    IO1 -> \n}";
         let lapper = vec![LapperEntry {
             kind: CLASS_DEF,
             start: 7, // name token "US513"
@@ -763,7 +763,7 @@ mod tests {
             scope: String::new(),
             file: String::new(),
         }];
-        let c = ctx(src, 49, &lapper); // after "IO1 -> "
+        let c = ctx(src, 54, &lapper); // after "IO1 -> "
         assert_eq!(c.container_scope, "US513");
         assert_eq!(c.kind, ContextKind::NetExpr);
     }

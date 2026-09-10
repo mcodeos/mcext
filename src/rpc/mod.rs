@@ -388,10 +388,7 @@ pub struct LedgerReport {
     pub total: usize,
     /// kind → form → count (all six kinds present; empty inner map = none).
     #[serde(default)]
-    pub by_kind_form: std::collections::BTreeMap<
-        String,
-        std::collections::BTreeMap<String, usize>,
-    >,
+    pub by_kind_form: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
     #[serde(default)]
     pub resolved_late: usize,
     /// Per-row detail, only when the backend was asked for it (`--ledger`).
