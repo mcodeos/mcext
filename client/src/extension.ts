@@ -3,7 +3,6 @@
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 
-import * as fs from "fs";
 import * as path from "path";
 
 import {
@@ -24,8 +23,10 @@ import {
   TextEdit,
   Selection,
   Uri,
-  ViewColumn,
+  TabInputCustom,
   WebviewPanel,
+  CustomDocument,
+  CustomReadonlyEditorProvider,
   Diagnostic,
   DiagnosticSeverity,
   Position,
@@ -44,11 +45,17 @@ let client: LanguageClient;
 let clientStarted: Promise<void> | undefined;
 // type a = Parameters<>;
 
-// Circuit preview state: the open panel + the project (nearest manifest dir)
-// it currently renders, so we can auto-refresh on cross-project file switches.
-let previewPanel: WebviewPanel | undefined;
-let previewProjectId: string | null = null;
-let previewRenderSeq = 0;
+// viz circuit preview is a *per-file custom editor* (`mcode.viz`, see the
+// customEditors contribution in package.json): opening it creates a normal
+// editor tab — like a code file — that can be moved to another group or dragged
+// into its own window, instead of a fixed side-by-side pane.
+const VIZ_VIEW_TYPE = "mcode.viz";
+
+// Optional top-module override for no-project files, passed by the previewViz
+// command; keyed by the .mc file's path so re-opening that file's preview
+// (or re-rendering after edits) honours it. Empty for the common case where
+// mcc picks the file's first module itself.
+const vizTopByPath = new Map<string, string>();
 
 // Whole-project build state: the Output console the `mcc build` report is
 // written to, and a dedicated DiagnosticCollection so build warnings/errors
@@ -148,37 +155,6 @@ interface BuildStats {
   component_insts?: number;
 }
 
-const PROJECT_MANIFEST_NAMES = ["project.toml", "manifest.toml", "mcc.toml"];
-
-// Nearest ancestor directory containing a project manifest, else null.
-// Mirrors the server's find_project_root_from_file so client & server agree
-// (both require an actual file — a directory named `project.toml` doesn't count).
-function projectIdFor(filePath: string): string | null {
-  let dir = path.dirname(filePath);
-  for (;;) {
-    for (const name of PROJECT_MANIFEST_NAMES) {
-      if (isFile(path.join(dir, name))) return dir;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) return null; // reached filesystem root
-    dir = parent;
-  }
-}
-
-function isFile(p: string): boolean {
-  try {
-    return fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
-// "Same project" per design: both resolve to a manifest dir AND they match.
-// A standalone file (null id) is its own project → never "same".
-function sameProject(a: string | null, b: string | null): boolean {
-  return a !== null && b !== null && a === b;
-}
-
 export async function activate(context: ExtensionContext) {
 
   const traceOutputChannel = window.createOutputChannel("MCode");
@@ -215,12 +191,40 @@ export async function activate(context: ExtensionContext) {
   // activateInlayHints(context);
   clientStarted = client.start();
 
-  // viz circuit preview: build + render the active .mc file into a webview.
+  // viz circuit preview: open the active .mc file's circuit as its own editor
+  // tab (custom editor `mcode.viz`) instead of a fixed side-by-side pane.
   // Optional command argument = top module name for no-project files; when
   // omitted, mcc falls back to the first module of the file (usually `main`).
   context.subscriptions.push(
     commands.registerCommand("mcode.previewViz", (top?: string) => previewViz(top))
   );
+
+  // The per-file circuit custom editor provider. retainContextWhenHidden keeps
+  // the JS-rendered schematic alive across tab switches, so the preview doesn't
+  // blank and re-render every time you go to a code tab and back.
+  const previewProvider = new CircuitPreviewProvider(client, clientStarted);
+  context.subscriptions.push(
+    window.registerCustomEditorProvider(VIZ_VIEW_TYPE, previewProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    previewProvider
+  );
+
+  // Auto-show the active .mc's circuit once, when VSCode opens with an .mc file
+  // active — or the first .mc document becomes active — preserving the earlier
+  // auto-preview behaviour. One-shot per activation: after it fires, the
+  // preview is an ordinary editor tab the user opens/closes like any file, so a
+  // tab closed deliberately stays closed until the command runs again.
+  let autoPreviewFired = false;
+  const autoOpenPreview = (): void => {
+    if (autoPreviewFired) return;
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "mcode") return;
+    autoPreviewFired = true;
+    void previewViz();
+  };
+  autoOpenPreview();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(autoOpenPreview));
 
   // Whole-project build: run `mcc build` on the active file's project, write
   // the report to the "MCode Build" output channel and push warnings/errors
@@ -266,39 +270,13 @@ export async function activate(context: ExtensionContext) {
     })
   );
 
-  // Auto-refresh an already-open preview when the active .mc file switches to
-  // a different project (by nearest project manifest). Same project → no
-  // refresh. Does NOT auto-open a preview (only acts when one is tracked).
-  context.subscriptions.push(
-    window.onDidChangeActiveTextEditor((editor) => {
-      if (!editor || editor.document.languageId !== "mcode") return;
-      if (!previewPanel) return;
-      const filePath = editor.document.uri.fsPath;
-      const newProjectId = projectIdFor(filePath);
-      if (sameProject(previewProjectId, newProjectId)) return;
-      previewProjectId = newProjectId;
-      void renderPreview(filePath);
-    })
-  );
-
-  // Auto-show the circuit preview on startup: when VSCode opens with an .mc
-  // file active — or the first .mc document becomes active — render the active
-  // file's viz without a manual button click. One-shot per activation: after it
-  // fires, later switches are covered by the cross-project refresh listener
-  // above (which only acts while a panel is open), so a panel the user closed
-  // deliberately stays closed.
-  let autoPreviewFired = false;
-  const autoOpenPreview = (): void => {
-    if (autoPreviewFired) return;
-    const editor = window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "mcode") return;
-    autoPreviewFired = true;
-    void previewViz();
-  };
-  autoOpenPreview();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(autoOpenPreview));
 }
 
+// Open the active .mc file's circuit as its own editor tab — the `mcode.viz`
+// custom editor — in the current editor group, like opening a code file. The
+// user can then move that tab to another group or drag it out into its own
+// window. Repeated invocation reuses the open preview instead of stacking
+// duplicates (registerCustomEditorProvider keeps one editor per resource).
 async function previewViz(top?: string): Promise<void> {
   const editor = window.activeTextEditor;
   if (!editor || editor.document.languageId !== "mcode") {
@@ -308,53 +286,157 @@ async function previewViz(top?: string): Promise<void> {
     return;
   }
 
-  const filePath = editor.document.uri.fsPath;
+  const uri = editor.document.uri;
+  if (top) vizTopByPath.set(uri.fsPath, top);
+  try {
+    await commands.executeCommand("vscode.openWith", uri, VIZ_VIEW_TYPE);
+  } catch (e) {
+    window.showErrorMessage(`MCode: circuit preview failed to open: ${String(e)}`);
+    return;
+  }
 
-  // Reuse an existing panel instead of stacking duplicates on repeated invocations.
-  if (!previewPanel) {
-    previewPanel = window.createWebviewPanel(
-      "mcodeViz",
-      `Circuit: ${path.basename(filePath)}`,
-      ViewColumn.Beside,
-      { enableScripts: true }
+  // openWith resolves even when no custom editor matches the resource (it just
+  // re-focuses the plain text editor), so confirm a `mcode.viz` tab really
+  // appeared before claiming success.
+  if (!(await waitForCircuitTab(uri))) {
+    window.showErrorMessage(
+      `MCode: no circuit preview tab opened for ${path.basename(uri.fsPath)}. ` +
+        "The package.json customEditors contribution may not be loaded — run " +
+        "Developer: Reload Window and retry."
     );
-    previewPanel.onDidDispose(() => {
-      previewPanel = undefined;
-      previewProjectId = null;
+  }
+}
+
+// True when a `mcode.viz` custom-editor tab for `uri` is currently open.
+function hasCircuitTab(uri: Uri): boolean {
+  const u = uri.toString();
+  for (const group of window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const input = tab.input;
+      if (
+        input instanceof TabInputCustom &&
+        input.viewType === VIZ_VIEW_TYPE &&
+        input.uri.toString() === u
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Poll briefly for the custom-editor tab: openWith resolves before the editor
+// settles in some VS Code versions, so wait a few ticks before giving up.
+async function waitForCircuitTab(uri: Uri): Promise<boolean> {
+  for (let i = 0; i < 10; i++) {
+    if (hasCircuitTab(uri)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return hasCircuitTab(uri);
+}
+
+// Minimal readonly document for the circuit custom editor: it never edits the
+// .mc — the webview only displays the schematic derived from it.
+class CircuitDocument implements CustomDocument {
+  constructor(public readonly uri: Uri) {}
+  dispose(): void {}
+}
+
+// Per-file circuit preview: resolves each .mc's `mcode.viz` editor into a
+// webview showing the schematic the language server renders for that file.
+// The preview is an ordinary editor tab — switch to it like a code tab, drag it
+// to another group or window — and live-refreshes (debounced) as the source
+// edits, mirroring the language server's own debounced reparse.
+class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocument> {
+  // Open preview webviews by source-uri string; each entry carries a render
+  // sequence so a slow RPC response can't overwrite a newer render or a
+  // re-render scheduled after the panel was closed.
+  private readonly panels = new Map<string, { panel: WebviewPanel; seq: number }>();
+  // Pending debounced re-render timers per source uri.
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly changeSub: Disposable;
+
+  constructor(
+    private readonly client: LanguageClient,
+    private readonly clientStarted: Promise<void> | undefined
+  ) {
+    this.changeSub = workspace.onDidChangeTextDocument((e) => {
+      const key = e.document.uri.toString();
+      if (e.document.languageId !== "mcode" || !this.panels.has(key)) return;
+      const pending = this.timers.get(key);
+      if (pending) clearTimeout(pending);
+      this.timers.set(
+        key,
+        setTimeout(() => {
+          this.timers.delete(key);
+          void this.rerender(key, e.document.uri.fsPath);
+        }, 400)
+      );
     });
   }
 
-  // Record the project BEFORE rendering: creating the panel focuses it, which
-  // fires onDidChangeActiveTextEditor; setting the id first avoids a spurious
-  // immediate re-render.
-  previewProjectId = projectIdFor(filePath);
-  await renderPreview(filePath, top);
-}
+  dispose(): void {
+    this.changeSub.dispose();
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
+  }
 
-// Shared by the previewViz command and the cross-project auto-refresh listener.
-async function renderPreview(filePath: string, top?: string): Promise<void> {
-  const seq = ++previewRenderSeq;
-  const panel = previewPanel;
-  if (!panel) return;
+  openCustomDocument(uri: Uri): CircuitDocument {
+    return new CircuitDocument(uri);
+  }
 
-  panel.title = `Circuit: ${path.basename(filePath)}`;
-  panel.webview.html = loadingHtml("Rendering circuit…");
+  resolveCustomEditor(document: CircuitDocument, panel: WebviewPanel): void {
+    // The returned schematic is a small self-contained JS app (mcc viz renders
+    // its SVG into the DOM via <script>), so scripts must be enabled.
+    panel.webview.options = { ...panel.webview.options, enableScripts: true };
+    const key = document.uri.toString();
+    const entry = { panel, seq: 0 };
+    this.panels.set(key, entry);
+    panel.onDidDispose(() => {
+      if (this.panels.get(key) === entry) this.panels.delete(key);
+      const pending = this.timers.get(key);
+      if (pending) clearTimeout(pending);
+      this.timers.delete(key);
+    });
+    void this.render(key, document.uri.fsPath, panel, entry.seq);
+  }
 
-  try {
-    if (clientStarted) {
-      await clientStarted;
+  private async rerender(key: string, fsPath: string): Promise<void> {
+    const entry = this.panels.get(key);
+    if (!entry) return;
+    entry.seq += 1;
+    await this.render(key, fsPath, entry.panel, entry.seq);
+  }
+
+  // Ask the language server to build the circuit for `fsPath`, then load the
+  // returned HTML. `seq` guards against stale responses and a panel disposed
+  // mid-flight (dispose removes the map entry before our continuation runs).
+  private async render(
+    key: string,
+    fsPath: string,
+    panel: WebviewPanel,
+    seq: number
+  ): Promise<void> {
+    panel.webview.html = loadingHtml("Rendering circuit…");
+    try {
+      if (this.clientStarted) {
+        await this.clientStarted;
+      }
+      const cur = this.panels.get(key);
+      if (!cur || cur.seq !== seq) return;
+      const top = vizTopByPath.get(fsPath);
+      const result = (await this.client.sendRequest("workspace/executeCommand", {
+        command: "mcode.viz",
+        arguments: top ? [fsPath, top] : [fsPath],
+      })) as { ok: boolean; html?: string; error?: string } | null;
+      const after = this.panels.get(key);
+      if (!after || after.seq !== seq) return;
+      panel.webview.html = previewResultHtml(result);
+    } catch (e) {
+      const after = this.panels.get(key);
+      if (!after || after.seq !== seq) return;
+      panel.webview.html = errorHtml(String(e));
     }
-    // Drop stale renders and guard against a panel disposed mid-flight.
-    if (seq !== previewRenderSeq || previewPanel !== panel) return;
-    const result = (await client.sendRequest("workspace/executeCommand", {
-      command: "mcode.viz",
-      arguments: top ? [filePath, top] : [filePath],
-    })) as { ok: boolean; html?: string; error?: string } | null;
-    if (seq !== previewRenderSeq || previewPanel !== panel) return;
-    panel.webview.html = previewResultHtml(result);
-  } catch (e) {
-    if (seq !== previewRenderSeq || previewPanel !== panel) return;
-    panel.webview.html = errorHtml(String(e));
   }
 }
 
