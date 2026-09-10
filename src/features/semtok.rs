@@ -171,8 +171,7 @@ fn extract_aligned_text(rope: &Rope, start: usize, end: usize) -> Option<String>
 
     // A byte index is on a char boundary iff it is at the rope end or its byte
     // is not a UTF-8 continuation byte (0x80..0xBF).
-    let is_boundary =
-        |b: usize| b >= rope_len || (rope.byte(b) & 0xC0) != 0x80;
+    let is_boundary = |b: usize| b >= rope_len || (rope.byte(b) & 0xC0) != 0x80;
 
     // Move `start` up to the next boundary (excludes the char cut at the left).
     let mut lo = start;
@@ -562,8 +561,7 @@ mod tests {
         // be classified as KEYWORD (both byte ends are on char boundaries).
         let text = "//中注释\ncomponent X\n";
         let pos = text.find("component").unwrap() as i32;
-        let (state, uri) =
-            state_with_tokens(text, vec![(13, pos, 9)]);
+        let (state, uri) = state_with_tokens(text, vec![(13, pos, 9)]);
         let result = compute(&state, &uri).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].token_type, type_map::T_KEYWORD);
