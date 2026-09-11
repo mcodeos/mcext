@@ -339,6 +339,15 @@ async function waitForCircuitTab(uri: Uri): Promise<boolean> {
   return hasCircuitTab(uri);
 }
 
+// Tab label for a circuit preview: the file's stem. A custom editor's tab title
+// otherwise defaults to the resource name, so the preview of `hbl.mc` would read
+// `hbl.mc` — identical to its source tab. Strip the extension (only the `.mc`
+// language suffix; a name like `foo.bar.mc` keeps `foo.bar`).
+function circuitTabTitle(uri: Uri): string {
+  const base = path.basename(uri.fsPath);
+  return base.replace(/\.mc$/i, "") || base;
+}
+
 // Minimal readonly document for the circuit custom editor: it never edits the
 // .mc — the webview only displays the schematic derived from it.
 class CircuitDocument implements CustomDocument {
@@ -403,6 +412,9 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
     // The returned schematic is a small self-contained JS app (mcc viz renders
     // its SVG into the DOM via <script>), so scripts must be enabled.
     panel.webview.options = { ...panel.webview.options, enableScripts: true };
+    // Tab label: the source file's stem, without the `.mc` extension — the tab
+    // is the schematic, not another copy of the source file.
+    panel.title = circuitTabTitle(document.uri);
     // Circuit glyph in front of the document name on the tab.
     panel.iconPath = this.iconPath;
     const key = document.uri.toString();
