@@ -3,6 +3,7 @@
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 
+import * as fs from "fs";
 import * as path from "path";
 
 import {
@@ -155,10 +156,26 @@ interface BuildStats {
   component_insts?: number;
 }
 
+// The language server binary: SERVER_PATH when the launch config sets it,
+// otherwise the dev build next to this extension, otherwise `mcodels` on PATH.
+function serverCommand(context: ExtensionContext): string {
+  const fromEnv = process.env.SERVER_PATH;
+  if (fromEnv) {
+    return fromEnv;
+  }
+  for (const profile of ["debug", "release"]) {
+    const built = path.join(context.extensionPath, "target", profile, "mcodels");
+    if (fs.existsSync(built)) {
+      return built;
+    }
+  }
+  return "mcodels";
+}
+
 export async function activate(context: ExtensionContext) {
 
   const traceOutputChannel = window.createOutputChannel("MCode");
-  const command = process.env.SERVER_PATH || "mcodels";
+  const command = serverCommand(context);
   const run: Executable = {
     command,
     options: {
@@ -412,6 +429,12 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
     // The returned schematic is a small self-contained JS app (mcc viz renders
     // its SVG into the DOM via <script>), so scripts must be enabled.
     panel.webview.options = { ...panel.webview.options, enableScripts: true };
+    // Viz -> source bridge: a Cmd/Ctrl-click on a drawn box or pin posts the
+    // source coordinate the renderer stamped on it; open that file there.
+    panel.webview.onDidReceiveMessage((msg) => {
+      if (!msg || msg.type !== "openSource") return;
+      void openSourceAt(msg.uri, msg.offset);
+    });
     // Tab label: the source file's stem, without the `.mc` extension — the tab
     // is the schematic, not another copy of the source file.
     panel.title = circuitTabTitle(document.uri);
@@ -465,6 +488,42 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
       if (!after || after.seq !== seq) return;
       panel.webview.html = errorHtml(String(e));
     }
+  }
+}
+
+// Open the source position a schematic element was drawn from, and select it.
+// `offset` is a *byte* offset — SourcePos's native form, which mcc deliberately
+// keeps as the single source of truth for source coordinates rather than
+// maintaining a second line table. VS Code positions count UTF-16 code units
+// instead, so the offset is converted against the file's actual bytes: most
+// .mc files carry non-ASCII comments, where a straight `positionAt(offset)`
+// would land the cursor short on every click past the first such comment.
+async function openSourceAt(uri: unknown, offset: unknown): Promise<void> {
+  if (typeof uri !== "string" || typeof offset !== "number") return;
+  try {
+    // mcc records an absolute filesystem path; tolerate a `file://` form too.
+    const target = uri.startsWith("file:")
+      ? Uri.parse(uri)
+      : Uri.file(uri);
+    const [doc, bytes] = await Promise.all([
+      workspace.openTextDocument(target),
+      workspace.fs.readFile(target),
+    ]);
+    const clamped = Math.max(0, Math.min(offset, bytes.byteLength));
+    let prefix = new TextDecoder("utf-8").decode(bytes.subarray(0, clamped));
+    // Renderer offsets always sit on a token boundary; if one ever cuts a
+    // character, decode() emits U+FFFD for it — drop that so the cursor stays
+    // on the character before rather than one past it.
+    if (prefix.endsWith("�")) prefix = prefix.slice(0, -1);
+    const at = doc.positionAt(prefix.length);
+    const range = new Range(at, at);
+    // preview: jumping around a schematic replaces the jump target, the way
+    // the editor's own go-to-definition does, instead of piling up tabs.
+    await window.showTextDocument(doc, { selection: range, preview: true });
+  } catch (e) {
+    window.showErrorMessage(
+      `MCode: cannot open the source for that schematic element: ${String(e)}`
+    );
   }
 }
 
