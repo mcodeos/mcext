@@ -1,3 +1,12 @@
+---
+name: mcext-debug
+description: Debugging the mcext VS Code LSP extension and its mcodels server --
+  log locations, build and cold-restart procedure, architecture, common issues,
+  and the diagnostic workflow. Use when the extension misbehaves, diagnostics
+  stop updating, the language server needs restarting, or the mcodels/mcc
+  processes must be inspected.
+---
+
 # mcext Debugging
 
 > Debugging techniques, common issues, and diagnostic workflows for the mcext (`mcodels`) LSP extension.
