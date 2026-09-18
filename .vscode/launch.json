@@ -37,8 +37,9 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../mclibs"
-        // "${workspaceFolder}/../mcs/hs"
+        // "${workspaceFolder}/../mclibs"
+        "${workspaceFolder}/../mcs/hbl"
+        // "${workspaceFolder}/../mcs/pwrint"
         // "${workspaceFolder}/../mcd/unitest/"
         // "${workspaceFolder}/../mcode"
         // "${workspaceFolder}/../mc-examples"
