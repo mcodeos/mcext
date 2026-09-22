@@ -24,7 +24,10 @@ import {
   TextEdit,
   Selection,
   Uri,
+  Tab,
   TabInputCustom,
+  TabInputText,
+  ViewColumn,
   WebviewPanel,
   CustomDocument,
   CustomReadonlyEditorProvider,
@@ -247,57 +250,84 @@ export async function activate(context: ExtensionContext) {
   autoOpenPreview();
   context.subscriptions.push(window.onDidChangeActiveTextEditor(autoOpenPreview));
 
-  // A `mcode.viz` tab restored by a window reload resolves lazily: VS Code
-  // shows the tab with the plain resource filename (`hbl.mc`, no icon) and
-  // only calls resolveCustomEditor — where the preview sets its title, icon
-  // and renders — when the tab is first activated. The auto-preview above
-  // cannot cover this: a custom editor is not a TextEditor, so
-  // window.activeTextEditor stays undefined while the restored preview is the
-  // visible tab, and nothing re-activates the tab on our behalf. Force the
-  // resolve instead. Opening an already-active editor is a no-op for VS Code
-  // (no visibility change, no resolve), so first step to the source text
-  // editor, then re-open the preview: the second activation is a real
-  // visibility transition and resolves the restored editor in place, with no
-  // click needed.
+  // `mcode.viz` tabs restored by a window reload resolve lazily: VS Code
+  // shows them with the plain resource filename (`hbl.mc`, no icon) and only
+  // calls resolveCustomEditor — where the preview sets its title, icon and
+  // renders — when the tab is first activated. This hits background tabs too,
+  // not just the visible one, and the auto-preview above cannot cover any of
+  // it: a custom editor is not a TextEditor, so window.activeTextEditor stays
+  // undefined while a restored preview is visible. Force the resolve instead.
+  //
+  // The resolve only happens on a real visibility transition — opening an
+  // editor that is already the group's active editor is a no-op — so each
+  // pending preview is briefly made the visible editor of its group and the
+  // editor the user was looking at is put back afterwards. Title and icon are
+  // panel properties, so they persist once resolved; the whole dance costs a
+  // momentary flicker during startup. A group whose visible editor cannot be
+  // re-shown programmatically is left untouched rather than hijacked.
   const revivedVizTabs = new Set<string>();
+  // Re-show command for a group's visible editor, used to put it back after
+  // the dance; null when that editor kind cannot be re-shown.
+  const reopenTab = (
+    tab: Tab | undefined,
+    column: ViewColumn
+  ): (() => Thenable<unknown>) | null => {
+    if (!tab) return () => Promise.resolve();
+    const input = tab.input;
+    if (input instanceof TabInputText) {
+      return () => commands.executeCommand("vscode.open", input.uri, column);
+    }
+    if (input instanceof TabInputCustom && input.viewType === VIZ_VIEW_TYPE) {
+      return () =>
+        commands.executeCommand(
+          "vscode.openWith",
+          input.uri,
+          VIZ_VIEW_TYPE,
+          column
+        );
+    }
+    return null;
+  };
   const reviveRestoredPreviews = async (): Promise<void> => {
     for (const group of window.tabGroups.all) {
-      for (const tab of group.tabs) {
+      // Floating-window groups have no ViewColumn; opening into them is not
+      // expressible, so leave their tabs to resolve on first click.
+      const column = group.viewColumn;
+      if (column === undefined) continue;
+      const pending = group.tabs.filter((tab) => {
         const input = tab.input;
-        const uri = input instanceof TabInputCustom ? input.uri : undefined;
-        if (
-          !uri ||
-          input.viewType !== VIZ_VIEW_TYPE ||
-          !tab.isActive ||
-          previewProvider.isResolved(uri) ||
-          revivedVizTabs.has(uri.toString())
-        ) {
-          continue;
-        }
-        revivedVizTabs.add(uri.toString());
-        const column = group.viewColumn;
+        return (
+          input instanceof TabInputCustom &&
+          input.viewType === VIZ_VIEW_TYPE &&
+          !previewProvider.isResolved(input.uri) &&
+          !revivedVizTabs.has(input.uri.toString())
+        );
+      });
+      if (pending.length === 0) continue;
+      const putBack = reopenTab(group.activeTab, column);
+      if (putBack === null) continue;
+      for (const tab of pending) {
+        const input = tab.input as TabInputCustom;
+        revivedVizTabs.add(input.uri.toString());
         try {
-          if (column === undefined) {
-            await commands.executeCommand("vscode.open", uri);
-            await commands.executeCommand(
-              "vscode.openWith",
-              uri,
-              VIZ_VIEW_TYPE
-            );
-          } else {
-            await commands.executeCommand("vscode.open", uri, column);
-            await commands.executeCommand(
-              "vscode.openWith",
-              uri,
-              VIZ_VIEW_TYPE,
-              column
-            );
+          // If the preview is already the visible editor, opening it again
+          // would be the no-op that never resolves; step to the source text
+          // editor first so the re-open below is a real transition.
+          if (tab.isActive) {
+            await commands.executeCommand("vscode.open", input.uri, column);
           }
+          await commands.executeCommand(
+            "vscode.openWith",
+            input.uri,
+            VIZ_VIEW_TYPE,
+            column
+          );
         } catch {
           // Restore timing varies across VS Code versions; a failed revive
           // just leaves the tab to resolve on the user's first click.
         }
       }
+      await putBack();
     }
   };
   let reviveTimer: ReturnType<typeof setTimeout> | undefined;
