@@ -247,6 +247,79 @@ export async function activate(context: ExtensionContext) {
   autoOpenPreview();
   context.subscriptions.push(window.onDidChangeActiveTextEditor(autoOpenPreview));
 
+  // A `mcode.viz` tab restored by a window reload resolves lazily: VS Code
+  // shows the tab with the plain resource filename (`hbl.mc`, no icon) and
+  // only calls resolveCustomEditor — where the preview sets its title, icon
+  // and renders — when the tab is first activated. The auto-preview above
+  // cannot cover this: a custom editor is not a TextEditor, so
+  // window.activeTextEditor stays undefined while the restored preview is the
+  // visible tab, and nothing re-activates the tab on our behalf. Force the
+  // resolve instead. Opening an already-active editor is a no-op for VS Code
+  // (no visibility change, no resolve), so first step to the source text
+  // editor, then re-open the preview: the second activation is a real
+  // visibility transition and resolves the restored editor in place, with no
+  // click needed.
+  const revivedVizTabs = new Set<string>();
+  const reviveRestoredPreviews = async (): Promise<void> => {
+    for (const group of window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        const input = tab.input;
+        const uri = input instanceof TabInputCustom ? input.uri : undefined;
+        if (
+          !uri ||
+          input.viewType !== VIZ_VIEW_TYPE ||
+          !tab.isActive ||
+          previewProvider.isResolved(uri) ||
+          revivedVizTabs.has(uri.toString())
+        ) {
+          continue;
+        }
+        revivedVizTabs.add(uri.toString());
+        const column = group.viewColumn;
+        try {
+          if (column === undefined) {
+            await commands.executeCommand("vscode.open", uri);
+            await commands.executeCommand(
+              "vscode.openWith",
+              uri,
+              VIZ_VIEW_TYPE
+            );
+          } else {
+            await commands.executeCommand("vscode.open", uri, column);
+            await commands.executeCommand(
+              "vscode.openWith",
+              uri,
+              VIZ_VIEW_TYPE,
+              column
+            );
+          }
+        } catch {
+          // Restore timing varies across VS Code versions; a failed revive
+          // just leaves the tab to resolve on the user's first click.
+        }
+      }
+    }
+  };
+  let reviveTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRevive = (): void => {
+    if (reviveTimer) clearTimeout(reviveTimer);
+    // Debounced: restore lands as a burst of tab events, and the workbench is
+    // only done laying out its restored groups after the last one.
+    reviveTimer = setTimeout(() => {
+      reviveTimer = undefined;
+      void reviveRestoredPreviews();
+    }, 300);
+  };
+  scheduleRevive();
+  context.subscriptions.push(
+    window.tabGroups.onDidChangeTabs(scheduleRevive),
+    {
+      dispose: () => {
+        if (reviveTimer) clearTimeout(reviveTimer);
+      },
+    }
+  );
+
   // Whole-project build: run `mcc build` on the active file's project, write
   // the report to the "MCode Build" output channel and push warnings/errors
   // into the Problems tab.
@@ -419,6 +492,12 @@ class CircuitPreviewProvider implements CustomReadonlyEditorProvider<CircuitDocu
     this.changeSub.dispose();
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
+  }
+
+  // True once `resolveCustomEditor` has run for `uri` — i.e. the preview has a
+  // live panel carrying its title, icon and rendered circuit.
+  isResolved(uri: Uri): boolean {
+    return this.panels.has(uri.toString());
   }
 
   openCustomDocument(uri: Uri): CircuitDocument {
