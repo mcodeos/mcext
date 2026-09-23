@@ -29,6 +29,8 @@ import {
   DiagnosticSeverity,
   Position,
   ProgressLocation,
+  StatusBarAlignment,
+  StatusBarItem,
 } from "vscode";
 
 import {
@@ -207,6 +209,40 @@ export async function activate(context: ExtensionContext) {
   // Create the language client and start the client.
   client = new LanguageClient("mcode", "MCode", serverOptions, clientOptions);
   clientStarted = client.start();
+
+  // Status bar: language-server lifecycle + one-click project build. Shown
+  // only while an .mc editor is active, like the auto-preview below. Click
+  // runs mcode.build, so the item doubles as the project build entry point.
+  const mcodeStatus = window.createStatusBarItem(StatusBarAlignment.Right, 90);
+  mcodeStatus.name = "MCode";
+  mcodeStatus.command = "mcode.build";
+  mcodeStatus.text = "$(sync~spin) MCode";
+  mcodeStatus.tooltip = "MCode language server starting…";
+  const syncMcodeStatus = (): void => {
+    const editor = window.activeTextEditor;
+    if (editor && editor.document.languageId === "mcode") {
+      mcodeStatus.show();
+    } else {
+      mcodeStatus.hide();
+    }
+  };
+  mcodeStatus.hide();
+  context.subscriptions.push(
+    mcodeStatus,
+    window.onDidChangeActiveTextEditor(syncMcodeStatus)
+  );
+  syncMcodeStatus();
+  clientStarted
+    .then(() => {
+      mcodeStatus.text = "$(circuit-board) MCode";
+      mcodeStatus.tooltip = "MCode server ready — click to build the project";
+      syncMcodeStatus();
+    })
+    .catch(() => {
+      mcodeStatus.text = "$(error) MCode";
+      mcodeStatus.tooltip = "MCode server failed to start";
+      syncMcodeStatus();
+    });
 
   // viz circuit preview: open the active .mc file's circuit as its own editor
   // tab (custom editor `mcode.viz`) instead of a fixed side-by-side pane.

@@ -226,7 +226,11 @@ impl ProjectContext {
     pub fn new(index: IndexWorkerHandle) -> Self {
         Self {
             index,
-            scheduler: ReparseScheduler::new(std::time::Duration::from_millis(150)),
+            // Same default as ServerConfig::default_debounce_ms; the live
+            // value follows did_change_configuration via set_debounce_ms.
+            scheduler: ReparseScheduler::new(
+                crate::common::config::ServerConfig::default().diagnostics_debounce_ms,
+            ),
         }
     }
 }

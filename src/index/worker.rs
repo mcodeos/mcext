@@ -38,6 +38,9 @@ pub enum IndexCommand {
 #[derive(Debug, Clone)]
 pub struct IndexWorkerHandle {
     inner: Option<InnerHandle>,
+    /// Fixed snapshot with no worker behind it (`with_snapshot`): tests that
+    /// exercise snapshot consumers without driving the worker loop.
+    pinned: Option<watch::Receiver<ProjectIndex>>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,12 +64,26 @@ impl IndexWorkerHandle {
                 tx,
                 snapshot_rx: snap_rx,
             }),
+            pinned: None,
         }
     }
 
     /// Inactive handle (for tests or quick initialization without a worker).
     pub fn inactive() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            pinned: None,
+        }
+    }
+
+    /// Handle pinned to a fixed snapshot (no worker, no updates): lets tests
+    /// drive snapshot consumers against a hand-built index.
+    pub fn with_snapshot(snapshot: ProjectIndex) -> Self {
+        let (_snap_tx, snap_rx) = watch::channel(snapshot);
+        Self {
+            inner: None,
+            pinned: Some(snap_rx),
+        }
     }
 
     pub fn send(&self, cmd: IndexCommand) -> Result<(), mpsc::error::SendError<IndexCommand>> {
@@ -79,7 +96,10 @@ impl IndexWorkerHandle {
     pub fn snapshot(&self) -> ProjectIndex {
         match &self.inner {
             Some(inner) => inner.snapshot_rx.borrow().clone(),
-            None => ProjectIndex::new(),
+            None => match &self.pinned {
+                Some(rx) => rx.borrow().clone(),
+                None => ProjectIndex::new(),
+            },
         }
     }
 
@@ -93,7 +113,13 @@ impl IndexWorkerHandle {
                 let snap = inner.snapshot_rx.borrow();
                 (snap.files.len(), snap.len())
             }
-            None => (0, 0),
+            None => match &self.pinned {
+                Some(rx) => {
+                    let snap = rx.borrow();
+                    (snap.files.len(), snap.len())
+                }
+                None => (0, 0),
+            },
         }
     }
 }

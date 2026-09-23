@@ -4,7 +4,7 @@
 	"description": "mcode language server",
 	"publisher": "MCode",
 	"license": "MIT",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"categories": [
 		"Programming Languages"
 	],
@@ -153,7 +153,94 @@
 					"description": "Insert a final newline when formatting."
 				}
 			}
-		}
+		},
+		"keybindings": [
+			{
+				"command": "mcode.build",
+				"key": "ctrl+alt+b",
+				"mac": "ctrl+alt+b",
+				"when": "editorLangId == mcode"
+			},
+			{
+				"command": "mcode.checkFile",
+				"key": "ctrl+alt+c",
+				"mac": "ctrl+alt+c",
+				"when": "editorLangId == mcode"
+			},
+			{
+				"command": "mcode.explainCode",
+				"key": "ctrl+alt+e",
+				"mac": "ctrl+alt+e",
+				"when": "editorLangId == mcode"
+			},
+			{
+				"command": "mcode.previewViz",
+				"key": "ctrl+alt+v",
+				"mac": "ctrl+alt+v",
+				"when": "editorLangId == mcode"
+			}
+		],
+		"semanticTokenScopes": [
+			{
+				"language": "mcode",
+				"scopes": {
+					"string": [
+						"string.quoted.double.mc"
+					],
+					"number": [
+						"constant.numeric"
+					],
+					"type": [
+						"entity.name.type"
+					],
+					"class": [
+						"entity.name.class"
+					],
+					"function": [
+						"entity.name.function"
+					],
+					"method": [
+						"entity.name.function"
+					],
+					"interface": [
+						"entity.name.interface"
+					],
+					"enum": [
+						"entity.name.enum"
+					],
+					"enumMember": [
+						"entity.name.enum-member"
+					],
+					"macro": [
+						"entity.name.macro"
+					],
+					"parameter": [
+						"variable.parameter"
+					],
+					"variable": [
+						"variable.other"
+					],
+					"property": [
+						"variable.other.property"
+					],
+					"typeParameter": [
+						"entity.name.type.parameter"
+					],
+					"keyword": [
+						"keyword.other"
+					],
+					"operator": [
+						"keyword.operator"
+					],
+					"comment": [
+						"comment.line"
+					],
+					"regexp": [
+						"string.regexp"
+					]
+				}
+			}
+		]
 	},
 	"scripts": {
 		"postinstall": "cd client && pnpm i",

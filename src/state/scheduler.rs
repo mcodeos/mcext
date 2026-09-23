@@ -25,22 +25,32 @@ use tower_lsp::lsp_types::Url;
 /// - After waking, checks seq: if still its own, calls on_fire; otherwise overwritten, discarded
 ///
 /// Not a lazy timer, but optimistic locking based on seq — avoids race condition during cancel.
+///
+/// The debounce is a shared cell, not a fixed field: `did_change_configuration`
+/// can retune it while the server is live and every later `schedule` picks up
+/// the new value without rebuilding the scheduler (pending sequence numbers
+/// stay valid across the change).
 #[derive(Debug, Clone)]
 pub struct ReparseScheduler {
     sequences: Arc<DashMap<Url, Arc<AtomicU64>>>,
-    debounce: Duration,
+    debounce_ms: Arc<AtomicU64>,
 }
 
 impl ReparseScheduler {
-    pub fn new(debounce: Duration) -> Self {
+    pub fn new(debounce_ms: u64) -> Self {
         Self {
             sequences: Arc::new(DashMap::new()),
-            debounce,
+            debounce_ms: Arc::new(AtomicU64::new(debounce_ms)),
         }
     }
 
     pub fn debounce(&self) -> Duration {
-        self.debounce
+        Duration::from_millis(self.debounce_ms.load(Ordering::SeqCst))
+    }
+
+    /// Retune the debounce live (did_change_configuration).
+    pub fn set_debounce_ms(&self, ms: u64) {
+        self.debounce_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Schedule a callback
@@ -59,10 +69,13 @@ impl ReparseScheduler {
         let my_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
 
         let sequences = Arc::clone(&self.sequences);
-        let debounce = self.debounce;
+        let debounce_ms = Arc::clone(&self.debounce_ms);
         let uri_for_task = uri.clone();
 
         tokio::spawn(async move {
+            // Read at fire-scheduling time: a config change after this point
+            // applies to the next edit, not retroactively to this one.
+            let debounce = Duration::from_millis(debounce_ms.load(Ordering::SeqCst));
             tokio::time::sleep(debounce).await;
             // After waking, check: if current seq == my seq, I am the latest
             let current = sequences
@@ -106,7 +119,7 @@ mod tests {
 
     #[tokio::test]
     async fn debounce_coalesces_rapid_calls() {
-        let scheduler = ReparseScheduler::new(Duration::from_millis(50));
+        let scheduler = ReparseScheduler::new(50);
         let counter = Arc::new(AtomicUsize::new(0));
         let url = Url::parse("file:///test.mc").unwrap();
 
@@ -128,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_immediately_runs_now() {
-        let scheduler = ReparseScheduler::new(Duration::from_secs(60)); // Long debounce
+        let scheduler = ReparseScheduler::new(60_000); // Long debounce
         let counter = Arc::new(AtomicUsize::new(0));
         let url = Url::parse("file:///test.mc").unwrap();
 
@@ -144,12 +157,29 @@ mod tests {
 
     #[tokio::test]
     async fn remove_clears_state() {
-        let scheduler = ReparseScheduler::new(Duration::from_millis(50));
+        let scheduler = ReparseScheduler::new(50);
         let url = Url::parse("file:///test.mc").unwrap();
         scheduler.schedule(url.clone(), || {});
         scheduler.remove(&url);
         // Should not panic; subsequent schedule still works
         scheduler.schedule(url.clone(), || {});
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn set_debounce_ms_applies_to_next_schedule() {
+        let scheduler = ReparseScheduler::new(60_000);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = Url::parse("file:///test.mc").unwrap();
+
+        // Retune down live: the next schedule fires on the new value even
+        // though the scheduler was built with a long one.
+        scheduler.set_debounce_ms(20);
+        let counter2 = Arc::clone(&counter);
+        scheduler.schedule(url.clone(), move || {
+            counter2.fetch_add(1, AOrd::SeqCst);
+        });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(counter.load(AOrd::SeqCst), 1);
     }
 }

@@ -3,6 +3,34 @@
 All notable changes to the MCode VS Code extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.2] - 2026-09-24
+
+### Added
+
+- **Hover drill-down**: hovering a component / module / interface / enum —
+  its definition or a reference resolved to it — now appends the mcc `show.*`
+  card (pin table, interfaces, description) below the local definition hover.
+  A busy or unreachable server keeps the local hover untouched.
+- **Keybindings** on `.mc` files: `ctrl+alt+b` build project, `ctrl+alt+c`
+  check current file, `ctrl+alt+e` explain error code, `ctrl+alt+v` preview
+  circuit.
+- **Semantic-token theme scopes** for the `mcode` language, so mcc's token
+  legend renders with the editor theme's colors even without a dedicated
+  theme.
+- **Status bar item** showing the language-server lifecycle (starting /
+  ready / failed); clicking it runs a project build.
+
+### Changed
+
+- `mcodels.diagnosticsDebounceMs` is now applied live: the reparse scheduler
+  picks up configuration changes (and startup values) without a restart.
+- Completion triggers extended with `/` (use-path segments) and `@` (library
+  versions).
+
+### Removed
+
+- Rust test fixtures are no longer packaged into the `.vsix`.
+
 ## [0.5.1] - 2026-09-24
 
 ### Added
