@@ -16,12 +16,14 @@ use crate::index::snapshot::IndexKind;
 use crate::rpc::{CompletionResponse as RpcCompletionResponse, LapperEntry, MccRpcClient};
 use crate::state::WorkspaceState;
 use ropey::Rope;
+use serde_json::Value;
+use tracing::debug;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse,
-    TextDocumentPositionParams, Url,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Documentation,
+    MarkupContent, MarkupKind, TextDocumentPositionParams, Url,
 };
 
 /// Max completion items to return (per §11, big layers are prefix-limited).
@@ -745,9 +747,102 @@ fn clamped_text(rope: &Rope, e: &LapperEntry) -> String {
     rope.byte_slice(start..stop).to_string()
 }
 
-/// Resolve additional info for a completion item (no-op for now).
-pub fn resolve_item(item: CompletionItem) -> CompletionItem {
+/// completionItem/resolve: ground the item's documentation in mcc's
+/// `show.*` drill-down (completion-design §9 S6). Only the four named
+/// definition kinds round-trip — ports/functions/locals have no `show.*`
+/// target and keep their assembled detail. Any failure (busy server, unknown
+/// name, old binary) returns the item unchanged: documentation is an
+/// additive decoration, never a reason to break the completion.
+pub async fn ground_item(mut item: CompletionItem, rpc: &MccRpcClient) -> CompletionItem {
+    let kind = match item.kind {
+        Some(CompletionItemKind::CLASS) => "component",
+        Some(CompletionItemKind::MODULE) => "module",
+        Some(CompletionItemKind::INTERFACE) => "interface",
+        Some(CompletionItemKind::ENUM) => "enum",
+        _ => return item,
+    };
+    let resp = match rpc.show(kind, &item.label).await {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("completion/resolve: show.{kind}({}) failed: {e}", item.label);
+            return item;
+        }
+    };
+    item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: markdown(kind, &item.label, &resp),
+    }));
     item
+}
+
+/// Format a `show.<kind>` reply as markdown. Every field is optional-read:
+/// an older mcc that omits a section just gets a shorter card. Public so the
+/// integration tests format a real RPC reply through the same code path.
+pub fn markdown(kind: &str, name: &str, resp: &Value) -> String {
+    let mut out = format!("**{name}** ({kind})");
+    if let Some(uri) = resp["uri"].as_str() {
+        out.push_str(&format!("\n\n`{uri}`"));
+    }
+    if let Some(desc) = resp["description"].as_str() {
+        out.push_str(&format!("\n\n{desc}"));
+    }
+    if kind == "component" {
+        // pins_json shape: pin_count + pins[{id, iotype, names, interfaces, ...}].
+        if let Some(count) = resp["pin_count"].as_u64() {
+            out.push_str(&format!("\n\n**{count} pin(s)**\n"));
+            if let Some(pins) = resp["pins"].as_array() {
+                for pin in pins.iter().take(32) {
+                    let names = pin["names"]
+                        .as_array()
+                        .map(|ns| {
+                            ns.iter()
+                                .filter_map(|n| n.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let iotype = pin["iotype"].as_str().unwrap_or("");
+                    let mut row = format!("- `{names}`");
+                    if !iotype.is_empty() {
+                        row.push_str(&format!(" — {iotype}"));
+                    }
+                    if let Some(desc) = pin["description"].as_str() {
+                        row.push_str(&format!(" — {desc}"));
+                    }
+                    out.push_str(&row);
+                }
+                if pins.len() > 32 {
+                    out.push_str(&format!("\n- … {} more", pins.len() - 32));
+                }
+            }
+        }
+        if let Some(ifaces) = resp["interfaces"].as_array() {
+            if !ifaces.is_empty() {
+                out.push_str(&format!("\n\n{} interface binding(s)", ifaces.len()));
+            }
+        }
+    } else if kind == "module" {
+        if let Some(insts) = resp["instances"].as_array() {
+            out.push_str(&format!("\n\n**{} instance(s)**\n", insts.len()));
+            for inst in insts.iter().take(32) {
+                let iname = inst["name"].as_str().unwrap_or("?");
+                let iclass = inst["class"].as_str().unwrap_or("");
+                let ikind = inst["kind"].as_str().unwrap_or("");
+                out.push_str(&format!("- `{iname}`: {iclass} ({ikind})"));
+                out.push('\n');
+            }
+        }
+    } else if kind == "enum" {
+        if let Some(values) = resp["values"].as_array() {
+            out.push_str(&format!("\n\n**{} value(s)**\n", values.len()));
+            for v in values.iter().take(32) {
+                if let Some(v) = v.as_str() {
+                    out.push_str(&format!("- `{v}`\n"));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -755,6 +850,44 @@ mod tests {
     use super::*;
     use crate::rpc::CompletionLayerItem;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn markdown_formats_the_component_card() {
+        let resp: Value = serde_json::json!({
+            "name": "helper_chip",
+            "uri": "helper.mc",
+            "pin_count": 3,
+            "pins": [
+                {"id": 1, "iotype": "in", "names": ["IN_A"]},
+                {"id": 2, "iotype": "in", "names": ["IN_B"]},
+                {"id": 3, "iotype": "out", "names": ["OUT"], "description": "drives the net"}
+            ],
+            "interfaces": []
+        });
+        let card = markdown("component", "helper_chip", &resp);
+        assert!(card.contains("**helper_chip** (component)"), "{card}");
+        assert!(card.contains("`helper.mc`"), "{card}");
+        assert!(card.contains("3 pin(s)"), "{card}");
+        assert!(card.contains("`IN_A`"), "{card}");
+        assert!(card.contains("drives the net"), "{card}");
+    }
+
+    #[test]
+    fn markdown_defensive_against_missing_fields() {
+        let card = markdown("component", "mystery", &serde_json::json!({}));
+        assert!(card.contains("**mystery** (component)"), "{card}");
+        assert!(!card.contains("pin"), "{card}");
+    }
+
+    #[test]
+    fn markdown_enum_lists_values() {
+        let resp: Value = serde_json::json!({
+            "name": "COLOR", "values": ["RED", "GREEN"], "value_count": 2,
+        });
+        let card = markdown("enum", "COLOR", &resp);
+        assert!(card.contains("2 value(s)"), "{card}");
+        assert!(card.contains("`RED`"), "{card}");
+    }
 
     fn lapper_entry(kind: u8, start: usize, stop: usize, scope: &str) -> LapperEntry {
         LapperEntry {

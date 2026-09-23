@@ -413,3 +413,121 @@ async fn refs_cross_file_finds_definition_and_references() {
     // Cleanup so the private port frees up for a rerun.
     let _ = server.stop().await;
 }
+
+/// `caps` handshake (U258 §2): the private server's `start()` now probes
+/// `caps` first (server.info stays the fallback), and the client exposes
+/// `caps()` — the reply must carry the schema version, the method list
+/// (including the AI contract methods this batch wires), and the explain
+/// feature flag.
+#[tokio::test]
+async fn caps_handshake_reports_schema_and_methods() {
+    let (mut server, _child) = private_server(18083).await;
+    let client = server.client().expect("should have RPC client");
+
+    let caps = client.caps().await.expect("caps RPC failed");
+    assert!(caps.is_object(), "caps must be a JSON object");
+    assert_eq!(caps["server"], "mcc");
+    assert!(caps["schema_version"].as_u64().is_some());
+    let methods = caps["methods"].as_array().expect("method list");
+    for required in ["caps", "check", "explain", "show.component"] {
+        assert!(
+            methods.iter().any(|m| m.as_str() == Some(required)),
+            "methods must advertise {required}"
+        );
+    }
+    assert_eq!(caps["features"]["explain"], true);
+
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}
+
+/// `explain` consumed (U258 §2): a known code comes back with its name and
+/// description; an unknown code is a server-side error, not a silent empty.
+#[tokio::test]
+async fn explain_returns_name_and_description() {
+    let (mut server, _child) = private_server(18084).await;
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+
+    // E5060 = the unconnected-port family face the pwrint batches pinned.
+    let resp = client.explain(5060).await;
+    assert!(resp.is_ok(), "explain RPC failed: {:?}", resp.err());
+    let resp = resp.unwrap();
+    assert_eq!(resp["code"], 5060);
+    assert!(resp["name"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(
+        resp["description"].as_str().is_some_and(|s| !s.is_empty()),
+        "description must be present"
+    );
+
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}
+
+/// `check` consumed (U258 §2): an inline dry-run of clean content reports
+/// zero errors/warnings; content with a broken use target reports errors
+/// without touching the workspace project.
+#[tokio::test]
+async fn check_dry_run_summarizes_inline_content() {
+    let (mut server, _child) = private_server(18085).await;
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+
+    let clean = "component clean_chip {\n    pins = [\n        io 1 = A\n    ]\n}\n";
+    let resp = client.check(clean).await.expect("check RPC failed");
+    assert_eq!(resp.summary.errors, 0, "clean content must not error");
+    assert_eq!(resp.summary.warnings, 0);
+
+    // A use directive pointing at a missing file must produce a user-file
+    // error (pre-validation reports it to the user).
+    let broken = "use ./no_such_helper anywhere\ncomponent broken_chip {\n}\n";
+    let resp = client.check(broken).await.expect("check RPC failed");
+    assert!(resp.summary.errors > 0, "broken content must error");
+
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}
+
+/// `show.component` consumed for completionItem/resolve grounding (U258 §2
+/// / §4 S6): the drill-down must carry the pin table (pin_count + named pins
+/// with iotypes) for `helper_chip`, matching the shape comp.rs formats.
+#[tokio::test]
+async fn show_component_gives_the_pin_table() {
+    let (mut server, _child) = private_server(18086).await;
+
+    let probe_path = fixture_path("refs_main.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    let fixtures_dir = crate_path().join("tests/fixtures");
+    let _ = client
+        .set_project_root(&fixtures_dir.to_string_lossy())
+        .await;
+    let _ = client.load_project(&probe_path).await;
+
+    let resp = client.show("component", "helper_chip").await;
+    assert!(resp.is_ok(), "show.component RPC failed: {:?}", resp.err());
+    let resp = resp.unwrap();
+    assert_eq!(resp["name"], "helper_chip");
+    assert_eq!(resp["pin_count"], 3);
+    let pins = resp["pins"].as_array().expect("pin rows");
+    let all_names: Vec<&str> = pins
+        .iter()
+        .flat_map(|p| p["names"].as_array().expect("names").iter())
+        .filter_map(|n| n.as_str())
+        .collect();
+    for expected in ["IN_A", "IN_B", "OUT"] {
+        assert!(
+            all_names.contains(&expected),
+            "pin names must include {expected}, got {all_names:?}"
+        );
+    }
+
+    // And the markdown formatter must turn that shape into a card that
+    // names the pins (comp.rs ground_item's view of the same reply).
+    let card = mcodels::features::comp::markdown("component", "helper_chip", &resp);
+    assert!(card.contains("3 pin(s)"), "{card}");
+    assert!(card.contains("IN_A"), "{card}");
+
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}

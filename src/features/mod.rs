@@ -13,15 +13,19 @@
 //! Diagnostics are fetched via RPC in `server/mod.rs::parse_and_publish`.
 //! Document links (`usejump`) are disabled — use F12 (goto_definition) instead.
 
+pub mod codeaction;
 pub mod comp;
 pub mod context;
 pub mod docsym;
 pub mod erc;
+pub mod folding;
 pub mod fmt;
 pub mod gotodef;
+pub mod highlight;
 pub mod hover;
 pub mod inhint;
 pub mod refs;
+pub mod selrange;
 pub mod semtok;
 pub mod symbols;
 pub mod usepath;

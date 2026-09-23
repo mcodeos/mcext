@@ -272,12 +272,71 @@ impl MccRpcClient {
         let result = self.call("completion", params).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
+
+    /// Capability self-description (mcc Phase 8.3): the server's schema
+    /// version and feature surface. Startup handshake probe — replaces the
+    /// old `server.info` ping (still accepted as a fallback for older
+    /// binaries that predate `caps`).
+    pub async fn caps(&self) -> Result<Value, RpcError> {
+        self.call("caps", json!({})).await
+    }
+
+    /// Explain an error code: name + description, deepened to the rule
+    /// descriptor (owner/lock/acceptance/fix) when the code is a registered
+    /// catalog rule.
+    pub async fn explain(&self, code: u32) -> Result<Value, RpcError> {
+        self.call("explain", json!({"code": code})).await
+    }
+
+    /// Inline dry-run validation (`check` mode A): compile `content` in an
+    /// overlay slot and get the summary + user-file diagnostics back, without
+    /// touching the workspace's on-disk project.
+    pub async fn check(&self, content: &str) -> Result<CheckResponse, RpcError> {
+        let result = self.call("check", json!({"content": content})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
+    /// `show.<kind>` drill-down by exact name (`kind` ∈ component / module /
+    /// interface / enum). Shapes differ per kind — callers format
+    /// defensively from the raw value.
+    pub async fn show(&self, kind: &str, name: &str) -> Result<Value, RpcError> {
+        self.call(&format!("show.{kind}"), json!({"name": name}))
+            .await
+    }
 }
 
 /// Response from `diagnostics` RPC
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsResponse {
     pub diagnostics: Vec<DiagEntry>,
+}
+
+/// Response from `check` (inline dry-run mode). `diagnostics` stays raw — the
+/// summary is what consumers act on, and mcc's full diagnostic JSON shape is
+/// already covered by `DiagEntry` on the streaming path.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckResponse {
+    pub summary: CheckSummary,
+    #[serde(default)]
+    pub diagnostics: Vec<Value>,
+    #[serde(default)]
+    pub library: CheckLibrary,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckSummary {
+    #[serde(default)]
+    pub errors: u32,
+    #[serde(default)]
+    pub warnings: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CheckLibrary {
+    #[serde(default)]
+    pub errors: u32,
+    #[serde(default)]
+    pub warnings: u32,
 }
 
 /// Response from `refs` RPC — one row per definition/reference site.
