@@ -1,12 +1,94 @@
 //! Find References + Rename — §15.2/§15.5
 //!
 //! LSP entry points: `textDocument/references`, `textDocument/rename`
-//! Data source: RpcSemSymbols from sem RPC + RefDefMap reverse index
+//! Data sources:
+//! - [`resolve_cross_file`] — mcc `refs` RPC, position-aware, whole workspace
+//!   (RefDefMap reverse index). Primary path; answers with locations in every
+//!   loaded file, not just the one under the cursor.
+//! - [`resolve`] — local lapper + local tables. Fallback when the mcc server
+//!   is unavailable or the RPC misses, and the data source for rename (which
+//!   stays current-file).
 
 use crate::common::position::{offset_to_position, position_to_offset};
+use crate::mccsrv::MccServer;
 use crate::state::WorkspaceState;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{Location, Position, Range, TextEdit, Url};
+
+/// Cross-file find-references via the mcc `refs` RPC.
+///
+/// Resolves the definition under the cursor on the mcc side (strict
+/// position-aware path, `name` only as a fallback hint) and maps the returned
+/// byte spans to LSP locations — including files never opened in the editor
+/// (their text is read from disk for the offset→position conversion). Returns
+/// None when the cursor cannot be turned into a byte offset or the RPC comes
+/// back empty, so the caller can fall back to the local path.
+pub async fn resolve_cross_file(
+    state: &WorkspaceState,
+    server: &MccServer,
+    uri: &Url,
+    position: Position,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
+    let rope = state.document_rope(uri)?;
+    let offset = position_to_offset(position, &rope)?;
+    let hint = word_at_offset(&rope, offset);
+
+    let resp = server
+        .refs(uri.path(), offset, hint.as_deref())
+        .await
+        .ok()?;
+    if resp.refs.is_empty() {
+        return None;
+    }
+
+    let mut locations = Vec::new();
+    for item in resp.refs {
+        if item.def && !include_declaration {
+            continue;
+        }
+        let target = Url::from_file_path(&item.uri)
+            .map_err(|_| ())
+            .or_else(|_| Url::parse(&item.uri).map_err(|_| ()))
+            .ok()?;
+        // The span lives in the item's own file, whose rope may need a disk
+        // read; a file that is neither open nor readable drops just that row.
+        let target_rope = state.rope_for_uri(&target)?;
+        let start = offset_to_position(item.pos, &target_rope)?;
+        let end = offset_to_position(item.end, &target_rope).unwrap_or(start);
+        locations.push(Location::new(target, Range::new(start, end)));
+    }
+    if locations.is_empty() {
+        None
+    } else {
+        Some(locations)
+    }
+}
+
+/// The identifier text around `offset` — the name hint the refs RPC uses when
+/// the cursor position does not resolve to a definition.
+fn word_at_offset(rope: &ropey::Rope, offset: usize) -> Option<String> {
+    if offset >= rope.len_bytes() {
+        return None;
+    }
+    let is_word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Rope byte access is O(log n) per byte, and identifiers are short — a
+    // plain byte walk on both sides is fine.
+    let byte_at = |o: usize| rope.get_byte(o);
+    let mut start = offset;
+    while start > 0 && byte_at(start - 1).is_some_and(is_word_byte) {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < rope.len_bytes() && byte_at(end).is_some_and(is_word_byte) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    let bytes: Vec<u8> = (start..end).filter_map(|o| byte_at(o)).collect();
+    String::from_utf8(bytes).ok()
+}
 
 /// Find all references via lapper + local tables.
 pub fn resolve(

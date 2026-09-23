@@ -286,6 +286,13 @@ impl Backend {
                         payload["ledger"] = v;
                     }
                 }
+                // A build is an explicit workspace-level trigger: refresh the
+                // ERC cache (rpc_lock is already held) and republish every
+                // affected file's merged diagnostics under `mcc-erc`.
+                let erc_count =
+                    crate::features::erc::run_and_cache(&self.state, server).await;
+                payload["erc"] = serde_json::json!({ "violations": erc_count });
+                crate::features::erc::republish_affected(&self.state, &self.client).await;
                 Ok(Some(payload))
             }
             Err(e) => {
@@ -407,10 +414,13 @@ impl Backend {
             ),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
-            // Handlers exist (document_symbol / rename below); without these
-            // declarations VSCode never calls them.
+            // Handlers exist (document_symbol / rename / workspace symbol
+            // below); without these declarations VSCode never calls them.
             document_symbol_provider: Some(OneOf::Left(true)),
             rename_provider: Some(OneOf::Left(true)),
+            // Backed by the project symbols cache the workspace index
+            // already maintains — no mcc round-trip on the query path.
+            workspace_symbol_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
                 trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
@@ -950,6 +960,15 @@ async fn parse_and_publish(
         }
     }
 
+    // A save-triggered full reparse (version None — only did_save passes it)
+    // is also the ERC trigger: workspace-level checks must not ride the
+    // per-keystroke path, and the rpc_lock/server guard are already held.
+    // The publish below merges whatever the cache holds.
+    if version.is_none() {
+        let erc_count = crate::features::erc::run_and_cache(&state, server).await;
+        info!("erc refresh for {}: {erc_count} violations", uri.path());
+    }
+
     drop(server_guard);
 
     let rpc_tokens = crate::state::RpcSemTokens {
@@ -1027,6 +1046,11 @@ async fn parse_and_publish(
 
     // Always publish diagnostics (with current version) so old errors get cleared.
     // The diagnostics vector contains results from the latest mcc parse for this document.
+    // Every publish is parse ∪ ERC: remember the parse side, then merge the
+    // cached ERC violations for this file so an ERC-bearing file keeps its
+    // `mcc-erc` rows across reparses.
+    state.erc.last_parse.insert(uri.clone(), diagnostics.clone());
+    let diagnostics = state.erc.merged_for(&uri, diagnostics);
     let diag_count = diagnostics.len();
     debug!("publish_diagnostics: {diag_count} diags for {}", uri.path());
     client
@@ -1194,6 +1218,10 @@ impl LanguageServer for Backend {
         self.client
             .publish_diagnostics(uri.clone(), Vec::new(), version)
             .await;
+        // Drop the file's ERC rows too — the file is gone from the editor and
+        // a reopen must not resurface violations from before it closed.
+        self.state.erc.diags.remove(&uri);
+        self.state.erc.last_parse.remove(&uri);
         self.state.remove_document(&uri);
         self.state.project.scheduler.remove(&uri);
         let mc_uri = String::from(uri.path());
@@ -1395,6 +1423,45 @@ impl LanguageServer for Backend {
         let include_decl = params.context.include_declaration;
         let span = tracing::debug_span!("references", uri = %uri.path(), line = pos.line, col = pos.character, include_decl);
         let _guard = span.enter();
+
+        // Primary path: the mcc `refs` RPC answers across every loaded file.
+        // Same bounded rpc_lock wait as goto_definition — if a reparse holds
+        // the lock, fall through to the local path instead of hanging.
+        if self
+            .state
+            .init
+            .done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let server_guard = self.mcc_server.read().await;
+            if let Some(server) = server_guard.as_ref() {
+                if server.is_connected() {
+                    let lock = tokio::time::timeout(
+                        std::time::Duration::from_millis(800),
+                        self.state.rpc_lock.lock(),
+                    )
+                    .await;
+                    if let Ok(_rpc_guard) = lock {
+                        if let Some(locations) = crate::features::refs::resolve_cross_file(
+                            &self.state,
+                            server,
+                            &uri,
+                            pos,
+                            include_decl,
+                        )
+                        .await
+                        {
+                            return Ok(Some(locations));
+                        }
+                    } else {
+                        debug!("references: rpc_lock timeout — local fallback");
+                    }
+                }
+            }
+        }
+
+        // Fallback: current-file lapper + local tables (also covers mcc
+        // answering an empty refs list).
         Ok(crate::features::refs::resolve(
             &self.state,
             &uri,
@@ -1424,6 +1491,20 @@ impl LanguageServer for Backend {
         };
         let result = crate::features::docsym::document_symbols(&symbols.lapper, &rope);
         Ok(Some(DocumentSymbolResponse::Nested(result)))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let span = tracing::debug_span!("workspace_symbol", query = %params.query);
+        let _guard = span.enter();
+        let symbols = crate::features::symbols::workspace_symbols(&self.state, &params.query);
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(symbols))
+        }
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {

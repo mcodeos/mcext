@@ -112,6 +112,32 @@ impl MccRpcClient {
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
+    /// Position-aware find-references across the whole workspace.
+    ///
+    /// mcc resolves the definition under `position` (byte offset) through the
+    /// RefDefMap reverse index and returns every reference to it in all loaded
+    /// files; `name` is only a fallback hint when the position resolves to
+    /// nothing.
+    pub async fn refs(
+        &self,
+        uri: &str,
+        position: usize,
+        name: Option<&str>,
+    ) -> Result<RefsResponse, RpcError> {
+        let mut params = json!({"uri": uri, "position": position});
+        if let Some(n) = name {
+            params["name"] = json!(n);
+        }
+        let result = self.call("refs", params).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
+    /// Run the flat electrical net checks (ERC) for the workspace's top module.
+    pub async fn erc(&self) -> Result<ErcResponse, RpcError> {
+        let result = self.call("erc", json!({})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
     /// Get project-wide symbols (components, interfaces, enums, modules)
     pub async fn project_symbols(&self) -> Result<ProjectSymbolsResponse, RpcError> {
         let result = self.call("project_symbols", json!({})).await?;
@@ -252,6 +278,62 @@ impl MccRpcClient {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsResponse {
     pub diagnostics: Vec<DiagEntry>,
+}
+
+/// Response from `refs` RPC — one row per definition/reference site.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefsResponse {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub refs: Vec<RefsItem>,
+}
+
+/// One find-references hit. `pos`/`end` are byte offsets into `uri`; `def`
+/// marks the declaration site; `kind` is the SymbolKind ordinal (whitelisted
+/// to netlist-meaningful kinds on the mcc side).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefsItem {
+    pub uri: String,
+    #[serde(default)]
+    pub scope: String,
+    pub pos: usize,
+    pub end: usize,
+    #[serde(default)]
+    pub def: bool,
+    #[serde(default)]
+    pub kind: u8,
+}
+
+/// Response from `erc` RPC — the one JSON face of the electrical net checks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErcResponse {
+    #[serde(default)]
+    pub top: String,
+    #[serde(default)]
+    pub summary: serde_json::Value,
+    #[serde(default)]
+    pub violations: Vec<ErcViolation>,
+}
+
+/// One ERC violation. `pos` is a byte offset into `uri` (mcc renders
+/// line/column only on its diagnostics channel, not here).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErcViolation {
+    pub code: u32,
+    /// "error" | "warning" | "info"
+    pub severity: String,
+    #[serde(default)]
+    pub check: String,
+    pub message: String,
+    #[serde(default)]
+    pub net_name: String,
+    #[serde(default)]
+    pub pos: usize,
+    #[serde(default)]
+    pub uri: String,
 }
 
 /// Response from `library.list` RPC
