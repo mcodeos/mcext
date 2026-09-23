@@ -19,28 +19,134 @@ use tower_lsp::lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, Mar
 /// Maximum number of definition entries to display in a hover tooltip.
 const MAX_ENTRIES: usize = 8;
 
+/// The `show.*` subject a hover resolved to — the same drill-down
+/// completionItem/resolve grounds with (`comp::ground_item`).
+pub struct Subject {
+    /// `show.<kind>` kind word: component / module / interface / enum.
+    pub kind: &'static str,
+    pub name: String,
+}
+
 // ============================================================================
 // Public entry point
 // ============================================================================
 
-/// Resolve hover information for a position.
-pub fn resolve(state: &WorkspaceState, params: &HoverParams) -> Option<Hover> {
+/// Resolve hover information for a position, plus the `show.*` subject it
+/// resolved to (when the symbol is one of the four named kinds).
+pub fn resolve_with_subject(
+    state: &WorkspaceState,
+    params: &HoverParams,
+) -> (Option<Hover>, Option<Subject>) {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let rope = state.document_rope(uri)?;
-    let offset = crate::common::position::position_to_offset(position, &rope)?;
+    let Some(rope) = state.document_rope(uri) else {
+        return (None, None);
+    };
+    let Some(offset) = crate::common::position::position_to_offset(position, &rope) else {
+        return (None, None);
+    };
+    let subject = hover_subject(state, uri, offset);
 
     // ── (1) Use-statement hover ──
     if let Some(hover) = resolve_use_hover(&rope, offset, uri, state) {
-        return Some(hover);
+        return (Some(hover), None);
     }
 
     // ── (2) Symbol hover ──
     if let Some(hover) = resolve_symbol_hover(state, uri, &rope, offset) {
-        return Some(hover);
+        return (Some(hover), subject);
     }
 
-    None
+    (None, None)
+}
+
+/// Resolve hover information for a position.
+pub fn resolve(state: &WorkspaceState, params: &HoverParams) -> Option<Hover> {
+    resolve_with_subject(state, params).0
+}
+
+/// Determine which `show.*` drill-down the hovered symbol maps to. Defs are
+/// disambiguated through the project index (a ClassDef is any of the four
+/// CMIE kinds); refs carry the exact kind in the RefDefMap's `cmie_kind`.
+/// Anything else — ports, pins, funcs, locals — has no `show.*` target.
+fn hover_subject(state: &WorkspaceState, uri: &Url, offset: usize) -> Option<Subject> {
+    let (info, name) = crate::features::symbols::find_symbol_at_offset(state, uri, offset)?;
+    match info.kind {
+        // ClassDef — one SymbolKind covering component/module/interface/enum.
+        0 => {
+            let snap = state.project.index.snapshot();
+            for (ik, kind) in [
+                (IndexKind::Component, "component"),
+                (IndexKind::Module, "module"),
+                (IndexKind::Interface, "interface"),
+                (IndexKind::Enum, "enum"),
+            ] {
+                if snap.lookup(ik, &name).iter().any(|e| e.uri == *uri) {
+                    return Some(Subject {
+                        kind,
+                        name: name.to_string(),
+                    });
+                }
+            }
+            None
+        }
+        // EnumDef
+        16 => Some(Subject {
+            kind: "enum",
+            name: name.to_string(),
+        }),
+        // ClassRef / EnumRef / EnumValRef — the def map carries the CMIE kind
+        // and mcc's own def-name capture.
+        1 | 17 | 19 => {
+            let map = {
+                let cell = state.symbols.sem_symbols.get(uri)?;
+                let guard = cell.lock().ok()?;
+                guard.ref_def_map.clone()?
+            };
+            let entry = map.lookup(info.kind, info.id)?;
+            let kind = cmie_label(entry.cmie_kind)?;
+            let def_name = if entry.def_name.is_empty() {
+                name.to_string()
+            } else {
+                entry.def_name.clone()
+            };
+            Some(Subject { kind, name: def_name })
+        }
+        _ => None,
+    }
+}
+
+/// completionItem/resolve grounds with `comp::markdown`; hover does the same:
+/// append the `show.<kind>` card below the local hover (definition line +
+/// location stay first — they are the cheapest, most precise facts). Any RPC
+/// failure keeps the local hover untouched: grounding is decoration, never a
+/// reason to lose what we already resolved.
+pub async fn ground(hover: Hover, subject: &Subject, rpc: &crate::rpc::MccRpcClient) -> Hover {
+    let resp = match rpc.show(subject.kind, &subject.name).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                "hover: show.{}({}) failed: {e}",
+                subject.kind,
+                subject.name
+            );
+            return hover;
+        }
+    };
+    let card = crate::features::comp::markdown(subject.kind, &subject.name, &resp);
+    let HoverContents::Markup(mut markup) = hover.contents else {
+        return hover;
+    };
+    if markup.value.trim().is_empty() {
+        markup.value = card;
+    } else {
+        markup.value.push_str("\n\n---\n\n");
+        markup.value.push_str(&card);
+    }
+    Hover {
+        contents: HoverContents::Markup(markup),
+        range: hover.range,
+    }
 }
 
 // ============================================================================
@@ -723,5 +829,113 @@ mod tests {
     fn pos_at(source: &str, offset: usize) -> Position {
         let rope = Rope::from_str(source);
         crate::common::position::offset_to_position(offset, &rope).unwrap_or(Position::new(0, 0))
+    }
+
+    // ── show.* subject extraction (hover grounding) ──
+
+    /// Same shape as `state_with_lapper`, plus a pinned project index so the
+    /// ClassDef→CMIE disambiguation branch has data to read.
+    fn state_with_index(
+        lapper_entries: Vec<(u8, usize, usize, u32, &str)>,
+        index: crate::index::snapshot::ProjectIndex,
+    ) -> (WorkspaceState, Url) {
+        let (mut state, uri) = state_with_lapper(lapper_entries);
+        state.project.index = crate::index::worker::IndexWorkerHandle::with_snapshot(index);
+        (state, uri)
+    }
+
+    fn subject_of(state: &WorkspaceState, uri: &Url, line: u32, col: u32) -> Option<Subject> {
+        hover_subject(
+            state,
+            uri,
+            crate::common::position::position_to_offset(
+                Position::new(line, col),
+                &state.document_rope(uri).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn class_def_subject_disambiguates_via_index() {
+        // "component main" with an index that classifies `main` as Interface:
+        // the subject must be `interface`, not the generic ClassDef label.
+        let (state, uri) = {
+            let mut idx = crate::index::snapshot::ProjectIndex::new();
+            idx.add(
+                crate::index::snapshot::IndexKind::Interface,
+                crate::index::snapshot::IndexEntry {
+                    uri: Url::parse("file:///test.mc").unwrap(),
+                    span: (0, 14),
+                    name: "main".into(),
+                },
+            );
+            state_with_index(vec![(0, 10, 14, 0, "")], idx)
+        };
+        let subject = subject_of(&state, &uri, 0, 12).expect("interface subject");
+        assert_eq!(subject.kind, "interface");
+        assert_eq!(subject.name, "main");
+    }
+
+    #[test]
+    fn class_def_without_index_entry_has_no_subject() {
+        // Empty index (lib file, index not built yet): no subject — the local
+        // hover stands alone rather than guessing component vs module.
+        let (state, uri) = state_with_index(
+            vec![(0, 10, 14, 0, "")],
+            crate::index::snapshot::ProjectIndex::new(),
+        );
+        assert!(subject_of(&state, &uri, 0, 12).is_none());
+    }
+
+    #[test]
+    fn enum_def_subject_is_enum() {
+        // An EnumDef (kind 16) needs no index disambiguation.
+        let (state, uri) = state_with_lapper(vec![(16, 10, 14, 0, "")]);
+        let subject = subject_of(&state, &uri, 0, 12).expect("enum subject");
+        assert_eq!(subject.kind, "enum");
+        assert_eq!(subject.name, "main");
+    }
+
+    #[test]
+    fn class_ref_subject_reads_cmie_and_def_name() {
+        // A ClassRef (kind 1) resolves through the RefDefMap: cmie_kind=2
+        // (interface) wins over the generic ref label, and mcc's captured
+        // def name replaces the (possibly hint-fallback) word.
+        let (state, uri) = state_with_lapper(vec![(1, 10, 14, 7, "")]);
+        let map = crate::rpc::RefDefMapData {
+            entries: vec![crate::rpc::RefDefEntryData {
+                ref_kind: 1,
+                ref_id: 7,
+                file_id: 0,
+                def_span: [0, 14],
+                def_kind: 0,
+                container_id: 0,
+                cmie_kind: 2,
+                def_name: "MY_IF".into(),
+            }],
+            files: vec!["file:///test.mc".into()],
+            containers: vec![],
+            func_names: vec![],
+            kind_names: vec![],
+            result_id: 0,
+            index: std::sync::OnceLock::new(),
+            kind_map: std::sync::OnceLock::new(),
+        };
+        {
+            let cell = state.symbols.sem_symbols.get(&uri).unwrap();
+            let mut guard = cell.lock().unwrap();
+            guard.ref_def_map = Some(map);
+        }
+        let subject = subject_of(&state, &uri, 0, 12).expect("ref subject");
+        assert_eq!(subject.kind, "interface");
+        assert_eq!(subject.name, "MY_IF");
+    }
+
+    #[test]
+    fn pin_ref_has_no_subject() {
+        // Pins have no show.* target — no subject, whatever the def map says.
+        let (state, uri) = state_with_lapper(vec![(11, 10, 14, 7, "")]);
+        assert!(subject_of(&state, &uri, 0, 12).is_none());
     }
 }

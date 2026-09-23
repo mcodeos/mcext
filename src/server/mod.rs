@@ -571,7 +571,15 @@ impl Backend {
             workspace_symbol_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
+                // `.`/`:` = member & system-path segments, ` ` = attr keys,
+                // `/` = use-path segments, `@` = library versions.
+                trigger_characters: Some(vec![
+                    ".".to_string(),
+                    ":".to_string(),
+                    " ".to_string(),
+                    "/".to_string(),
+                    "@".to_string(),
+                ]),
                 all_commit_characters: Some(vec![]),
                 completion_item: None,
                 work_done_progress_options: WorkDoneProgressOptions::default(),
@@ -1291,6 +1299,12 @@ impl LanguageServer for Backend {
         // execute_command's mcode.viz can locate the project manifest even when
         // the client doesn't pass initializationOptions.project_root.
         cfg.project_root = project_root.clone();
+        // initializationOptions may carry a non-default debounce; the scheduler
+        // was built before initialize with the default, so sync it now.
+        self.state
+            .project
+            .scheduler
+            .set_debounce_ms(cfg.diagnostics_debounce_ms);
         self.config.insert("current".to_string(), cfg);
 
         Ok(InitializeResult {
@@ -1897,9 +1911,19 @@ impl LanguageServer for Backend {
             merged.format_insert_final_newline = v;
         }
         info!(
-            "config updated: tabSize={} semtok={} inlay={}",
-            merged.format_tab_size, merged.semantic_tokens_enabled, merged.inlay_hints_enabled
+            "config updated: tabSize={} semtok={} inlay={} debounce={}ms",
+            merged.format_tab_size,
+            merged.semantic_tokens_enabled,
+            merged.inlay_hints_enabled,
+            merged.diagnostics_debounce_ms
         );
+        // The scheduler is built once at startup with the default debounce;
+        // retune it live so diagnosticsDebounceMs takes effect without a
+        // restart (pending sequence numbers stay valid).
+        self.state
+            .project
+            .scheduler
+            .set_debounce_ms(merged.diagnostics_debounce_ms);
         self.config.insert("current".to_string(), merged);
     }
 
@@ -2108,11 +2132,43 @@ impl LanguageServer for Backend {
             .map(|range| PrepareRenameResponse::Range(range)))
     }
 
-    // Phase 5: hover
+    // Phase 5: hover — local resolution first (definition line + location),
+    // then the show.* card appended when the symbol is one of the four named
+    // kinds and mcc is reachable. Same bounded-wait contract as
+    // completion_resolve: a busy server degrades to the local hover.
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let span = tracing::debug_span!("hover");
         let _guard = span.enter();
-        Ok(crate::features::hover::resolve(&self.state, &params))
+        let (hover, subject) = crate::features::hover::resolve_with_subject(&self.state, &params);
+        let Some(hover) = hover else {
+            return Ok(None);
+        };
+        let Some(subject) = subject else {
+            return Ok(Some(hover));
+        };
+        if !self.state.init.done.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(Some(hover));
+        }
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(Some(hover));
+        };
+        let Some(rpc) = server.client() else {
+            return Ok(Some(hover));
+        };
+        let grounded = match tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            self.state.rpc_lock.lock(),
+        )
+        .await
+        {
+            Ok(_guard) => crate::features::hover::ground(hover, &subject, rpc).await,
+            Err(_) => {
+                debug!("hover: rpc_lock timeout — local hover only");
+                hover
+            }
+        };
+        Ok(Some(grounded))
     }
 }
 

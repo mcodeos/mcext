@@ -531,3 +531,57 @@ async fn show_component_gives_the_pin_table() {
     // Cleanup so the private port frees up for a rerun.
     let _ = server.stop().await;
 }
+
+/// Hover grounding (U258 §2 余项): `hover::ground` appends the show.* card
+/// below the local hover for a named kind, and returns the local hover
+/// untouched when mcc has no such symbol. Runs against a real private
+/// mcc — same fixture (`refs_main.mc` → `helper_chip`) as the show probe.
+#[tokio::test]
+async fn hover_ground_appends_show_card_and_falls_back() {
+    let (mut server, _child) = private_server(18087).await;
+
+    let probe_path = fixture_path("refs_main.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    let fixtures_dir = crate_path().join("tests/fixtures");
+    let _ = client
+        .set_project_root(&fixtures_dir.to_string_lossy())
+        .await;
+    let _ = client.load_project(&probe_path).await;
+
+    let local = tower_lsp::lsp_types::Hover {
+        contents: tower_lsp::lsp_types::HoverContents::Markup(
+            tower_lsp::lsp_types::MarkupContent {
+                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                value: "`helper_chip` (component)".into(),
+            },
+        ),
+        range: None,
+    };
+
+    // Grounded: local line first, show card (pin table) appended.
+    let subject = mcodels::features::hover::Subject {
+        kind: "component",
+        name: "helper_chip".into(),
+    };
+    let grounded = mcodels::features::hover::ground(local.clone(), &subject, client).await;
+    let tower_lsp::lsp_types::HoverContents::Markup(mc) = &grounded.contents else {
+        panic!("expected Markup");
+    };
+    assert!(mc.value.starts_with("`helper_chip` (component)"), "{}", mc.value);
+    assert!(mc.value.contains("---"), "card separator missing: {}", mc.value);
+    assert!(mc.value.contains("3 pin(s)"), "pin table missing: {}", mc.value);
+
+    // Unknown symbol: show fails, the local hover comes back byte-identical.
+    let missing = mcodels::features::hover::Subject {
+        kind: "component",
+        name: "no_such_chip".into(),
+    };
+    let fallback = mcodels::features::hover::ground(local, &missing, client).await;
+    let tower_lsp::lsp_types::HoverContents::Markup(mc) = &fallback.contents else {
+        panic!("expected Markup");
+    };
+    assert_eq!(mc.value, "`helper_chip` (component)");
+
+    let _ = server.stop().await;
+}
