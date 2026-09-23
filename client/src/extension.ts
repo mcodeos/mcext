@@ -9,16 +9,10 @@ import * as path from "path";
 import {
   languages,
   workspace,
-  EventEmitter,
   ExtensionContext,
   window,
-  InlayHintsProvider,
   TextDocument,
-  CancellationToken,
   Range,
-  InlayHint,
-  TextDocumentChangeEvent,
-  ProviderResult,
   commands,
   WorkspaceEdit,
   TextEdit,
@@ -204,11 +198,14 @@ export async function activate(context: ExtensionContext) {
       fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
     },
     traceOutputChannel,
+    // Forward the `mcodels.*` settings as initializationOptions — the server
+    // parses them into ServerConfig (flat camelCase, same shape as
+    // workspace/didChangeConfiguration payloads).
+    initializationOptions: workspace.getConfiguration("mcodels"),
   };
 
   // Create the language client and start the client.
   client = new LanguageClient("mcode", "MCode", serverOptions, clientOptions);
-  // activateInlayHints(context);
   clientStarted = client.start();
 
   // viz circuit preview: open the active .mc file's circuit as its own editor
@@ -361,6 +358,16 @@ export async function activate(context: ExtensionContext) {
     commands.registerCommand("mcode.build", () => buildProject())
   );
   context.subscriptions.push(buildOutput, buildDiags);
+
+  // NOTE: the client command is `mcode.checkFile` / `mcode.explainCode`, the
+  // server executeCommand ids are `mcode.check` / `mcode.explain`. They must
+  // differ — same reason as `mcode.build` above.
+  context.subscriptions.push(
+    commands.registerCommand("mcode.checkFile", () => checkCurrentFile())
+  );
+  context.subscriptions.push(
+    commands.registerCommand("mcode.explainCode", () => explainErrorCode())
+  );
 
   // Reconcile build diagnostics against live ones after the fact. The language
   // server publishes per-file diagnostics asynchronously (debounced reparse
@@ -887,80 +894,91 @@ export function deactivate(): Thenable<void> | undefined {
   return client.stop();
 }
 
-export function activateInlayHints(ctx: ExtensionContext) {
-  const maybeUpdater = {
-    hintsProvider: null as Disposable | null,
-    updateHintsEventEmitter: new EventEmitter<void>(),
+// Run the server-side `mcode.check` dry-run on the active .mc file and show
+// the summary counts (editor diagnostics ∪ library diagnostics) as a toast.
+async function checkCurrentFile(): Promise<void> {
+  const editor = window.activeTextEditor;
+  if (!editor || editor.document.languageId !== "mcode") {
+    window.showInformationMessage("MCode check: no active .mc file.");
+    return;
+  }
+  const filePath = editor.document.uri.fsPath;
+  if (clientStarted) {
+    await clientStarted;
+  }
+  try {
+    const result = (await client.sendRequest("workspace/executeCommand", {
+      // Server-side executeCommand id (advertised in executeCommandProvider).
+      command: "mcode.check",
+      arguments: [filePath],
+    })) as
+      | { ok: false; error: string }
+      | {
+          ok: true;
+          summary: {
+            errors: number;
+            warnings: number;
+            library_errors: number;
+            library_warnings: number;
+          };
+        }
+      | null;
 
-    async onConfigChange() {
-      this.dispose();
+    if (!result || !result.ok) {
+      const err = (result as { error?: string } | null)?.error ?? "no result";
+      window.showErrorMessage(`MCode check failed: ${err}`);
+      return;
+    }
+    const s = result.summary;
+    void window.showInformationMessage(
+      `MCode check: ${s.errors} error(s), ${s.warnings} warning(s)` +
+        ` · library: ${s.library_errors} error(s), ${s.library_warnings} warning(s)`
+    );
+  } catch (e) {
+    window.showErrorMessage(`MCode check error: ${String(e)}`);
+  }
+}
 
-      const event = this.updateHintsEventEmitter.event;
-      // this.hintsProvider = languages.registerInlayHintsProvider(
-      //   { scheme: "file", language: "mcode" },
-      //   // new (class implements InlayHintsProvider {
-      //   //   onDidChangeInlayHints = event;
-      //   //   resolveInlayHint(hint: InlayHint, token: CancellationToken): ProviderResult<InlayHint> {
-      //   //     const ret = {
-      //   //       label: hint.label,
-      //   //       ...hint,
-      //   //     };
-      //   //     return ret;
-      //   //   }
-      //   //   async provideInlayHints(
-      //   //     document: TextDocument,
-      //   //     range: Range,
-      //   //     token: CancellationToken
-      //   //   ): Promise<InlayHint[]> {
-      //   //     const hints = (await client
-      //   //       .sendRequest("custom/inlay_hint", { path: document.uri.toString() })
-      //   //       .catch(err => null)) as [number, number, string][];
-      //   //     if (hints == null) {
-      //   //       return [];
-      //   //     } else {
-      //   //       return hints.map(item => {
-      //   //         const [start, end, label] = item;
-      //   //         let startPosition = document.positionAt(start);
-      //   //         let endPosition = document.positionAt(end);
-      //   //         return {
-      //   //           position: endPosition,
-      //   //           paddingLeft: true,
-      //   //           label: [
-      //   //             {
-      //   //               value: `${label}`,
-      //   //               // location: {
-      //   //               //   uri: document.uri,
-      //   //               //   range: new Range(1, 0, 1, 0)
-      //   //               // }
-      //   //               command: {
-      //   //                 title: "hello world",
-      //   //                 command: "helloworld.helloWorld",
-      //   //                 arguments: [document.uri],
-      //   //               },
-      //   //             },
-      //   //           ],
-      //   //         };
-      //   //       });
-      //   //     }
-      //   //   }
-      //   // })()
-      // );
-    },
+// Ask for an error code (E5060 / 5060) and show the mcc `explain` answer.
+async function explainErrorCode(): Promise<void> {
+  const code = await window.showInputBox({
+    prompt: "Error code to explain (e.g. E5060 or 5060)",
+    placeHolder: "E5060",
+  });
+  if (!code || !code.trim()) {
+    return;
+  }
+  if (clientStarted) {
+    await clientStarted;
+  }
+  try {
+    const result = (await client.sendRequest("workspace/executeCommand", {
+      // Server-side executeCommand id (advertised in executeCommandProvider).
+      command: "mcode.explain",
+      arguments: [code.trim()],
+    })) as
+      | { ok: false; error: string }
+      | { ok: true; explain: unknown }
+      | null;
 
-    onDidChangeTextDocument({ contentChanges, document }: TextDocumentChangeEvent) {
-      // debugger
-      // this.updateHintsEventEmitter.fire();
-    },
-
-    dispose() {
-      this.hintsProvider?.dispose();
-      this.hintsProvider = null;
-      this.updateHintsEventEmitter.dispose();
-    },
-  };
-
-  workspace.onDidChangeConfiguration(maybeUpdater.onConfigChange, maybeUpdater, ctx.subscriptions);
-  workspace.onDidChangeTextDocument(maybeUpdater.onDidChangeTextDocument, maybeUpdater, ctx.subscriptions);
-
-  maybeUpdater.onConfigChange().catch(console.error);
+    if (!result || !result.ok) {
+      const err = (result as { error?: string } | null)?.error ?? "no result";
+      window.showErrorMessage(`MCode explain failed: ${err}`);
+      return;
+    }
+    const e = result.explain as { name?: string; description?: string };
+    const name = e.name ? ` (${e.name})` : "";
+    void window.showInformationMessage(
+      `${code.trim()}${name}: ${e.description ?? "no description"}`,
+      "Show details"
+    ).then((pick) => {
+      if (pick === "Show details") {
+        buildOutput.appendLine(`[mcc explain] ${code.trim()}`);
+        buildOutput.appendLine(JSON.stringify(result!.explain, null, 2));
+        buildOutput.show(true);
+      }
+    });
+  } catch (e) {
+    window.showErrorMessage(`MCode explain error: ${String(e)}`);
+  }
 }

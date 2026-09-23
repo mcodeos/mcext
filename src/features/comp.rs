@@ -207,6 +207,12 @@ pub fn resolve(
         return None;
     }
 
+    // §5.10: attr/spec key position is local-only (mcc keeps keys free-form;
+    // there is nothing to ask the RPC for).
+    if let Some(items) = attr_keys(&rope, offset, &ctx, &lapper) {
+        return Some(CompletionResponse::Array(items));
+    }
+
     // ── §7.3: layered snapshot cache ──
     // The candidate set depends on (uri, scope) and on P4 index content;
     // context and prefix always read the current rope (§2.2 / §7.6).
@@ -287,6 +293,12 @@ pub async fn resolve_with_rpc(
             .map(CompletionResponse::Array);
     }
 
+    // §5.10: attr/spec key position is local-only — keys are free-form to
+    // mcc, so the RPC has no attr-key space to ask for.
+    if let Some(items) = attr_keys(&rope, offset, &ctx, &lapper) {
+        return Some(CompletionResponse::Array(items));
+    }
+
     let cache_key = cache_key(state, uri, &ctx, ctx.member_root.clone());
     let revision = state.symbols.parse_revision.load(Ordering::Relaxed);
     let doc_version = state.document_version(uri).unwrap_or(-1);
@@ -347,6 +359,114 @@ pub async fn resolve_with_rpc(
         }
     }
 }
+
+/// §5.10 (S5): attribute-assignment key position. mcc keeps attr keys
+/// free-form (only reserved names and dotted resolution are checked), so the
+/// candidate set is the design's known-key convention plus every attr name
+/// actually assigned in this file (lapper `ATTR_DEF` rows) — corpus-derived
+/// and AST-derived, not re-parsed text.
+///
+/// The key side is recognized from the *whole* line (the detection in
+/// `context::detect` only sees text up to the cursor, so a mid-key cursor
+/// classifies as ContainerBody/TopLevel): a line carrying `ident =` (not
+/// `=>`, not a statement keyword) with the cursor left of the `=`. Value
+/// positions return `None` and fall through to the generic snapshot.
+fn attr_keys(rope: &Rope, offset: usize, ctx: &context::CompletionContext, lapper: &[LapperEntry]) -> Option<Vec<CompletionItem>> {
+    let line_start = rope.byte_to_line(offset);
+    let line_start_byte = rope.line_to_byte(line_start);
+    let line_before = rope.byte_slice(line_start_byte..offset).to_string();
+    let full_line = rope.line(line_start).to_string();
+
+    // The `=` must sit at or after the cursor for a key position; past it
+    // we're completing a value. `=>` is the drive operator, not an attr row.
+    let eq_in_full = full_line.find('=').filter(|i| {
+        full_line.as_bytes().get(i + 1) != Some(&b'>')
+    });
+    let (Some(_eq_col), false) = (eq_in_full, line_before.contains('=')) else {
+        return None;
+    };
+
+    // Guard the row shape: `key = …` with a plain identifier key — never a
+    // statement keyword row or a net/instance line.
+    let trimmed = full_line.trim_start();
+    let ident_len = trimmed
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\' || c == '.'))
+        .unwrap_or(trimmed.len());
+    let key_ident = &trimmed[..ident_len];
+    if key_ident.is_empty()
+        || KEYWORDS.iter().any(|&(kw, _, _)| kw == key_ident)
+        || matches!(key_ident, "use" | "pub" | "if" | "else" | "return" | "match" | "net")
+    {
+        return None;
+    }
+
+    let mut cands: Vec<Candidate> = Vec::new();
+    // Known-key convention (completion-design §5.10): the BOM/spec faces
+    // recurring across the corpus. Layer 2 so shadow treats them like
+    // container-scope names.
+    for (key, detail) in KNOWN_ATTR_KEYS {
+        cands.push(Candidate {
+            name: key.to_string(),
+            layer: 2,
+            item_kind: CompletionItemKind::PROPERTY,
+            kind_order: 0,
+            detail: detail.to_string(),
+            insert_text: None,
+        });
+    }
+    // Attr names already assigned in this file (AST-derived, current lapper).
+    let mut seen = std::collections::HashSet::new();
+    for e in lapper {
+        if e.kind != crate::features::context::ATTR_DEF {
+            continue;
+        }
+        let name = clamped_text(rope, e);
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        cands.push(Candidate {
+            name,
+            layer: 2,
+            item_kind: CompletionItemKind::PROPERTY,
+            kind_order: 1,
+            detail: "assigned here".to_string(),
+            insert_text: None,
+        });
+    }
+    let items = assemble(cands, Vec::new(), &ctx.prefix);
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// Known attribute keys (completion-design §5.10). Spec-block fields are the
+/// `spec = [ ... ]` subset the design names.
+const KNOWN_ATTR_KEYS: [(&str, &str); 22] = [
+    ("name", "attribute"),
+    ("package", "attribute"),
+    ("partno", "attribute"),
+    ("manufacture", "attribute"),
+    ("symbol", "attribute"),
+    ("footprint", "attribute"),
+    ("pitch", "attribute"),
+    ("voltage", "attribute"),
+    ("input_voltage", "attribute"),
+    ("spec", "spec block"),
+    ("libpath", "attribute"),
+    ("description", "attribute"),
+    ("value", "attribute"),
+    ("tolerance", "attribute"),
+    ("capacitance", "spec field"),
+    ("dielectric", "spec field"),
+    ("resistance", "spec field"),
+    ("current", "spec field"),
+    ("inductance", "spec field"),
+    ("frequency", "spec field"),
+    ("pins", "pin group"),
+    ("data-src-uri", "provenance"),
+];
 
 /// Build the cache key for a context. `member_root` is `Some` only for
 /// member-access positions, keeping `uC.` and `this.` snapshots apart.
@@ -1051,6 +1171,57 @@ mod tests {
         // The server path maps suppression to None inside resolve(); the
         // detection itself is covered above.
         let _ = state;
+    }
+
+    #[test]
+    fn attr_key_position_offers_known_and_assigned_keys() {
+        // Cursor mid-key on a row whose `=` is further right — the key side.
+        // (context::detect sees only text up to the cursor, so this is
+        // exactly the position attr_keys must recognize on its own.)
+        let text = "component CAP {\n    partno = \"X\"\n    package = \"\"\n}";
+        let rope = ropey::Rope::from_str(text);
+        let key_row = text.find("package =").unwrap();
+        let off = key_row; // cursor before the key's first char — empty prefix
+        let ctx = context::detect(&rope, off, &[]);
+        let items = attr_keys(&rope, off, &ctx, &[])
+            .expect("key position must offer candidates");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"partno"), "{labels:?}");
+        assert!(labels.contains(&"package"), "{labels:?}");
+        // The already-assigned attr from the lapper joins the set.
+        let lapper = vec![lapper_entry(
+            crate::features::context::ATTR_DEF,
+            text.find("partno").unwrap(),
+            text.find("partno").unwrap() + 6,
+            "CAP",
+        )];
+        let items = attr_keys(&rope, off, &ctx, &lapper).expect("items");
+        assert!(
+            items.iter().any(|i| i.label == "partno" && i.detail.as_deref() == Some("assigned here")),
+            "{items:?}"
+        );
+    }
+
+    #[test]
+    fn attr_value_and_non_attr_rows_fall_through() {
+        let text = "component CAP {\n    partno = \"X\"\n}";
+        let rope = ropey::Rope::from_str(text);
+        // Cursor right after the opening quote — value side.
+        let off = text.find("\"X\"").unwrap() + 1;
+        let ctx = context::detect(&rope, off, &[]);
+        assert_eq!(attr_keys(&rope, off, &ctx, &[]), None);
+        // A keyword row mentioning `=` (pins = []) is not an attr row.
+        let text = "component CAP {\n    pins = []\n}";
+        let rope = ropey::Rope::from_str(text);
+        let off = text.find("pins =").unwrap() + 2;
+        let ctx = context::detect(&rope, off, &[]);
+        assert_eq!(attr_keys(&rope, off, &ctx, &[]), None);
+        // Drive operator `=>` is not an assignment.
+        let text = "component CAP {\n    S[1:4] => { S1 -> GND }\n}";
+        let rope = ropey::Rope::from_str(text);
+        let off = text.find("=> {").unwrap();
+        let ctx = context::detect(&rope, off, &[]);
+        assert_eq!(attr_keys(&rope, off, &ctx, &[]), None);
     }
 
     #[test]

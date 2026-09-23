@@ -213,3 +213,63 @@ pub fn collect_rename_edits(
         Some(edits)
     }
 }
+
+/// Cross-file rename via the mcc `refs` RPC (audit §2, the "rename stays
+/// local" leftover from b3922).
+///
+/// The refs answer drives which files get edits, but a rename is destructive,
+/// so every row is verified before it becomes an edit: the text under the
+/// span must equal the word under the cursor exactly. This is the gate that
+/// keeps a name-fallback refs answer (the RPC falls back to a name hint when
+/// the position resolves to nothing) from rewriting an unrelated symbol.
+pub async fn collect_rename_edits_cross_file(
+    state: &WorkspaceState,
+    server: &MccServer,
+    uri: &Url,
+    position: Position,
+    new_name: &str,
+) -> Option<HashMap<Url, Vec<TextEdit>>> {
+    let rope = state.document_rope(uri)?;
+    let offset = position_to_offset(position, &rope)?;
+    let hint = word_at_offset(&rope, offset)?;
+
+    let resp = server
+        .refs(uri.path(), offset, Some(&hint))
+        .await
+        .ok()?;
+    if resp.refs.is_empty() {
+        return None;
+    }
+
+    let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for item in resp.refs {
+        let target = Url::from_file_path(&item.uri)
+            .map_err(|_| ())
+            .or_else(|_| Url::parse(&item.uri).map_err(|_| ()))
+            .ok()?;
+        let target_rope = state.rope_for_uri(&target)?;
+        let (start, end) = (item.pos.min(item.end), item.end.max(item.pos));
+        if end > target_rope.len_bytes() || start >= end {
+            continue;
+        }
+        let text = target_rope.byte_slice(start..end).to_string();
+        if text != hint {
+            continue;
+        }
+        let start_pos = offset_to_position(start, &target_rope)?;
+        let end_pos = offset_to_position(end, &target_rope)?;
+        let edit = TextEdit {
+            range: Range::new(start_pos, end_pos),
+            new_text: new_name.to_string(),
+        };
+        let rows = edits.entry(target).or_default();
+        if !rows.contains(&edit) {
+            rows.push(edit);
+        }
+    }
+    if edits.is_empty() {
+        None
+    } else {
+        Some(edits)
+    }
+}

@@ -13,3 +13,4 @@ examples/
 justfile
 rust-toolchains.toml
 
+target-slots
