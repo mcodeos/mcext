@@ -407,6 +407,10 @@ impl Backend {
             ),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
+            // Handlers exist (document_symbol / rename below); without these
+            // declarations VSCode never calls them.
+            document_symbol_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
                 trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
@@ -869,24 +873,24 @@ async fn parse_and_publish(
                     }
                 };
 
-                // When using RPC-provided line/column, calculate end from pos+len but clamp to same line
-                // (the len is based on AST node size which may span multiple lines)
-                // When falling back to pos-based conversion, calculate end from pos+len
-                let end = match crate::common::position::offset_to_position(
-                    (d.location.pos + d.location.len) as usize,
-                    &rope,
-                ) {
-                    Some(e) => {
-                        // Clamp end to same line as start to avoid multi-line spans
-                        if e.line > start.line {
+                // Prefer the RPC-provided 1-based end position (mcc computes it
+                // from pos+len through its own line index, and it may span
+                // multiple lines). Fall back to pos+len on the local rope for
+                // an mcc whose diagnostics channel predates end_line/end_column.
+                let end = if d.end_line > 0 {
+                    tower_lsp::lsp_types::Position::new(
+                        d.end_line - 1,
+                        d.end_column.saturating_sub(1),
+                    )
+                } else {
+                    match crate::common::position::offset_to_position(
+                        (d.location.pos + d.location.len) as usize,
+                        &rope,
+                    ) {
+                        Some(e) => e,
+                        None => {
                             crate::common::position::line_end_position(start.line, &rope)
-                        } else {
-                            e
                         }
-                    }
-                    None => {
-                        // If we can't calculate end, use line end
-                        crate::common::position::line_end_position(start.line, &rope)
                     }
                 };
 
@@ -899,13 +903,44 @@ async fn parse_and_publish(
                     "hint" => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
                     _ => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
                 };
+                // `related` rows carry their own (possibly cross-file) location;
+                // a missing or unparseable file drops just that row.
+                let related_information: Vec<
+                    tower_lsp::lsp_types::DiagnosticRelatedInformation,
+                > = d
+                    .related
+                    .iter()
+                    .filter_map(|s| {
+                        let loc = s.location.as_ref()?;
+                        let target = tower_lsp::lsp_types::Url::from_file_path(&loc.file)
+                            .ok()
+                            .or_else(|| tower_lsp::lsp_types::Url::parse(&loc.file).ok())?;
+                        let line = loc.line.saturating_sub(1);
+                        let column = loc.column.saturating_sub(1);
+                        Some(tower_lsp::lsp_types::DiagnosticRelatedInformation {
+                            location: tower_lsp::lsp_types::Location {
+                                uri: target,
+                                range: tower_lsp::lsp_types::Range::new(
+                                    tower_lsp::lsp_types::Position::new(line, column),
+                                    tower_lsp::lsp_types::Position::new(line, column),
+                                ),
+                            },
+                            message: s.message.clone(),
+                        })
+                    })
+                    .collect();
+                let related_information = if related_information.is_empty() {
+                    None
+                } else {
+                    Some(related_information)
+                };
                 diagnostics.push(tower_lsp::lsp_types::Diagnostic::new(
                     tower_lsp::lsp_types::Range::new(start, end),
                     Some(severity),
                     Some(tower_lsp::lsp_types::NumberOrString::Number(d.code as i32)),
                     Some("mcc".into()),
                     d.message,
-                    None,
+                    related_information,
                     None,
                 ));
             }
