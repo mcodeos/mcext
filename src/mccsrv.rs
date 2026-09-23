@@ -84,6 +84,34 @@ impl MccServer {
         }
     }
 
+    /// Handshake probe for connection attempts. `caps` (mcc Phase 8.3) is the
+    /// real handshake — its reply carries the schema version and feature
+    /// surface; `server.info` is kept as the fallback so an older mcc binary
+    /// that predates `caps` still connects.
+    async fn handshake(client: &MccRpcClient) -> Result<serde_json::Value, crate::rpc::RpcError> {
+        match timeout(Duration::from_secs(2), client.caps()).await {
+            Ok(Ok(caps)) => Ok(caps),
+            Ok(Err(e)) => {
+                debug!("caps handshake failed ({e}); falling back to server.info");
+                match timeout(
+                    Duration::from_secs(2),
+                    client.call("server.info", serde_json::json!({})),
+                )
+                .await
+                {
+                    Ok(Ok(info)) => Ok(info),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(crate::rpc::RpcError::Network(
+                        "handshake timeout (caps + server.info)".to_string(),
+                    )),
+                }
+            }
+            Err(_) => Err(crate::rpc::RpcError::Network(
+                "caps handshake timeout".to_string(),
+            )),
+        }
+    }
+
     /// Start mcc server subprocess and connect
     pub async fn start(&mut self) -> Result<(), MccServerError> {
         // Clear log at start of each session
@@ -103,14 +131,14 @@ impl MccServer {
                 Ok(client) => {
                     match timeout(
                         Duration::from_secs(2),
-                        client.call("server.info", serde_json::json!({})),
+                        Self::handshake(&client),
                     )
                     .await
                     {
-                        Ok(Ok(_)) => {
+                        Ok(Ok(caps)) => {
+                            info!("Connected to existing mcc server (caps: {})", caps);
                             self.client = Some(client);
                             self.state = ConnectionState::Connected;
-                            info!("Connected to existing mcc server");
                             return Ok(());
                         }
                         Ok(Err(e)) => {
@@ -222,12 +250,7 @@ impl MccServer {
 
             for attempt in 1..=5 {
                 info!("RPC connection attempt {}/5", attempt);
-                match timeout(
-                    Duration::from_secs(2),
-                    client.call("server.info", serde_json::json!({})),
-                )
-                .await
-                {
+                match timeout(Duration::from_secs(2), Self::handshake(&client)).await {
                     Ok(Ok(_)) => {
                         self.client = Some(client);
                         self.child = Some(child);

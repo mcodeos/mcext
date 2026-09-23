@@ -183,6 +183,133 @@ impl Backend {
         }
     }
 
+    /// Handle `mcode.check`: inline dry-run of a document through the daemon's
+    /// `check` RPC (mode A — overlay slot, workspace untouched). arg[0] = a
+    /// `file://` URI (or plain path); without an argument the summary of the
+    /// last-used document is not knowable, so the command answers an error.
+    async fn execute_check(
+        &self,
+        params: &tower_lsp::lsp_types::ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        let uri_arg = params
+            .arguments
+            .first()
+            .and_then(|v| v.as_str())
+            .map(normalize_entry_path);
+        let Some(raw) = uri_arg else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.check: need a file URI argument",
+            })));
+        };
+        let Some(uri) = Url::from_file_path(&raw).ok() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": format!("mcode.check: not a file path: {raw}"),
+            })));
+        };
+        let Some(rope) = self.state.document_rope(&uri) else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": format!("mcode.check: document not open: {raw}"),
+            })));
+        };
+        let content = rope.slice(..).to_string();
+
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.check: mcc server not initialized",
+            })));
+        };
+        if !server.is_connected() {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.check: mcc server not connected",
+            })));
+        }
+        // Serialize with other RPC calls (mcc is single-threaded).
+        let _rpc_guard = self.state.rpc_lock.lock().await;
+        match server.client() {
+            Some(client) => match client.check(&content).await {
+                Ok(resp) => Ok(Some(serde_json::json!({
+                    "ok": true,
+                    "summary": {
+                        "errors": resp.summary.errors,
+                        "warnings": resp.summary.warnings,
+                        "library_errors": resp.library.errors,
+                        "library_warnings": resp.library.warnings,
+                    },
+                }))),
+                Err(e) => Ok(Some(
+                    serde_json::json!({"ok": false, "error": e.to_string()}),
+                )),
+            },
+            None => Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.check: mcc client not connected",
+            }))),
+        }
+    }
+
+    /// Handle `mcode.explain`: resolve an error code through the daemon's
+    /// `explain` RPC. arg[0] = the code, accepted as `"E5060"`, `"5060"` or
+    /// the number `5060`.
+    async fn execute_explain(
+        &self,
+        params: &tower_lsp::lsp_types::ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some(arg) = params.arguments.first() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.explain: need an error code argument",
+            })));
+        };
+        let code = match arg {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s
+                .trim()
+                .trim_start_matches(['E', 'e'])
+                .parse::<u64>()
+                .ok(),
+            _ => None,
+        };
+        let Some(code) = code.and_then(|c| u32::try_from(c).ok()) else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": format!("mcode.explain: not an error code: {arg}"),
+            })));
+        };
+
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.explain: mcc server not initialized",
+            })));
+        };
+        if !server.is_connected() {
+            return Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.explain: mcc server not connected",
+            })));
+        }
+        let _rpc_guard = self.state.rpc_lock.lock().await;
+        match server.client() {
+            Some(client) => match client.explain(code).await {
+                Ok(v) => Ok(Some(serde_json::json!({"ok": true, "explain": v}))),
+                Err(e) => Ok(Some(
+                    serde_json::json!({"ok": false, "error": e.to_string()}),
+                )),
+            },
+            None => Ok(Some(serde_json::json!({
+                "ok": false,
+                "error": "mcode.explain: mcc client not connected",
+            }))),
+        }
+    }
+
     /// Handle `mcode.buildProject`: run a full project build (daemon `build.full`
     /// RPC) and return the envelope (summary + flattened per-phase diagnostics) to
     /// the client, which renders it to the Output console and Problems tab.
@@ -417,7 +544,12 @@ impl Backend {
             // Handlers exist (document_symbol / rename / workspace symbol
             // below); without these declarations VSCode never calls them.
             document_symbol_provider: Some(OneOf::Left(true)),
-            rename_provider: Some(OneOf::Left(true)),
+            // `prepare_provider` opts into `prepareRename` (inline edit box
+            // anchored on the identifier) alongside the `rename` handler.
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
             // Backed by the project symbols cache the workspace index
             // already maintains — no mcc round-trip on the query path.
             workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -432,8 +564,19 @@ impl Backend {
             document_range_formatting_provider: Some(OneOf::Left(true)),
             inlay_hint_provider: Some(OneOf::Left(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
+            // Textual faces: brace/comment folding, cursor occurrence
+            // highlight, expand-selection chains — all local, no RPC.
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+            document_highlight_provider: Some(OneOf::Left(true)),
+            selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
             execute_command_provider: Some(ExecuteCommandOptions {
-                commands: vec!["mcode.viz".to_string(), "mcode.buildProject".to_string()],
+                commands: vec![
+                    "mcode.viz".to_string(),
+                    "mcode.buildProject".to_string(),
+                    "mcode.check".to_string(),
+                    "mcode.explain".to_string(),
+                ],
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
             ..ServerCapabilities::default()
@@ -1287,9 +1430,40 @@ impl LanguageServer for Backend {
         ))
     }
 
-    // Phase 4: completionItem/resolve additional info
+    // Phase 4: completionItem/resolve — ground documentation via mcc `show.*`
     async fn completion_resolve(&self, params: CompletionItem) -> Result<CompletionItem> {
-        Ok(crate::features::comp::resolve_item(params))
+        let server_guard = self.mcc_server.read().await;
+        let Some(server) = server_guard.as_ref() else {
+            return Ok(params);
+        };
+        let Some(rpc) = server.client() else {
+            return Ok(params);
+        };
+        // Same bounded wait as references: a reparse holding the rpc_lock
+        // must not stall the completion popup — resolve returns the plain
+        // item and the user simply sees no extra documentation.
+        let item = if self
+            .state
+            .init
+            .done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(800),
+                self.state.rpc_lock.lock(),
+            )
+            .await
+            {
+                Ok(_guard) => crate::features::comp::ground_item(params, rpc).await,
+                Err(_) => {
+                    debug!("completion_resolve: rpc_lock timeout — plain item");
+                    params
+                }
+            }
+        } else {
+            params
+        };
+        Ok(item)
     }
 
     // Phase 4.2: full document formatting
@@ -1685,6 +1859,12 @@ impl LanguageServer for Backend {
         if params.command == "mcode.buildProject" {
             return self.execute_build_project(&params).await;
         }
+        if params.command == "mcode.check" {
+            return self.execute_check(&params).await;
+        }
+        if params.command == "mcode.explain" {
+            return self.execute_explain(&params).await;
+        }
         if params.command != "mcode.viz" {
             return Ok(None);
         }
@@ -1759,6 +1939,68 @@ impl LanguageServer for Backend {
         _params: DocumentLinkParams,
     ) -> Result<Option<Vec<DocumentLink>>> {
         Ok(None)
+    }
+
+    // Phase 5.1: quick fixes from the request's own diagnostics — the only
+    // concrete one is "Explain E…", routed to the `mcode.explain` command.
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let actions =
+            crate::features::codeaction::resolve(&params.context.diagnostics);
+        Ok(Some(actions))
+    }
+
+    // Phase 5.1: folding — purely textual (brace nesting + comment runs).
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri;
+        let span = tracing::debug_span!("folding_range", uri = %uri.path());
+        let _guard = span.enter();
+        let Some(rope) = self.state.document_rope(&uri) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::features::folding::compute(&rope)))
+    }
+
+    // Phase 5.1: highlight every occurrence of the cursor symbol in this file.
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let span = tracing::debug_span!("document_highlight", uri = %uri.path());
+        let _guard = span.enter();
+        Ok(crate::features::highlight::resolve(&self.state, &uri, pos))
+    }
+
+    // Phase 5.1: expand-selection chains from the lapper spans.
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri;
+        let span = tracing::debug_span!("selection_range", uri = %uri.path());
+        let _guard = span.enter();
+        Ok(crate::features::selrange::resolve(
+            &self.state,
+            &uri,
+            params.positions,
+        ))
+    }
+
+    // Phase 5.1: the identifier range the rename would touch, so the editor
+    // shows the inline rename box instead of rejecting the gesture.
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let span = tracing::debug_span!("prepare_rename", uri = %uri.path());
+        let _guard = span.enter();
+        let Some(rope) = self.state.document_rope(&uri) else {
+            return Ok(None);
+        };
+        Ok(crate::features::highlight::prepare(&rope, params.position)
+            .map(|range| PrepareRenameResponse::Range(range)))
     }
 
     // Phase 5: hover
