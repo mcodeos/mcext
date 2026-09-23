@@ -16,3 +16,4 @@ doc/
 # Generated audit artifacts written by mcc with cwd = repo root
 # (render_projection.md / known_missing.md) - never commit
 baseline/
+/target-slots
