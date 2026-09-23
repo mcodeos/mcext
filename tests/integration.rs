@@ -284,3 +284,132 @@ async fn completion_layered_rpc_roundtrip() {
         "Member must contain helper_chip pin IN_A"
     );
 }
+
+/// A private server on a private port for the U258 wiring tests: the shared
+/// harness binds 8080, which collides with any other session's server (and a
+/// wedged daemon on 8080 accepts connections but never answers). mcc's own
+/// `--port` flag moves the wire endpoint, so spawn a foreground server child
+/// on the port, then let MccServer reuse it through its existing
+/// port-busy probe path. Dropping the child kills it, freeing the port.
+async fn private_server(port: u16) -> (MccServer, tokio::process::Child) {
+    // Same resolution order as MccServer::find_mcc_path: env override first,
+    // then the cargo-workspace relative path.
+    let mcc_path = std::env::var("MCC_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| crate_path().join("../mcc/target/debug/mcc"));
+    let child = tokio::process::Command::new(mcc_path)
+        .args(["start", "--port", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("mcc child should spawn");
+
+    let mut server = MccServer::with_addr("127.0.0.1", port);
+    // The port is bound by the child, so start() takes its reuse path
+    // (server.info probe) — bounded retries are enough for process startup.
+    for _ in 0..30 {
+        if server.start().await.is_ok() && server.is_connected() {
+            return (server, child);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!("private mcc server on port {port} never became ready");
+}
+
+fn crate_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// ERC consumed as diagnostics (U258 §2): a driver-conflict module
+/// (`b1.Y -> b2.Y`, two Out pins on one net) must come back as parsed
+/// `ErcResponse` rows carrying `driver-conflict` with severity "error" and a
+/// byte offset inside the fixture file. A fresh private server keeps the
+/// module set isolated, so `mcb_get_first_module_name` picks the ERC
+/// fixture's module.
+#[tokio::test]
+async fn erc_reports_driver_conflict_as_violations() {
+    let (mut server, _child) = private_server(18081).await;
+    let path = fixture_path("erc_conflict.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    // Mirror the server runtime sequence (run_server_init / did_open):
+    // project root is the fixtures directory, the entry file is loaded whole.
+    let fixtures_dir = crate_path().join("tests/fixtures");
+    let _ = client
+        .set_project_root(&fixtures_dir.to_string_lossy())
+        .await;
+    let _ = client.load_project(&path).await;
+
+    let resp = client.erc().await;
+    assert!(resp.is_ok(), "erc RPC failed: {:?}", resp.err());
+    let resp = resp.unwrap();
+    assert_eq!(resp.top, "erc_top", "top module should be the ERC fixture's");
+    let conflict = resp
+        .violations
+        .iter()
+        .find(|v| v.check == "driver-conflict")
+        .expect("driver-conflict violation must fire");
+    assert_eq!(conflict.severity, "error");
+    assert!(
+        resp.summary.get("violations").and_then(|v| v.as_u64()).is_some(),
+        "summary.violations must be present"
+    );
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}
+
+/// Cross-file find-references consumed from the mcc `refs` RPC (U258 §2):
+/// the cursor sits on `helper_chip` in the refs_main.mc instance row; the
+/// answer must include the definition site in helper.mc (`def: true`) plus
+/// the ClassRef here, each row parsed into byte spans. The probe must load
+/// through the canonical use form (`use ./helper`) — references only
+/// register for use-resolved classes.
+#[tokio::test]
+async fn refs_cross_file_finds_definition_and_references() {
+    let (mut server, _child) = private_server(18082).await;
+
+    let helper_path = fixture_path("helper.mc");
+    let probe_path = fixture_path("refs_main.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    let fixtures_dir = crate_path().join("tests/fixtures");
+    let _ = client
+        .set_project_root(&fixtures_dir.to_string_lossy())
+        .await;
+    let _ = client.load_project(&probe_path).await;
+    let _ = client.add_file(&helper_path).await;
+
+    let probe_text = std::fs::read_to_string(&probe_path).expect("fixture exists");
+    let cursor = probe_text
+        .find("helper_chip hc")
+        .expect("cursor marker in refs_main.mc")
+        + "helper_chip".len();
+
+    let resp = client.refs(&probe_path, cursor, Some("helper_chip")).await;
+    assert!(resp.is_ok(), "refs RPC failed: {:?}", resp.err());
+    let resp = resp.unwrap();
+    assert!(resp.count > 0, "cross-file refs must be non-empty");
+
+    let def = resp
+        .refs
+        .iter()
+        .find(|r| r.def)
+        .expect("the definition site must be in the answer");
+    assert!(
+        def.uri.ends_with("helper.mc"),
+        "definition must live in helper.mc, got {}",
+        def.uri
+    );
+    // The ClassRef in the probe file itself.
+    let here = resp.refs.iter().find(|r| {
+        !r.def && r.uri.ends_with("refs_main.mc")
+    });
+    assert!(here.is_some(), "the probe file's own ClassRef must be present");
+    for r in &resp.refs {
+        assert!(r.end >= r.pos, "span end must not precede start");
+    }
+
+    // Cleanup so the private port frees up for a rerun.
+    let _ = server.stop().await;
+}

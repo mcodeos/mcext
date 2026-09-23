@@ -322,6 +322,29 @@ impl MccServer {
             .map_err(|e| MccServerError::Rpc(e.to_string()))
     }
 
+    /// Call `refs` RPC for position-aware cross-file find-references.
+    pub async fn refs(
+        &self,
+        uri: &str,
+        position: usize,
+        name: Option<&str>,
+    ) -> Result<crate::rpc::RefsResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client
+            .refs(uri, position, name)
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
+    }
+
+    /// Call `erc` RPC to run the flat electrical net checks for the workspace.
+    pub async fn erc(&self) -> Result<crate::rpc::ErcResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client
+            .erc()
+            .await
+            .map_err(|e| MccServerError::Rpc(e.to_string()))
+    }
+
     /// Call `build.viz` RPC to render a circuit to a self-contained HTML string.
     pub async fn build_viz(
         &self,

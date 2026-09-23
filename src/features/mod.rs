@@ -8,6 +8,7 @@
 //! - [`inhint`]    — textDocument/inlayHint (inline hints)
 //! - [`hover`]     — textDocument/hover
 //! - [`symbols`]   — shared symbol resolution utilities
+//! - [`erc`]       — mcc `erc` RPC → `mcc-erc` diagnostics (save/build triggered)
 //!
 //! Diagnostics are fetched via RPC in `server/mod.rs::parse_and_publish`.
 //! Document links (`usejump`) are disabled — use F12 (goto_definition) instead.
@@ -15,6 +16,7 @@
 pub mod comp;
 pub mod context;
 pub mod docsym;
+pub mod erc;
 pub mod fmt;
 pub mod gotodef;
 pub mod hover;

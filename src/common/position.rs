@@ -73,7 +73,18 @@ pub fn line_end_position(line: u32, rope: &Rope) -> Position {
     let line_end_char = rope
         .try_line_to_char(line_idx + 1)
         .unwrap_or(rope.len_chars());
-    let line_len = line_end_char - line_start_char;
+    let mut line_len = line_end_char - line_start_char;
+    // The line_to_char(line+1) span includes this line's line terminator;
+    // an LSP character index stops at the line content, so drop it (\r\n
+    // drops both).
+    while line_len > 0 {
+        let last = rope.char(line_start_char + line_len - 1);
+        if last == '\n' || last == '\r' {
+            line_len -= 1;
+        } else {
+            break;
+        }
+    }
     Position::new(line, line_len as u32)
 }
 
@@ -110,5 +121,15 @@ mod tests {
         assert!(offset_to_position(100, &rope).is_none());
         let pos = Position::new(99, 0);
         assert!(position_to_offset(pos, &rope).is_none());
+    }
+
+    /// line_end_position stops at the line content — the line terminator
+    /// itself is never counted into the character index (\n and \r\n both).
+    #[test]
+    fn line_end_excludes_terminator() {
+        let rope = Rope::from_str("ab\ncdef\r\ngh");
+        assert_eq!(line_end_position(0, &rope), Position::new(0, 2)); // "ab"
+        assert_eq!(line_end_position(1, &rope), Position::new(1, 4)); // "cdef"
+        assert_eq!(line_end_position(2, &rope), Position::new(2, 2)); // "gh" — no terminator
     }
 }

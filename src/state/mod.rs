@@ -231,6 +231,44 @@ impl ProjectContext {
     }
 }
 
+/// ERC (electrical rule check) diagnostics from the latest `erc` RPC run.
+///
+/// ERC is workspace-level, so it cannot publish through the per-URI parse
+/// path alone: the cache holds the violations grouped by the violating file's
+/// URI, and `last_parse` holds the parse diagnostics each URI last published.
+/// Every publish is then parse ∪ ERC, so refreshing one source never wipes
+/// the other from the Problems panel.
+#[derive(Debug, Default)]
+pub struct ErcState {
+    /// Violations from the latest run, keyed by the violating file's URI.
+    pub diags: DashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>>,
+    /// Parse diagnostics (source "mcc") each URI last published.
+    pub last_parse: DashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>>,
+}
+
+impl ErcState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cached ERC diagnostics for one URI (empty when the file is clean or
+    /// no run has happened yet).
+    pub fn cached_for(&self, uri: &Url) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+        self.diags.get(uri).map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// Parse ∪ ERC for one URI — the shape every publish of that URI takes.
+    pub fn merged_for(
+        &self,
+        uri: &Url,
+        fresh_parse: Vec<tower_lsp::lsp_types::Diagnostic>,
+    ) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+        let mut all = fresh_parse;
+        all.extend(self.cached_for(uri));
+        all
+    }
+}
+
 /// Initialization coordination: sticky flag + wakeup signal.
 pub struct InitState {
     /// Sticky flag: true after mcc server connected + basic init done.
@@ -317,6 +355,9 @@ pub struct WorkspaceState {
     /// Queued diagnostics awaiting retry after init.
     pub diags: DiagnosticQueue,
 
+    /// Cached ERC diagnostics + last parse diagnostics per URI (merge source).
+    pub erc: ErcState,
+
     /// Layered completion snapshot cache (§7.3 / §8.3).
     pub(crate) completion: crate::features::comp::CompletionCache,
 
@@ -333,6 +374,7 @@ impl WorkspaceState {
             project: ProjectContext::new(IndexWorkerHandle::inactive()),
             init: InitState::new(),
             diags: DiagnosticQueue::new(),
+            erc: ErcState::new(),
             completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
         }
@@ -346,6 +388,7 @@ impl WorkspaceState {
             project: ProjectContext::new(IndexWorkerHandle::spawn()),
             init: InitState::new(),
             diags: DiagnosticQueue::new(),
+            erc: ErcState::new(),
             completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
         }
@@ -355,6 +398,19 @@ impl WorkspaceState {
 
     pub fn document_rope(&self, uri: &Url) -> Option<Rope> {
         self.docs.rope(uri)
+    }
+
+    /// Rope for any workspace file: the open document when one exists, else
+    /// the file read from disk. Cross-file faces (refs, ERC, workspace
+    /// symbols) need this to turn mcc's byte offsets into LSP positions for
+    /// files the editor never opened. A file that is neither open nor
+    /// readable yields None and its rows are dropped.
+    pub fn rope_for_uri(&self, uri: &Url) -> Option<Rope> {
+        if let Some(rope) = self.document_rope(uri) {
+            return Some(rope);
+        }
+        let text = std::fs::read_to_string(uri.path()).ok()?;
+        Some(Rope::from_str(&text))
     }
 
     pub fn document_version(&self, uri: &Url) -> Option<i32> {

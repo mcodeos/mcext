@@ -5,7 +5,7 @@
 
 use crate::rpc::LapperEntry;
 use crate::state::WorkspaceState;
-use tower_lsp::lsp_types::{Position, Url};
+use tower_lsp::lsp_types::{Location, Position, Range, SymbolInformation, SymbolKind, Url};
 
 /// Information about a resolved symbol.
 #[derive(Debug, Clone)]
@@ -125,4 +125,72 @@ pub fn kind_label(kind: u8) -> String {
         29 => "→ bus member".into(),    // BusMemberRef
         _ => "?".into(),
     }
+}
+
+/// workspace/symbol — search the project symbols cache (components,
+/// interfaces, enums, modules and their enum values) by case-insensitive
+/// substring. The cache is the `project_symbols` RPC snapshot the workspace
+/// index already maintains, so this adds no mcc round-trip on the query path.
+/// Locations are converted through [`WorkspaceState::rope_for_uri`]; a symbol
+/// whose file is neither open nor readable is skipped.
+#[allow(deprecated)] // SymbolInformation.deprecated is required by the struct
+pub fn workspace_symbols(state: &WorkspaceState, query: &str) -> Vec<SymbolInformation> {
+    let Ok(cache) = state.symbols.project_symbols.lock() else {
+        return Vec::new();
+    };
+    let needle = query.to_lowercase();
+    let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+
+    let mut out = Vec::new();
+    let mut push = |name: &str,
+                    kind: SymbolKind,
+                    uri_str: &str,
+                    span: [usize; 2],
+                    container: Option<String>| {
+        if !matches(name) {
+            return;
+        }
+        let Ok(uri) = Url::from_file_path(uri_str)
+            .map_err(|_| ())
+            .or_else(|_| Url::parse(uri_str).map_err(|_| ()))
+        else {
+            return;
+        };
+        let Some(rope) = state.rope_for_uri(&uri) else {
+            return;
+        };
+        let start = crate::common::position::offset_to_position(span[0], &rope);
+        let end = crate::common::position::offset_to_position(span[1], &rope);
+        let (start, end) = match (start, end) {
+            (Some(s), Some(e)) => (s, e),
+            // Old mcc servers may omit the span ([0,0]); fall back to a
+            // point at the file start rather than dropping the symbol.
+            _ => (Position::new(0, 0), Position::new(0, 0)),
+        };
+        out.push(SymbolInformation {
+            name: name.to_string(),
+            kind,
+            tags: None,
+            deprecated: None,
+            location: Location::new(uri, Range::new(start, end)),
+            container_name: container,
+        });
+    };
+
+    for e in &cache.components {
+        push(&e.name, SymbolKind::CLASS, &e.uri, e.span, None);
+    }
+    for e in &cache.interfaces {
+        push(&e.name, SymbolKind::INTERFACE, &e.uri, e.span, None);
+    }
+    for e in &cache.enums {
+        push(&e.name, SymbolKind::ENUM, &e.uri, e.span, None);
+    }
+    for e in &cache.modules {
+        push(&e.name, SymbolKind::MODULE, &e.uri, e.span, None);
+    }
+    for e in &cache.enum_values {
+        push(&e.name, SymbolKind::ENUM_MEMBER, &e.uri, e.span, Some(e.class.clone()));
+    }
+    out
 }
