@@ -118,7 +118,7 @@ pub fn resolve_use_target(base_url: &Url, use_path: &str) -> Option<Url> {
 ///
 /// Mirrors mcc's system root: `MCC_SYSTEM_ROOT` env first, then the default
 /// data root `~/.mcode` (see `mcc_set_system_root`).
-fn system_roots() -> Vec<PathBuf> {
+pub(crate) fn system_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(sys) = std::env::var("MCC_SYSTEM_ROOT") {
         if !sys.is_empty() {
