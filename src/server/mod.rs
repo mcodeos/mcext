@@ -16,7 +16,7 @@ use crate::state::WorkspaceState;
 use dashmap::DashMap;
 // Note: McURI is just String, no need to import mcc
 use ropey::Rope;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
@@ -497,6 +497,22 @@ impl Backend {
     }
 
     /// Build the ServerCapabilities response (extracted from initialize).
+    /// The live `mcodels.*` settings (defaults until the first
+    /// didChangeConfiguration arrives).
+    fn current_config(&self) -> ServerConfig {
+        self.config
+            .get("current")
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
+
+    /// Formatting options from the live settings (`mcodels.format.tabSize`).
+    fn format_options(&self) -> crate::features::fmt::FormatOptions {
+        let mut options = crate::features::fmt::FormatOptions::new();
+        options.indent_size = self.current_config().format_tab_size as usize;
+        options
+    }
+
     fn build_capabilities() -> ServerCapabilities {
         ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -1477,7 +1493,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let options = crate::features::fmt::FormatOptions::new();
+        let options = self.format_options();
         Ok(crate::features::fmt::format_document(
             &uri,
             &rope,
@@ -1499,7 +1515,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let options = crate::features::fmt::FormatOptions::new();
+        let options = self.format_options();
         Ok(crate::features::fmt::format_range(
             &uri,
             &rope,
@@ -1519,6 +1535,9 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
+        if !self.current_config().inlay_hints_enabled {
+            return Ok(None);
+        }
         Ok(crate::features::inhint::compute(
             &self.state,
             &uri,
@@ -1687,6 +1706,46 @@ impl LanguageServer for Backend {
         let new_name = params.new_name;
         let span = tracing::debug_span!("rename", uri = %uri.path(), new_name = %new_name);
         let _guard = span.enter();
+
+        // Primary path: the mcc `refs` RPC answers across every loaded file.
+        // Same bounded rpc_lock wait as references.
+        if self
+            .state
+            .init
+            .done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let server_guard = self.mcc_server.read().await;
+            if let Some(server) = server_guard.as_ref() {
+                if server.is_connected() {
+                    let lock = tokio::time::timeout(
+                        std::time::Duration::from_millis(800),
+                        self.state.rpc_lock.lock(),
+                    )
+                    .await;
+                    if let Ok(_rpc_guard) = lock {
+                        if let Some(changes) = crate::features::refs::collect_rename_edits_cross_file(
+                            &self.state,
+                            server,
+                            &uri,
+                            pos,
+                            &new_name,
+                        )
+                        .await
+                        {
+                            return Ok(Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }));
+                        }
+                    } else {
+                        debug!("rename: rpc_lock timeout — local fallback");
+                    }
+                }
+            }
+        }
+
+        // Fallback: current-file lapper + local tables.
         let edits = crate::features::refs::collect_rename_edits(&self.state, &uri, pos, &new_name);
         Ok(edits.map(|changes| WorkspaceEdit {
             changes: Some(changes),
@@ -1702,6 +1761,10 @@ impl LanguageServer for Backend {
             tracing::debug_span!("semantic_tokens_full", uri = %params.text_document.uri.path());
         let _guard = span.enter();
         let uri = params.text_document.uri;
+
+        if !self.current_config().semantic_tokens_enabled {
+            return Ok(None);
+        }
 
         let tokens = crate::features::semtok::compute(&self.state, &uri);
         let tokens = tokens.unwrap_or_default();
@@ -1794,8 +1857,50 @@ impl LanguageServer for Backend {
         })))
     }
 
-    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
         debug!("did_change_configuration");
+        // The client forwards the `mcodels.*` settings section. Only keys the
+        // user actually set are merged — absent keys must not reset live
+        // values (serde defaults would clobber the resolved roots).
+        let section = params
+            .settings
+            .get("mcodels")
+            .cloned()
+            .unwrap_or(params.settings);
+        let Some(obj) = section.as_object() else {
+            return;
+        };
+        let mut merged = self
+            .config
+            .get("current")
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        if let Some(v) = obj.get("systemRoot").and_then(|v| v.as_str()) {
+            merged.system_root = Some(PathBuf::from(v));
+        }
+        if let Some(v) = obj.get("projectRoot").and_then(|v| v.as_str()) {
+            merged.project_root = Some(PathBuf::from(v));
+        }
+        if let Some(v) = obj.get("semanticTokensEnabled").and_then(|v| v.as_bool()) {
+            merged.semantic_tokens_enabled = v;
+        }
+        if let Some(v) = obj.get("inlayHintsEnabled").and_then(|v| v.as_bool()) {
+            merged.inlay_hints_enabled = v;
+        }
+        if let Some(v) = obj.get("diagnosticsDebounceMs").and_then(|v| v.as_u64()) {
+            merged.diagnostics_debounce_ms = v;
+        }
+        if let Some(v) = obj.get("formatTabSize").and_then(|v| v.as_u64()) {
+            merged.format_tab_size = v.min(u32::MAX as u64) as u32;
+        }
+        if let Some(v) = obj.get("formatInsertFinalNewline").and_then(|v| v.as_bool()) {
+            merged.format_insert_final_newline = v;
+        }
+        info!(
+            "config updated: tabSize={} semtok={} inlay={}",
+            merged.format_tab_size, merged.semantic_tokens_enabled, merged.inlay_hints_enabled
+        );
+        self.config.insert("current".to_string(), merged);
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {

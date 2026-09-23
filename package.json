@@ -41,6 +41,17 @@
 				"title": "MCode: Build Project",
 				"category": "MCode",
 				"icon": "$(tools)"
+			},
+			{
+				"command": "mcode.checkFile",
+				"title": "MCode: Check Current File",
+				"category": "MCode",
+				"icon": "$(checklist)"
+			},
+			{
+				"command": "mcode.explainCode",
+				"title": "MCode: Explain Error Code",
+				"category": "MCode"
 			}
 		],
 		"menus": {
@@ -101,21 +112,45 @@
 			"type": "object",
 			"title": "mcodels",
 			"properties": {
-				"mcodels.trace.server": {
+				"mcodels.systemRoot": {
 					"type": "string",
 					"scope": "window",
-					"enum": [
-						"off",
-						"messages",
-						"verbose"
-					],
-					"enumDescriptions": [
-						"No traces",
-						"Error only",
-						"Full log"
-					],
-					"default": "off",
-					"description": "Traces the communication between VS Code and the language server."
+					"description": "MCode system library root (searched for `use` targets like `mclibs.power`; falls back to ~/.mcode)."
+				},
+				"mcodels.projectRoot": {
+					"type": "string",
+					"scope": "window",
+					"description": "MCode project root; defaults to the first workspace folder."
+				},
+				"mcodels.semanticTokensEnabled": {
+					"type": "boolean",
+					"scope": "resource",
+					"default": true,
+					"description": "Enable semantic token highlighting."
+				},
+				"mcodels.inlayHintsEnabled": {
+					"type": "boolean",
+					"scope": "resource",
+					"default": true,
+					"description": "Enable inlay hints."
+				},
+				"mcodels.diagnosticsDebounceMs": {
+					"type": "number",
+					"scope": "resource",
+					"default": 150,
+					"description": "Debounce interval (ms) before republishing diagnostics after an edit."
+				},
+				"mcodels.formatTabSize": {
+					"type": "number",
+					"scope": "resource",
+					"default": 4,
+					"description": "Indent size used by document formatting."
+				},
+				"mcodels.formatInsertFinalNewline": {
+					"type": "boolean",
+					"scope": "resource",
+					"default": true,
+					"description": "Insert a final newline when formatting."
 				}
 			}
 		}

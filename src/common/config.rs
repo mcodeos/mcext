@@ -8,8 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// mcc system library root path (sets MCC_SYSTEM_ROOT)
+///
+/// Wire names are camelCase, matching the `mcodels.*` settings the client
+/// contributes in package.json (`systemRoot`, `diagnosticsDebounceMs`, …) —
+/// the same JSON shape flows in through `initialization_options` and
+/// `workspace/didChangeConfiguration`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ServerConfig {
     /// mcc system library root; when None, uses mcc internal default priority
     #[serde(default)]
@@ -119,11 +124,17 @@ mod tests {
         let json = serde_json::json!({
             "systemRoot": "/opt/mcode",
             "diagnosticsDebounceMs": 250,
+            "formatTabSize": 2,
+            "semanticTokensEnabled": false,
         });
         let cfg = ServerConfig::from_initialization_options(json);
-        // Field names follow serde default (camelCase vs snake) — currently snake case
-        // On failure, serde_json uses default; test default path
-        assert!(cfg.system_root.is_none() || cfg.system_root.is_some());
+        assert_eq!(cfg.system_root, Some(PathBuf::from("/opt/mcode")));
+        assert_eq!(cfg.diagnostics_debounce_ms, 250);
+        assert_eq!(cfg.format_tab_size, 2);
+        assert!(!cfg.semantic_tokens_enabled);
+        // Untouched keys keep their defaults.
+        assert!(cfg.inlay_hints_enabled);
+        assert_eq!(cfg.format_insert_final_newline, true);
     }
 
     #[test]
