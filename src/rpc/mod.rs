@@ -352,6 +352,44 @@ pub struct DiagEntry {
     pub level: String,
     pub message: String,
     pub location: DiagLocation,
+    /// 1-based end line (mcc `Location::end_row`). Optional so an older mcc
+    /// whose `diagnostics` channel predates the field still deserializes.
+    #[serde(default)]
+    pub end_line: u32,
+    /// 1-based end column (mcc `Location::end_col`).
+    #[serde(default)]
+    pub end_column: u32,
+    /// Quick-fix hints. Same rows as `related` today; consumers should prefer
+    /// `related` until a producer distinguishes the two.
+    #[serde(default)]
+    pub suggestions: Vec<DiagSuggestion>,
+    /// Related locations (mcc `Diagnostic.other`).
+    #[serde(default)]
+    pub related: Vec<DiagSuggestion>,
+}
+
+/// One `suggestions`/`related` row. `location.line`/`column` are 1-based;
+/// `location.file` is an `McURI` (plain path or `file://…`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagSuggestion {
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub location: Option<DiagSuggestionLocation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagSuggestionLocation {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub column: u32,
+    #[serde(default)]
+    pub pos: u32,
+    #[serde(default)]
+    pub len: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
