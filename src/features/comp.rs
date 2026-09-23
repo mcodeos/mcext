@@ -278,9 +278,11 @@ pub async fn resolve_with_rpc(
     if ctx.suppressed.is_some() {
         return None;
     }
-    // Use-path completion is a later stage (not part of the layered RPC yet).
+    // Use-path completion resolves from disk (workspace + system roots) —
+    // no layered RPC, no cache (completion-design §5.7).
     if ctx.kind == ContextKind::UsePath {
-        return None;
+        return crate::features::usepath::completions(&rope, uri, offset, params.position)
+            .map(CompletionResponse::Array);
     }
 
     let cache_key = cache_key(state, uri, &ctx, ctx.member_root.clone());
