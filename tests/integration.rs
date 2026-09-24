@@ -585,3 +585,70 @@ async fn hover_ground_appends_show_card_and_falls_back() {
 
     let _ = server.stop().await;
 }
+
+/// Net-expression completion consumes mcc's `Net` layer (U258 §4): the free
+/// nets of `net_family.mc` come back as `net`-kind items, and the dotted
+/// family behind `FAM.` answers through the `Member` layer — including a
+/// typed tail segment (`FA2` → `FAM.FA20` only), which the family fallback
+/// matches on the last segment, not the full dotted name.
+#[tokio::test]
+async fn net_layer_and_family_members_feed_completion() {
+    let (mut server, _child) = private_server(18088).await;
+
+    let path = fixture_path("net_family.mc");
+    let client = server.client().expect("should have RPC client");
+    let _ = client.init().await;
+    let fixtures_dir = crate_path().join("tests/fixtures");
+    let _ = client
+        .set_project_root(&fixtures_dir.to_string_lossy())
+        .await;
+    let _ = client.load_project(&path).await;
+
+    let content = std::fs::read_to_string(&path).expect("fixture exists");
+    // Cursor at the end of the net chain's last line (a net-expression
+    // position — the client would send its prefix from here).
+    let pos = content.find("V5V -> r1.2").expect("marker") + "V5V -> r1.2".len();
+
+    // The named nets of this file surface in the Net layer, kind `net`.
+    let resp = client
+        .completion(&path, pos, Some("V5"), None)
+        .await
+        .expect("completion RPC failed");
+    let net = resp.layers.get("Net").expect("Net layer");
+    assert!(
+        net.iter().any(|i| i.name == "V5V" && i.kind == "net"),
+        "Net layer must offer V5V as kind net, got {net:?}"
+    );
+
+    // InstanceDecl type slot: root `FAM` lists the dotted family…
+    let fam = client
+        .completion(&path, pos, None, Some("FAM"))
+        .await
+        .expect("member completion RPC failed");
+    let members = fam.layers.get("Member").expect("Member layer");
+    let names: Vec<&str> = members.iter().map(|i| i.name.as_str()).collect();
+    assert!(
+        names.contains(&"FAM.FA10") && names.contains(&"FAM.FA20"),
+        "family fallback must list FAM.FA10/FAM.FA20, got {names:?}"
+    );
+    assert!(
+        members.iter().all(|i| i.kind == "component"),
+        "family items are components, got {members:?}"
+    );
+
+    // …and a typed tail segment filters on the last segment (`FA2` keeps
+    // only FAM.FA20), not on the full dotted name.
+    let tail = client
+        .completion(&path, pos, Some("FA2"), Some("FAM"))
+        .await
+        .expect("member completion RPC failed");
+    let tail_members = tail.layers.get("Member").expect("Member layer");
+    let tail_names: Vec<&str> = tail_members.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(
+        tail_names,
+        vec!["FAM.FA20"],
+        "tail-segment prefix must keep only FAM.FA20, got {tail_names:?}"
+    );
+
+    let _ = server.stop().await;
+}

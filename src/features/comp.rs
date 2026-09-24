@@ -29,6 +29,10 @@ use tower_lsp::lsp_types::{
 /// Max completion items to return (per §11, big layers are prefix-limited).
 const MAX_ITEMS: usize = 50;
 
+/// Layer number of mcc's `Net` layer (§5.8): the lowest-priority layer,
+/// offered only in net-expression contexts.
+const NET_LAYER: u8 = 7;
+
 /// SymbolKind ordinals — must stay in sync with mcc `kind_names`
 /// (see `features::context`).
 const CLASS_DEF: u8 = 0;
@@ -299,7 +303,15 @@ pub async fn resolve_with_rpc(
         return Some(CompletionResponse::Array(items));
     }
 
-    let cache_key = cache_key(state, uri, &ctx, ctx.member_root.clone());
+    // Curly reference `SPK{`: the token before `{` names an instance or
+    // component, so its class members (pin ids/names) answer through the
+    // same Member layer as member access (§4.1 CurlyRef via §5.6).
+    let member_root: Option<String> = match ctx.kind {
+        ContextKind::CurlyRef => curly_member_root(&rope, offset),
+        _ => ctx.member_root.clone(),
+    };
+
+    let cache_key = cache_key(state, uri, &ctx, member_root.clone());
     let revision = state.symbols.parse_revision.load(Ordering::Relaxed);
     let doc_version = state.document_version(uri).unwrap_or(-1);
     let parse_version = state
@@ -323,13 +335,8 @@ pub async fn resolve_with_rpc(
     let rpc_result: Result<RpcCompletionResponse, String> = {
         let fut = async {
             let _guard = state.rpc_lock.lock().await;
-            rpc.completion(
-                uri.as_str(),
-                offset,
-                Some(&ctx.prefix),
-                ctx.member_root.as_deref(),
-            )
-            .await
+            rpc.completion(uri.as_str(), offset, Some(&ctx.prefix), member_root.as_deref())
+                .await
         };
         match tokio::time::timeout(Duration::from_millis(300), fut).await {
             Ok(res) => res.map_err(|e| e.to_string()),
@@ -358,6 +365,19 @@ pub async fn resolve_with_rpc(
             resolve(state, params)
         }
     }
+}
+
+/// The token before the `{` of a curly reference (`SPK{P` → `SPK`,
+/// `[1,2] = DATA{DM,DP}` → `DATA`). `None` when nothing name-like precedes
+/// the brace — the generic snapshot answers instead.
+fn curly_member_root(rope: &Rope, offset: usize) -> Option<String> {
+    let line_start = rope.byte_to_line(offset);
+    let line_start_byte = rope.line_to_byte(line_start);
+    let before = rope.byte_slice(line_start_byte..offset).to_string();
+    let brace = before.rfind('{')?;
+    let head = before[..brace].trim_end();
+    let token = head.split_whitespace().next_back()?;
+    (!token.is_empty()).then_some(token.to_string())
 }
 
 /// §5.10 (S5): attribute-assignment key position. mcc keeps attr keys
@@ -479,9 +499,13 @@ fn cache_key(
     CacheKey {
         uri: uri.clone(),
         scope: format!(
-            "{}|{}",
+            "{}|{}|{}",
             ctx.container_scope,
-            ctx.func_scope.as_deref().unwrap_or("")
+            ctx.func_scope.as_deref().unwrap_or(""),
+            // Net-expression snapshots carry the Net layer; other contexts
+            // must not reuse them (they filter the layer out anyway, but a
+            // plain snapshot reused in a net expression would lack the nets).
+            ctx.kind == ContextKind::NetExpr
         ),
         index: state.project.index.fingerprint(),
         member_root,
@@ -508,8 +532,45 @@ fn build_response(
     ) {
         collect_keywords(&mut keywords);
     }
+    // `if (...)` compares members/params: the comparison operators supplement
+    // the P1-P4 snapshot (§10 case 15). `return` accepts `this`.
+    if matches!(ctx_kind, ContextKind::IfExpr) {
+        for (op, detail) in [("==", "compare"), ("!=", "compare")] {
+            keywords.push(Candidate {
+                name: op.to_string(),
+                layer: 99,
+                item_kind: CompletionItemKind::OPERATOR,
+                kind_order: 0,
+                detail: detail.to_string(),
+                insert_text: None,
+            });
+        }
+    }
+    if matches!(ctx_kind, ContextKind::ReturnStmt) {
+        keywords.push(Candidate {
+            name: "this".to_string(),
+            layer: 99,
+            item_kind: CompletionItemKind::KEYWORD,
+            kind_order: 0,
+            detail: "this container".to_string(),
+            insert_text: None,
+        });
+    }
 
-    let items = assemble(entry.cands.clone(), keywords, prefix);
+    // Net-layer candidates answer the net-expression space only (§5.8);
+    // elsewhere they would be noise layered under every name.
+    let cands: Vec<Candidate> = if matches!(ctx_kind, ContextKind::NetExpr) {
+        entry.cands.clone()
+    } else {
+        entry
+            .cands
+            .iter()
+            .filter(|c| c.layer != NET_LAYER)
+            .cloned()
+            .collect()
+    };
+
+    let items = assemble(cands, keywords, prefix);
     if items.is_empty() {
         return None;
     }
@@ -526,7 +587,8 @@ fn build_response(
 }
 
 /// Convert a layered completion RPC response into local candidates (§8.1).
-/// `P1`..`P5` map to layers 1-5, `Member` to layer 6. Returns
+/// `P1`..`P5` map to layers 1-5, `Member` to layer 6, `Net` to layer 7
+/// (offered in net-expression contexts only). Returns
 /// `(cands, truncated_layers)`.
 fn rpc_candidates(resp: &RpcCompletionResponse) -> (Vec<Candidate>, Vec<String>) {
     let mut cands: Vec<Candidate> = Vec::new();
@@ -538,6 +600,7 @@ fn rpc_candidates(resp: &RpcCompletionResponse) -> (Vec<Candidate>, Vec<String>)
             "P4" => 4,
             "P5" => 5,
             "Member" => 6,
+            "Net" => NET_LAYER,
             _ => continue,
         };
         for it in items {
@@ -574,6 +637,7 @@ fn kind_meta(kind: &str) -> (CompletionItemKind, u8, &'static str) {
         "component" => (CompletionItemKind::CLASS, 3, "component"),
         "define" => (CompletionItemKind::CONSTANT, 4, "define"),
         "role" => (CompletionItemKind::PROPERTY, 4, "role"),
+        "net" => (CompletionItemKind::VARIABLE, 2, "net"),
         _ => (CompletionItemKind::PROPERTY, 4, "symbol"),
     }
 }
@@ -785,9 +849,10 @@ fn assemble(cands: Vec<Candidate>, keywords: Vec<Candidate>, prefix: &str) -> Ve
     let mut claimed: HashSet<String> = HashSet::new();
     let mut picked: Vec<(Candidate, u8)> = Vec::new(); // (candidate, quality)
 
-    // P1..P6: P5 = mcode system lib, P6 = Member layer (both only on the RPC
-    // path). Keywords (99) are appended after all layers.
-    for layer in 1..=6 {
+    // P1..P7: P5 = mcode system lib, P6 = Member layer (both only on the RPC
+    // path), P7 = Net layer (net expressions only; filtered by context
+    // before assemble). Keywords (99) are appended after all layers.
+    for layer in 1..=7 {
         let mut seen: HashSet<(String, u8)> = HashSet::new();
         // Names claimed by this layer only shadow *lower* layers (§6.1);
         // names claimed in earlier layers shadow the whole layer (§6.3 rule 4).
@@ -1536,6 +1601,130 @@ mod tests {
         let k2 = cache_key(&state, &uri, &ctx_this, Some("this".into()));
         assert_ne!(k1, k2);
         assert_eq!(k1.member_root.as_deref(), Some("uC"));
+    }
+
+    #[test]
+    fn net_expr_snapshots_key_separately_from_top_level() {
+        // A NetExpr snapshot carries the Net layer; a same-scope non-net
+        // context must not reuse it (§7.3 context switch → re-fetch).
+        let state = WorkspaceState::new();
+        let uri = Url::parse("file:///t.mc").unwrap();
+        // "module main {\n    V3V3 -> R_L" — net line inside the container.
+        let src = "module main {\n    V3V3 -> R_L";
+        let lapper = vec![lapper_entry(CLASS_DEF, 7, 11, "")];
+        let net_ctx = context::detect(&ropey::Rope::from_str(src), 29, &lapper);
+        assert_eq!(net_ctx.kind, ContextKind::NetExpr);
+        let top_ctx = context::detect(&ropey::Rope::from_str("module main "), 12, &[]);
+        assert_ne!(top_ctx.kind, ContextKind::NetExpr);
+        let k_net = cache_key(&state, &uri, &net_ctx, None);
+        let k_top = cache_key(&state, &uri, &top_ctx, None);
+        assert_ne!(k_net, k_top);
+    }
+
+    #[test]
+    fn rpc_candidates_maps_net_layer() {
+        let resp = rpc_resp(&[("Net", &[("V5V", "net"), ("SENSOR_RAW", "net")][..])], &[]);
+        let (cands, truncated) = rpc_candidates(&resp);
+        assert!(truncated.is_empty());
+        assert_eq!(cands.len(), 2);
+        let net = cands.iter().find(|c| c.name == "V5V").unwrap();
+        assert_eq!(net.layer, NET_LAYER);
+        assert_eq!(net.item_kind, CompletionItemKind::VARIABLE);
+        assert_eq!(net.detail, "Net · net");
+    }
+
+    #[test]
+    fn net_layer_offered_only_in_net_expr() {
+        // Net candidates answer net expressions (§5.8); any other context
+        // filters the layer out but keeps its own layers intact.
+        let entry = SnapshotEntry {
+            cands: vec![
+                Candidate {
+                    name: "V5V".into(),
+                    layer: NET_LAYER,
+                    item_kind: CompletionItemKind::VARIABLE,
+                    kind_order: 2,
+                    detail: "Net · net".into(),
+                    insert_text: None,
+                },
+                Candidate {
+                    name: "R_SERIES".into(),
+                    layer: 3,
+                    item_kind: CompletionItemKind::VALUE,
+                    kind_order: 0,
+                    detail: "P3 · instance".into(),
+                    insert_text: None,
+                },
+            ],
+            revision: 0,
+            parse_version: 1,
+            truncated_layers: Vec::new(),
+            rpc_sourced: true,
+        };
+        let net = build_response(&entry, "", ContextKind::NetExpr, 1).expect("net response");
+        let CompletionResponse::List(list) = net else {
+            panic!("expected list");
+        };
+        let names: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"V5V"), "NetExpr must offer nets: {names:?}");
+        assert!(names.contains(&"R_SERIES"));
+
+        let other = build_response(&entry, "", ContextKind::ContainerBody, 1).expect("response");
+        let CompletionResponse::List(list) = other else {
+            panic!("expected list");
+        };
+        let names: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !names.contains(&"V5V"),
+            "non-net contexts must not see the Net layer: {names:?}"
+        );
+        assert!(names.contains(&"R_SERIES"));
+    }
+
+    #[test]
+    fn if_expr_and_return_stmt_offer_their_keywords() {
+        let entry = SnapshotEntry {
+            cands: Vec::new(),
+            revision: 0,
+            parse_version: 1,
+            truncated_layers: Vec::new(),
+            rpc_sourced: true,
+        };
+        let iff = build_response(&entry, "", ContextKind::IfExpr, 1).expect("if response");
+        let CompletionResponse::List(list) = iff else {
+            panic!("expected list");
+        };
+        let names: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"==") && names.contains(&"!="), "{names:?}");
+
+        let ret = build_response(&entry, "", ContextKind::ReturnStmt, 1).expect("return response");
+        let CompletionResponse::List(list) = ret else {
+            panic!("expected list");
+        };
+        let names: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"this"), "{names:?}");
+
+        // Neither leaks into a plain container-body completion (which does
+        // carry the statement keywords, but not these).
+        let body = build_response(&entry, "", ContextKind::ContainerBody, 1).expect("response");
+        let CompletionResponse::List(list) = body else {
+            panic!("expected list");
+        };
+        let names: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !names.contains(&"==") && !names.contains(&"this"),
+            "operators/`this` must not leak into container body: {names:?}"
+        );
+    }
+
+    #[test]
+    fn curly_member_root_extracts_the_token_before_the_brace() {
+        let r = ropey::Rope::from_str("SPK{");
+        assert_eq!(curly_member_root(&r, 4).as_deref(), Some("SPK"));
+        let r = ropey::Rope::from_str("[1,2] = DATA{DM");
+        assert_eq!(curly_member_root(&r, 15).as_deref(), Some("DATA"));
+        let r = ropey::Rope::from_str("{P");
+        assert_eq!(curly_member_root(&r, 2), None);
     }
 
     #[test]
