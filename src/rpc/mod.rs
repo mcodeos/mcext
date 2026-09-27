@@ -507,6 +507,41 @@ pub struct DiagEntry {
     /// Related locations (mcc `Diagnostic.other`).
     #[serde(default)]
     pub related: Vec<DiagSuggestion>,
+    /// Style-gate QuickFix (U327): a rename edit set the editor can apply.
+    /// Optional so an older mcc whose diagnostics channel predates the field
+    /// still deserializes.
+    #[serde(default)]
+    pub fix: Option<DiagFix>,
+}
+
+/// One QuickFix: a title plus the rename edits to apply.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct DiagFix {
+    pub title: String,
+    #[serde(default)]
+    pub edits: Vec<DiagFixEdit>,
+}
+
+/// One rename edit. `line`/`column`/`end_line`/`end_column` are 1-based in the
+/// file the edit names; `pos`/`len` are byte offsets into the same file.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct DiagFixEdit {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub pos: u64,
+    #[serde(default)]
+    pub len: u64,
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub column: u32,
+    #[serde(default)]
+    pub end_line: u32,
+    #[serde(default)]
+    pub end_column: u32,
+    #[serde(default)]
+    pub replacement: String,
 }
 
 /// One `suggestions`/`related` row. `location.line`/`column` are 1-based;

@@ -1111,7 +1111,10 @@ async fn parse_and_publish(
                 } else {
                     Some(related_information)
                 };
-                diagnostics.push(tower_lsp::lsp_types::Diagnostic::new(
+                // Style-gate QuickFix (U327): pass the rename edit set through
+                // in `data` — the codeAction feature reads it back to build
+                // the WorkspaceEdit.
+                let mut diagnostic = tower_lsp::lsp_types::Diagnostic::new(
                     tower_lsp::lsp_types::Range::new(start, end),
                     Some(severity),
                     Some(tower_lsp::lsp_types::NumberOrString::Number(d.code as i32)),
@@ -1119,7 +1122,9 @@ async fn parse_and_publish(
                     d.message,
                     related_information,
                     None,
-                ));
+                );
+                diagnostic.data = d.fix.as_ref().and_then(|f| serde_json::to_value(f).ok());
+                diagnostics.push(diagnostic);
             }
         }
         Err(e) => {
