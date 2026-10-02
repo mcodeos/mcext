@@ -1,7 +1,6 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
+// Copyright (c) 2026 MCode
+//
+// Licensed under the MIT License.
 
 import * as fs from "fs";
 import * as path from "path";
