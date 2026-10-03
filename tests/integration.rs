@@ -98,7 +98,7 @@ async fn shared_server() -> MutexGuard<'static, MccServer> {
     if !guard.is_connected() {
         cleanup_stale_mcc_pid_file();
         guard
-            .start()
+            .start(None)
             .await
             .expect("mcc server should start (shared)");
     }
@@ -127,6 +127,44 @@ async fn mcc_server_starts_and_responds() {
         "server should connect within 10s"
     );
     // Note: do NOT stop the server — other tests in this file reuse it.
+}
+
+/// Project-slot spawn (slot law §4.1): with a workspace root the daemon is
+/// spawned with cwd = the project, binds kernel-assigned port 0, and the
+/// slot's pid file is the only discovery record — the wire port never
+/// collides with the :8080 well-known address.
+#[tokio::test]
+async fn project_slot_spawn_discovers_through_pid_file() {
+    let proj = std::env::temp_dir().join(format!("mcext-proj-slot-{}", std::process::id()));
+    std::fs::create_dir_all(&proj).expect("temp project dir");
+    std::fs::write(proj.join("project.toml"), "").expect("project manifest");
+
+    let mut server = MccServer::new();
+    server
+        .start(Some(&proj))
+        .await
+        .expect("project-slot daemon should start");
+    assert!(server.is_connected());
+
+    // The pid record is the discovery contract: it exists inside the
+    // project and records a kernel-assigned (non-8080) port.
+    let pid_path = proj.join(".mcode").join("mcc.pid");
+    let record = std::fs::read_to_string(&pid_path).expect("slot pid file written");
+    let mut lines = record.lines();
+    let pid: u32 = lines.next().expect("pid line").parse().expect("pid");
+    let addr = lines.next().expect("addr line");
+    let port: u16 = addr.split_once(':').expect("host:port").1.parse().expect("port");
+    assert_ne!(port, 8080, "project slot must not bind the well-known port");
+    assert!(
+        addr.starts_with("127.0.0.1"),
+        "loopback bind expected, got {addr}"
+    );
+
+    // Cleanup: kill our child and leave no stale records behind.
+    let _ = server.stop().await;
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_dir_all(&proj);
+    let _ = pid; // liveness of the spawned daemon is covered by the handshake above
 }
 
 #[tokio::test]
@@ -297,8 +335,16 @@ async fn private_server(port: u16) -> (MccServer, tokio::process::Child) {
     let mcc_path = std::env::var("MCC_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| crate_path().join("../mcc/target/debug/mcc"));
+    // Isolated data root: `mcc start` refuses to run when the (global)
+    // default-root pid file records a live daemon — without this, a private
+    // child can never start once the shared :8080 daemon exists, and the
+    // failure is test-order dependent. The child inherits the env, so its
+    // pid file lands in the throwaway root and collides with nothing.
+    let isolated_root = std::env::temp_dir().join(format!("mcext-test-root-{port}"));
+    std::fs::create_dir_all(&isolated_root).expect("isolated test root");
     let child = tokio::process::Command::new(mcc_path)
         .args(["start", "--port", &port.to_string()])
+        .env("MCC_SYSTEM_ROOT", &isolated_root)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -306,10 +352,10 @@ async fn private_server(port: u16) -> (MccServer, tokio::process::Child) {
         .expect("mcc child should spawn");
 
     let mut server = MccServer::with_addr("127.0.0.1", port);
-    // The port is bound by the child, so start() takes its reuse path
-    // (server.info probe) — bounded retries are enough for process startup.
+    // The port is bound by the child, so start() takes its pinned-address
+    // reuse path — bounded retries are enough for process startup.
     for _ in 0..30 {
-        if server.start().await.is_ok() && server.is_connected() {
+        if server.start(None).await.is_ok() && server.is_connected() {
             return (server, child);
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -424,7 +470,7 @@ async fn caps_handshake_reports_schema_and_methods() {
     let (mut server, _child) = private_server(18083).await;
     let client = server.client().expect("should have RPC client");
 
-    let caps = client.caps().await.expect("caps RPC failed");
+    let caps = client.caps(None).await.expect("caps RPC failed");
     assert!(caps.is_object(), "caps must be a JSON object");
     assert_eq!(caps["server"], "mcc");
     assert!(caps["schema_version"].as_u64().is_some());
@@ -436,6 +482,25 @@ async fn caps_handshake_reports_schema_and_methods() {
         );
     }
     assert_eq!(caps["features"]["explain"], true);
+
+    // The §4.3 handshake face: a client triple rides along and the reply
+    // carries a verdict next to the sheet. Build 0 never matches a real
+    // ledger-built daemon, so the daemon must refuse — the exact verdict
+    // depends on whether the version string also drifted, so only assert
+    // the drift family.
+    let drifted = client
+        .caps(Some(serde_json::json!({
+            "protocol": "mcc-rpc/1",
+            "mcc_version": "0.0.0",
+            "build": 0
+        })))
+        .await
+        .expect("handshake caps RPC failed");
+    let verdict = drifted["handshake"]["verdict"].as_str().expect("verdict");
+    assert!(
+        matches!(verdict, "stale_build" | "version_mismatch"),
+        "build-0 triple must be refused, got {verdict}"
+    );
 
     // Cleanup so the private port frees up for a rerun.
     let _ = server.stop().await;

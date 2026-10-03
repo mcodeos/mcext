@@ -277,8 +277,18 @@ impl MccRpcClient {
     /// version and feature surface. Startup handshake probe — replaces the
     /// old `server.info` ping (still accepted as a fallback for older
     /// binaries that predate `caps`).
-    pub async fn caps(&self) -> Result<Value, RpcError> {
-        self.call("caps", json!({})).await
+    ///
+    /// With a `client` triple (`protocol` + `mcc_version` + `build`) this
+    /// becomes the formal handshake of mcc `world-sandbox-design.md` §4.3:
+    /// the reply carries a `handshake.verdict` next to the sheet
+    /// (`ok` / `unverified` / `stale_build` / `version_mismatch` /
+    /// `protocol_mismatch`).
+    pub async fn caps(&self, client: Option<Value>) -> Result<Value, RpcError> {
+        let params = match client {
+            Some(c) => json!({"client": c}),
+            None => json!({}),
+        };
+        self.call("caps", params).await
     }
 
     /// Explain an error code: name + description, deepened to the rule

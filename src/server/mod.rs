@@ -625,7 +625,7 @@ async fn run_server_init(
             state.init.signal_done();
             return;
         };
-        if let Err(e) = server.start().await {
+        if let Err(e) = server.start(project_root.as_deref()).await {
             warn!(
                 "Failed to start mcc server, falling back to direct mode: {}",
                 e
