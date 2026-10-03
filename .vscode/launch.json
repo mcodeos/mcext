@@ -9,6 +9,20 @@
 {
   "version": "0.2.0",
   "configurations": [
+    // 0. DEFAULT for F5. One-time prep: run task "devhost: launch (attachable
+    //    on 9230)" to open the dev host, then F5 attaches to it. Do NOT select
+    //    "Debug VS Code Extension" — that is the 1.139.1-broken path (issue
+    //    microsoft/vscode#338110) and always reports "did not start in 10 s".
+    {
+      "name": "Attach js-debug to Extension Host",
+      "type": "pwa-node",
+      "request": "attach",
+      "address": "127.0.0.1",
+      "port": 9230,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "sourceMaps": true
+    },
+
     // 1. Debug Rust LSP server independently
     {
       "name": "Debug LSP Server",

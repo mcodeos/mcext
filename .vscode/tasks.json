@@ -36,6 +36,23 @@
       "dependsOn": ["cargo build", "npm: compile"],
       "group": "build",
       "problemMatcher": ["$rustc", "$tsc"]
+    },
+    {
+      // VS Code 1.139.1 regression (microsoft/vscode#338110): the extensionHost
+      // debug launch polls ::1 while the exthost inspector listens on 127.0.0.1,
+      // so F5 hangs ("did not start in 10 seconds"). Workaround: launch the dev
+      // host from the CLI with --inspect-extensions (no --inspect-brk watchdog),
+      // then run the launch config "Attach js-debug to Extension Host", whose
+      // address is pinned to 127.0.0.1 to skip the ::1 polling.
+      "label": "devhost: launch (attachable on 9230)",
+      "type": "shell",
+      "command": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--inspect-extensions=9230",
+        "${workspaceFolder}/../mcs/hbl"
+      ],
+      "problemMatcher": []
     }
   ]
 }

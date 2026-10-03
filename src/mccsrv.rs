@@ -11,12 +11,16 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::rpc::MccRpcClient;
+
+/// The wire protocol version this client speaks (mcc `buildinfo::RPC_PROTOCOL`).
+const RPC_PROTOCOL: &str = "mcc-rpc/1";
 
 /// MCC server connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +29,37 @@ pub enum ConnectionState {
     Connecting,
     Connected,
     Crashed,
+}
+
+/// One daemon slot: the discovery record plus the spawn context.
+///
+/// Slot law (mcc `world-sandbox-design.md` §4.1, ruling 1): the slot
+/// key is the project root, and the slot's pid file is the *only* discovery
+/// record — port probing cannot tell *which* project's daemon answered, so
+/// it is used only as the default-root well-known fallback.
+struct Slot {
+    pid_path: PathBuf,
+    /// Spawn cwd. `Some` only for a project slot (the directory holding
+    /// `project.toml`) — the daemon derives its own slot from its cwd, so
+    /// the spawned process and the discovery record must agree.
+    cwd: Option<PathBuf>,
+    /// Well-known address tried when the pid file does not exist at all
+    /// (default-root slot only; a daemon there binds the historical :8080).
+    fallback: Option<(String, u16)>,
+}
+
+/// Outcome of one handshake attempt against a live daemon.
+enum HandshakeVerdict {
+    /// Triple matched, verdict missing (daemon predates the handshake), or
+    /// `unverified` (client could not identify itself) — reuse the daemon.
+    Accept,
+    /// Version/build drift (`version_mismatch`/`stale_build`): revision
+    /// tokens are build-scoped, so the daemon must be restarted before this
+    /// client can trust its reads. The client never restarts a daemon it
+    /// did not spawn — it surfaces the refusal and falls back.
+    Refuse(String),
+    /// `protocol_mismatch`: the wire protocol itself differs.
+    Fatal(String),
 }
 
 /// MCC server manager
@@ -42,12 +77,25 @@ pub struct MccServer {
     restart_count: u32,
     /// Max restart attempts before giving up
     max_restarts: u32,
+    /// `true` when the address was pinned by the caller ([`Self::with_addr`]):
+    /// connects to exactly that address and never restarts a daemon it finds
+    /// there (integration tests pin private daemons this way).
+    explicit_addr: bool,
+    /// The workspace root this connection was started for; the lazy
+    /// reconnect re-runs discovery against the same slot.
+    slot_root: Option<PathBuf>,
+    /// Set when an RPC fails at the connection level (daemon died). The
+    /// client then reads as disconnected and the publish path schedules one
+    /// cold reconnect — crash recovery is a fresh start, since the world is
+    /// a deterministic function of the on-disk sources (no shared state to
+    /// salvage).
+    dead: AtomicBool,
 }
 
 impl MccServer {
     /// Default MCC server host
     pub const DEFAULT_HOST: &'static str = "127.0.0.1";
-    /// Default MCC server port
+    /// Default MCC server port (the default-root well-known port)
     pub const DEFAULT_PORT: u16 = 8080;
     /// Startup timeout (reserved for future use)
     #[allow(dead_code)]
@@ -63,6 +111,9 @@ impl MccServer {
             state: ConnectionState::Disconnected,
             restart_count: 0,
             max_restarts: 3,
+            explicit_addr: false,
+            slot_root: None,
+            dead: AtomicBool::new(false),
         }
     }
 
@@ -71,6 +122,7 @@ impl MccServer {
         let mut s = Self::new();
         s.host = host.to_string();
         s.port = port;
+        s.explicit_addr = true;
         s
     }
 
