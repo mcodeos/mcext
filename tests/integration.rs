@@ -167,6 +167,113 @@ async fn project_slot_spawn_discovers_through_pid_file() {
     let _ = pid; // liveness of the spawned daemon is covered by the handshake above
 }
 
+/// Wait until `ps` no longer sees the pid (reaped, not merely killed —
+/// `kill -0` reports zombies as alive). Same technique as
+/// `cleanup_stale_mcc_pid_file`. Async sleeps keep the tokio runtime (and
+/// its child reaper) live while polling.
+async fn wait_pid_gone(pid: u32, deadline: std::time::Instant) -> bool {
+    while std::time::Instant::now() < deadline {
+        let out = std::process::Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("stat=")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let alive = matches!(&out, Ok(o) if o.status.success())
+            && !String::from_utf8_lossy(&out.as_ref().unwrap().stdout)
+                .trim()
+                .is_empty();
+        if !alive {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Cold reconnect (connection-loss face): SIGKILL the slot daemon behind a
+/// connected [`MccServer`] — the next RPC fails at the transport level and
+/// marks the connection dead (`client()` reads None, `is_connected` false),
+/// and a fresh `start()` revives the slot through pid-file discovery into a
+/// NEW daemon. This is the path `parse_and_publish`'s scheduled reconnect
+/// task drives after a connection loss.
+#[tokio::test]
+async fn cold_reconnect_after_daemon_kill9() {
+    let proj = std::env::temp_dir().join(format!("mcext-proj-reconnect-{}", std::process::id()));
+    std::fs::create_dir_all(&proj).expect("temp project dir");
+    std::fs::write(proj.join("project.toml"), "").expect("project manifest");
+    let pid_path = proj.join(".mcode").join("mcc.pid");
+
+    let mut server = MccServer::new();
+    server
+        .start(Some(&proj))
+        .await
+        .expect("project-slot daemon starts");
+    assert!(server.is_connected());
+
+    let record = std::fs::read_to_string(&pid_path).expect("pid record exists");
+    let old_pid: u32 = record
+        .lines()
+        .next()
+        .expect("pid line")
+        .parse()
+        .expect("pid");
+
+    // Hard crash: SIGKILL, no cleanup chance.
+    std::process::Command::new("kill")
+        .arg("-9")
+        .arg(old_pid.to_string())
+        .output()
+        .expect("kill -9");
+
+    // Connection-loss face: the next RPC fails at the transport level and
+    // the manager reads as disconnected from that point on. (This must come
+    // BEFORE stop() — stop() flips to Disconnected without a transport
+    // failure, and NotConnected would never mark dead.)
+    assert!(
+        server.sem("x.mc", None).await.is_err(),
+        "RPC against a dead daemon must fail"
+    );
+    assert!(server.connection_lost(), "transport failure marks dead");
+    assert!(!server.is_connected());
+    assert!(server.client().is_none());
+
+    // Drop the Child handle so the tokio reaper can reap the zombie
+    // (kill -0 lies about zombies), then wait for the reap.
+    let _ = server.stop().await;
+    assert!(
+        wait_pid_gone(old_pid, std::time::Instant::now() + Duration::from_secs(5)).await,
+        "daemon {old_pid} should be reaped within 5s"
+    );
+
+    // The reconnect path (what run_cold_reconnect drives): start() clears
+    // the mark and discovery respawns a fresh slot daemon.
+    server
+        .start(Some(&proj))
+        .await
+        .expect("reconnect revives the slot");
+    assert!(server.is_connected());
+    assert!(!server.connection_lost());
+    let new_record = std::fs::read_to_string(&pid_path).expect("fresh pid record");
+    let new_pid: u32 = new_record
+        .lines()
+        .next()
+        .expect("pid line")
+        .parse()
+        .expect("pid");
+    assert_ne!(
+        new_pid, old_pid,
+        "a NEW daemon must be running after the crash"
+    );
+
+    // Cleanup: kill our child and leave no stale records behind.
+    let _ = server.stop().await;
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[tokio::test]
 async fn sem_returns_tokens_and_symbols() {
     let server = shared_server().await;

@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
@@ -267,16 +267,22 @@ pub struct MccServer {
     /// connects to exactly that address and never restarts a daemon it finds
     /// there (integration tests pin private daemons this way).
     explicit_addr: bool,
-    /// The workspace root this connection was started for; the lazy
+    /// The workspace root this connection was started for; the cold
     /// reconnect re-runs discovery against the same slot.
     slot_root: Option<PathBuf>,
+    /// System root stored at init time so the cold reconnect can replay the
+    /// same `set_system_root` without a snapshot from the caller.
+    system_root: Option<PathBuf>,
     /// Set when an RPC fails at the connection level (daemon died). The
     /// client then reads as disconnected and the publish path schedules one
     /// cold reconnect — crash recovery is a fresh start, since the world is
     /// a deterministic function of the on-disk sources (no shared state to
-    /// salvage). Unwired yet: the connection-loss face is a separate batch.
-    #[allow(dead_code)]
+    /// salvage).
     dead: AtomicBool,
+    /// Exactly-once latch for the cold reconnect: the first caller to win
+    /// the [`Self::schedule_reconnect`] race spawns the reconnect task;
+    /// losers keep failing fast until the latch clears.
+    reconnecting: AtomicBool,
 }
 
 impl MccServer {
@@ -300,7 +306,9 @@ impl MccServer {
             max_restarts: 3,
             explicit_addr: false,
             slot_root: None,
+            system_root: None,
             dead: AtomicBool::new(false),
+            reconnecting: AtomicBool::new(false),
         }
     }
 
@@ -368,6 +376,11 @@ impl MccServer {
     pub async fn start(&mut self, project_root: Option<&Path>) -> Result<(), MccServerError> {
         // Clear log at start of each session
         Self::clear_log();
+
+        // A fresh start attempt wipes a stale connection-loss mark; the
+        // early return below must not fire while `dead` is set, or the cold
+        // reconnect would no-op against a corpse.
+        self.clear_dead();
 
         if self.state == ConnectionState::Connected {
             return Ok(());
@@ -752,23 +765,83 @@ impl MccServer {
         Ok(())
     }
 
-    /// Get RPC client
+    /// Get RPC client. `None` while disconnected *or* marked dead — a
+    /// transport failure flips both, so every RPC face fails fast instead of
+    /// queuing behind a corpse connection.
     pub fn client(&self) -> Option<&MccRpcClient> {
-        if self.state == ConnectionState::Connected {
+        if self.state == ConnectionState::Connected && !self.connection_lost() {
             self.client.as_ref()
         } else {
             None
         }
     }
 
-    /// Check if connected
+    /// Check if connected (a connection-loss mark reads as disconnected
+    /// until the cold reconnect revives the slot).
     pub fn is_connected(&self) -> bool {
-        self.state == ConnectionState::Connected
+        self.state == ConnectionState::Connected && !self.connection_lost()
     }
 
     /// Get connection state
     pub fn state(&self) -> ConnectionState {
         self.state
+    }
+
+    /// System root stored at init time; the cold reconnect replays it
+    /// without a snapshot from the caller.
+    pub fn set_system_root(&mut self, root: Option<PathBuf>) {
+        self.system_root = root;
+    }
+
+    /// The workspace root this connection was started for (the cold
+    /// reconnect re-runs discovery against the same slot).
+    pub fn slot_root(&self) -> Option<&Path> {
+        self.slot_root.as_deref()
+    }
+
+    /// The system root stored at init time.
+    pub fn system_root(&self) -> Option<&Path> {
+        self.system_root.as_deref()
+    }
+
+    /// Reset the restart budget before a fresh (re)start sequence.
+    pub fn reset_restarts(&mut self) {
+        self.restart_count = 0;
+    }
+
+    /// Record a transport-level connection loss (daemon unreachable).
+    /// Idempotent; logs once. Every RPC face reads as disconnected until a
+    /// cold reconnect succeeds.
+    fn mark_dead(&self) {
+        if !self.dead.swap(true, Ordering::Relaxed) {
+            warn!("mcc daemon connection lost; failing reads fast until cold reconnect");
+        }
+    }
+
+    /// Whether a transport-level connection loss has been recorded.
+    pub fn connection_lost(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
+    }
+
+    /// Clear the connection-loss mark (a successful reconnect/start does
+    /// this): RPC faces read as connected again.
+    pub fn clear_dead(&self) {
+        self.dead.store(false, Ordering::Relaxed);
+    }
+
+    /// Latch exactly one cold reconnect. `true` for the caller that won the
+    /// race — it spawns the reconnect task; losers do nothing (the winner
+    /// revives the shared connection).
+    pub fn schedule_reconnect(&self) -> bool {
+        self.reconnecting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Release the reconnect latch (reconnect finished or gave up): the
+    /// next connection loss may schedule again.
+    pub fn clear_reconnect_latch(&self) {
+        self.reconnecting.store(false, Ordering::Relaxed);
     }
 
     /// Call sem RPC to get semantic data for a file
@@ -781,7 +854,12 @@ impl MccServer {
         client
             .sem(uri, content)
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Call diagnostics RPC to get diagnostics for a file
@@ -793,7 +871,12 @@ impl MccServer {
         client
             .diagnostics(uri)
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Call `refs` RPC for position-aware cross-file find-references.
@@ -807,7 +890,12 @@ impl MccServer {
         client
             .refs(uri, position, name)
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Call `erc` RPC to run the flat electrical net checks for the workspace.
@@ -816,7 +904,12 @@ impl MccServer {
         client
             .erc()
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Call `build.viz` RPC to render a circuit to a self-contained HTML string.
@@ -831,7 +924,12 @@ impl MccServer {
         client
             .build_viz(entry, top, libs, layouter)
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Call `build.full` RPC to build the whole project (equivalent of
@@ -846,7 +944,12 @@ impl MccServer {
         client
             .build_full(entry, top, libs)
             .await
-            .map_err(|e| MccServerError::Rpc(e.to_string()))
+            .map_err(|e| {
+                if e.is_connection_loss() {
+                    self.mark_dead();
+                }
+                MccServerError::Rpc(e.to_string())
+            })
     }
 
     /// Find mcc binary path
@@ -917,6 +1020,7 @@ enum ReuseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::RpcError;
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -1033,11 +1137,44 @@ mod tests {
         assert!(!process_alive(u32::MAX - 1));
     }
 
-    // Keep the atomic referenced outside struct definition (unused-field
-    // lint guard while the connection-loss face is still unwired).
     #[test]
     fn dead_flag_defaults_false() {
         let s = MccServer::new();
         assert!(!s.dead.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn connection_loss_reads_as_disconnected() {
+        let mut s = MccServer::new();
+        s.state = ConnectionState::Connected;
+        assert!(s.is_connected());
+        s.mark_dead();
+        assert!(s.connection_lost());
+        assert!(!s.is_connected());
+        assert!(s.client().is_none());
+        // mark_dead is idempotent and logs once, but the mark stays.
+        s.mark_dead();
+        assert!(s.connection_lost());
+        // clear_dead (start() entry) wipes the mark.
+        s.clear_dead();
+        assert!(s.is_connected());
+    }
+
+    #[test]
+    fn reconnect_latch_fires_exactly_once() {
+        let s = MccServer::new();
+        assert!(s.schedule_reconnect());
+        assert!(!s.schedule_reconnect());
+        s.clear_reconnect_latch();
+        assert!(s.schedule_reconnect());
+    }
+
+    #[test]
+    fn connection_loss_distinguishes_transport_from_http() {
+        assert!(RpcError::Network("connection refused".into()).is_connection_loss());
+        assert!(!RpcError::Http(500, "boom".into()).is_connection_loss());
+        assert!(!RpcError::Parse("bad json".into()).is_connection_loss());
+        assert!(!RpcError::Server(-32601, "no such method".into()).is_connection_loss());
+        assert!(!RpcError::NoResult.is_connection_loss());
     }
 }

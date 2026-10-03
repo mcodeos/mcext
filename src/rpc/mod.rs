@@ -71,12 +71,15 @@ impl MccRpcClient {
         let body = String::from_utf8_lossy(&bytes).to_string();
 
         if !status.is_success() {
-            return Err(RpcError::Network(format!(
-                "{} {}: {}",
+            return Err(RpcError::Http(
                 status.as_u16(),
-                status.canonical_reason().unwrap_or("unknown"),
-                body
-            )));
+                format!(
+                    "{} {}: {}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or("unknown"),
+                    body
+                ),
+            ));
         }
 
         let json: JsonRpcResponse = serde_json::from_str(&body)
@@ -760,16 +763,31 @@ struct JsonRpcErrorDetail {
 
 #[derive(Debug)]
 pub enum RpcError {
+    /// Transport-level failure (send/connect error, handshake timeout): the
+    /// daemon is unreachable — a connection loss.
     Network(String),
+    /// The daemon answered with a non-2xx HTTP status: it is alive but
+    /// rejected the request — service-level, not a connection loss.
+    Http(u16, String),
     Parse(String),
     Server(i32, String),
     NoResult,
+}
+
+impl RpcError {
+    /// True when the failure happened at the transport level and the daemon
+    /// should be considered gone. An [`RpcError::Http`] means the daemon
+    /// answered — restarting the connection cannot help.
+    pub fn is_connection_loss(&self) -> bool {
+        matches!(self, RpcError::Network(_))
+    }
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RpcError::Network(s) => write!(f, "Network error: {}", s),
+            RpcError::Http(status, s) => write!(f, "HTTP {}: {}", status, s),
             RpcError::Parse(s) => write!(f, "Parse error: {}", s),
             RpcError::Server(code, msg) => write!(f, "Server error [{}]: {}", code, msg),
             RpcError::NoResult => write!(f, "No result in response"),

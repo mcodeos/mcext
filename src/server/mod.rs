@@ -633,6 +633,9 @@ async fn run_server_init(
             state.init.signal_done();
             return;
         }
+        // Store the system root on the manager so the cold reconnect can
+        // replay it without a snapshot from this task.
+        server.set_system_root(system_root.clone());
         debug!("mcc server subprocess started");
         server.client().cloned()
     };
@@ -643,6 +646,30 @@ async fn run_server_init(
         return;
     };
 
+    warm_up_after_connect(
+        client,
+        mcc_server.clone(),
+        project_root,
+        system_root,
+        state,
+        lsp_client,
+    )
+    .await;
+}
+
+/// Phases 2-5 of the connection warm-up, shared by the initial init and the
+/// cold reconnect: roots + init RPCs, dependency/project loading, symbol
+/// index warm-up, then a retry of the diagnostics that queued while the
+/// world was still loading. `client` is the RPC client cloned from the
+/// freshly (re)started [`MccServer`].
+async fn warm_up_after_connect(
+    client: crate::rpc::MccRpcClient,
+    mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
+    project_root: Option<std::path::PathBuf>,
+    system_root: Option<std::path::PathBuf>,
+    state: Arc<WorkspaceState>,
+    lsp_client: Client,
+) {
     // Phase 2: basic init (fast) — set roots and init mcc system.
     // parse_and_publish only needs the mcc server connected + init'd to make
     // sem()/diagnostics() RPC calls, so we signal init_done here rather than
@@ -813,6 +840,117 @@ async fn run_server_init(
     }
 }
 
+/// Cold reconnect after a connection-level RPC loss (the daemon died):
+/// restart the slot connection under the write lock, then re-run the
+/// warm-up so the world behind the new connection is again a deterministic
+/// function of the on-disk sources (nothing is salvaged across the crash).
+/// Scheduled at most once per loss via [`MccServer::schedule_reconnect`];
+/// a failed attempt releases the latch so the next loss retries.
+async fn run_cold_reconnect(
+    mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
+    state: Arc<WorkspaceState>,
+    lsp_client: Client,
+) {
+    info!("cold reconnect: reviving the mcc slot connection");
+    // Phase 1 (same single write-lock site as run_server_init): restart the
+    // connection and clone the fresh RPC client.
+    let (project_root, system_root, rpc_client) = {
+        let mut server_guard = mcc_server.write().await;
+        let Some(ref mut server) = *server_guard else {
+            return;
+        };
+        // Initial init still in flight: its own failure handling owns this
+        // window; reconnecting here would race the loading RPCs.
+        if !state.init.done.load(Ordering::Acquire) {
+            server.clear_reconnect_latch();
+            return;
+        }
+        let project_root = server.slot_root().map(Path::to_path_buf);
+        let system_root = server.system_root().map(Path::to_path_buf);
+        // Drop our Child handle first: a killed daemon is an unreaped zombie,
+        // and `kill -0` reports zombies as alive — the reaper (kill_on_drop
+        // children) must get a chance before discovery judges the pid record.
+        // start_kill on an already-dead child may error — harmless here.
+        let _ = server.stop().await;
+        server.reset_restarts();
+        // Two outer attempts: the first can lose to the zombie window (the
+        // stale pid record still reads as alive and the handshake transport
+        // fails) — by the second, the reaper has reaped and discovery takes
+        // the stale-record path into a fresh spawn.
+        let mut start_err = None;
+        for attempt in 1..=2 {
+            match server.start(project_root.as_deref()).await {
+                Ok(()) => {
+                    start_err = None;
+                    break;
+                }
+                Err(e) => {
+                    warn!("cold reconnect attempt {attempt} failed: {e}");
+                    start_err = Some(e);
+                    if attempt == 1 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+        match start_err {
+            None => {
+                server.clear_dead();
+                (
+                    project_root,
+                    system_root,
+                    server.client().cloned(),
+                )
+            }
+            Some(e) => {
+                warn!("cold reconnect failed: {e}; the next connection loss retries");
+                server.clear_reconnect_latch();
+                return;
+            }
+        }
+    };
+    let Some(client) = rpc_client else {
+        warn!("cold reconnect started but RPC client is None");
+        return;
+    };
+    info!("cold reconnect: connection revived, warming the world back up");
+    warm_up_after_connect(
+        client,
+        mcc_server.clone(),
+        project_root,
+        system_root,
+        state,
+        lsp_client,
+    )
+    .await;
+    // Release the latch only now: a daemon that dies again *during* the
+    // warm-up is picked up by the next parse_and_publish once this clears.
+    if let Some(server) = mcc_server.write().await.as_ref() {
+        server.clear_reconnect_latch();
+    }
+    info!("cold reconnect complete");
+}
+
+/// Latch-and-spawn the single cold reconnect when the server reports a
+/// connection-level loss. No-op while a reconnect is already in flight or
+/// the loss was service-level (HTTP/parse/server errors mean the daemon
+/// answered).
+fn maybe_spawn_cold_reconnect(
+    server: &MccServer,
+    mcc_server: &Arc<tokio::sync::RwLock<Option<MccServer>>>,
+    state: &Arc<WorkspaceState>,
+    lsp_client: &Client,
+) {
+    if server.connection_lost() && server.schedule_reconnect() {
+        info!("mcc connection lost — scheduling one cold reconnect");
+        tokio::spawn(run_cold_reconnect(
+            mcc_server.clone(),
+            state.clone(),
+            lsp_client.clone(),
+        ));
+    }
+}
+
 /// Recursively find the first `.mc` file under a folder (non-project mode
 /// workspace warm-up). DFS order, any file will do — it only anchors the
 /// workspace root.
@@ -919,6 +1057,7 @@ async fn parse_and_publish(
         if !server.is_connected() {
             warn!("mcc server still not connected for {uri}, queuing for retry");
             state.diags.pending.insert(uri.clone(), version);
+            maybe_spawn_cold_reconnect(server, &mcc_server, &state, &client);
             return;
         }
     }
@@ -960,6 +1099,7 @@ async fn parse_and_publish(
                     "sem RPC (content) FAILED for {}: {} — skipping update",
                     uri_str, e
                 );
+                maybe_spawn_cold_reconnect(server, &mcc_server, &state, &client);
                 return;
             }
         }
@@ -991,6 +1131,7 @@ async fn parse_and_publish(
                     uri_str, e
                 );
                 state.diags.pending.insert(uri.clone(), version);
+                maybe_spawn_cold_reconnect(server, &mcc_server, &state, &client);
                 return;
             }
         }
@@ -1129,6 +1270,7 @@ async fn parse_and_publish(
         }
         Err(e) => {
             warn!("diagnostics RPC FAILED for {uri}: {e}");
+            maybe_spawn_cold_reconnect(server, &mcc_server, &state, &client);
         }
     }
 
