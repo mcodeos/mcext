@@ -22,6 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # RPC client for mcc server
 reqwest = { version = "0.12", features = ["json"] }
 
-# TOML parsing for project manifests (project.toml / manifest.toml / mcc.toml)
-toml = "0.8"
+# TOML parsing for project manifests (project.toml / manifest.toml / mcc.toml).
+# preserve_order: [dependencies] must keep the manifest's authoring order —
+# lib.load resolves `use` targets against previously loaded libs, so an
+# alphabetized map loads project libs before the mcode/mclibs they use and
+# every class binding silently collapses to a stub (b4557-era E4007 storm).
+toml = { version = "0.8", features = ["preserve_order"] }
 

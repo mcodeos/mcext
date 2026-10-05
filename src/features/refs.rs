@@ -35,7 +35,7 @@ pub async fn resolve_cross_file(
     let hint = word_at_offset(&rope, offset);
 
     let resp = server
-        .refs(uri.path(), offset, hint.as_deref())
+        .refs(&crate::util::uri_fs_path(uri), offset, hint.as_deref())
         .await
         .ok()?;
     if resp.refs.is_empty() {
@@ -234,7 +234,7 @@ pub async fn collect_rename_edits_cross_file(
     let hint = word_at_offset(&rope, offset)?;
 
     let resp = server
-        .refs(uri.path(), offset, Some(&hint))
+        .refs(&crate::util::uri_fs_path(uri), offset, Some(&hint))
         .await
         .ok()?;
     if resp.refs.is_empty() {

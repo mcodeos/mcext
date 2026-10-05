@@ -413,7 +413,7 @@ impl WorkspaceState {
         if let Some(rope) = self.document_rope(uri) {
             return Some(rope);
         }
-        let text = std::fs::read_to_string(uri.path()).ok()?;
+        let text = std::fs::read_to_string(crate::util::uri_fs_path(uri)).ok()?;
         Some(Rope::from_str(&text))
     }
 

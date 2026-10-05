@@ -13,6 +13,7 @@ use crate::index::IndexCommand;
 use crate::mccsrv::MccServer;
 use crate::project::{find_project_root_from_file, ProjectConfig};
 use crate::state::WorkspaceState;
+use crate::util::uri_fs_path;
 use dashmap::DashMap;
 // Note: McURI is just String, no need to import mcc
 use ropey::Rope;
@@ -984,7 +985,7 @@ async fn parse_and_publish(
     let _guard = span.enter();
 
     info!("parse_and_publish ENTER: uri={}", uri.path());
-    let mc_uri = String::from(uri.path());
+    let mc_uri = uri_fs_path(&uri);
 
     // Guard against mcc SIGABRT/SIGSEGV: validate use paths first (warn only, non-blocking)
     let text = state
@@ -1062,7 +1063,7 @@ async fn parse_and_publish(
         }
     }
 
-    let uri_str = uri.path();
+    let uri_str = uri_fs_path(&uri);
     // Serialize RPC access: mcc is single-threaded, concurrent requests crash it.
     let _rpc_guard = state.rpc_lock.lock().await;
 
@@ -1075,7 +1076,7 @@ async fn parse_and_publish(
 
     let (sem, skip_symbols) = if is_reparse {
         info!("sem RPC (content) for {} (reparse)", uri_str);
-        match server.sem(uri_str, Some(&text)).await {
+        match server.sem(&uri_str, Some(&text)).await {
             Ok(s) if !s.tokens.is_empty() && !s.symbols.lapper.is_empty() => {
                 info!(
                     "sem RPC (content) OK for {}: {} tokens, {} lapper entries",
@@ -1105,7 +1106,7 @@ async fn parse_and_publish(
         }
     } else {
         info!("sem RPC (no-content) for {} (initial)", uri_str);
-        match server.sem(uri_str, None).await {
+        match server.sem(&uri_str, None).await {
             Ok(s) if !s.tokens.is_empty() => {
                 info!(
                     "sem RPC (no-content) OK for {}: {} tokens, {} lapper entries",
@@ -1139,7 +1140,7 @@ async fn parse_and_publish(
 
     // Get diagnostics via RPC
     let mut diagnostics = Vec::new();
-    match server.diagnostics(uri_str).await {
+    match server.diagnostics(&uri_str).await {
         Ok(resp) => {
             info!(
                 "diagnostics RPC OK for {}: {} diags",
@@ -1387,9 +1388,14 @@ impl LanguageServer for Backend {
             .map(ServerConfig::from_initialization_options)
             .unwrap_or_default();
 
+        // Empty-string roots (Settings UI can persist `mcodels.projectRoot: ""`)
+        // would make the project slot's cwd `""` — `chdir("")` fails with
+        // ENOENT and every spawn attempt dies before exec. Degrade to None so
+        // the workspace folder fallback carries the root instead.
         let project_root = cfg
             .project_root
             .clone()
+            .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| {
                 params
                     .workspace_folders
@@ -1398,6 +1404,10 @@ impl LanguageServer for Backend {
                     .and_then(|f| f.uri.to_file_path().ok())
             })
             .or_else(|| std::env::current_dir().ok());
+        info!(
+            "initialize: resolved project_root={project_root:?} (initializationOptions project_root={:?})",
+            cfg.project_root
+        );
 
         // Background task: start mcc subprocess, load project + dependencies,
         // fetch symbols, build index, signal init-done, retry pending diagnostics.
@@ -1482,7 +1492,7 @@ impl LanguageServer for Backend {
         .await;
 
         // Notify index worker
-        let mc_uri = String::from(uri.path());
+        let mc_uri = uri_fs_path(&uri);
         let _ = self
             .state
             .project
@@ -1514,7 +1524,7 @@ impl LanguageServer for Backend {
         )
         .await;
         // Notify index worker
-        let mc_uri = String::from(uri.path());
+        let mc_uri = uri_fs_path(&uri);
         let _ = self.state.project.index.send(IndexCommand::AddFile(mc_uri));
     }
 
@@ -1544,7 +1554,7 @@ impl LanguageServer for Backend {
         self.state.erc.last_parse.remove(&uri);
         self.state.remove_document(&uri);
         self.state.project.scheduler.remove(&uri);
-        let mc_uri = String::from(uri.path());
+        let mc_uri = uri_fs_path(&uri);
         let _ = self
             .state
             .project
@@ -1555,7 +1565,7 @@ impl LanguageServer for Backend {
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         debug!("did_change_watched_files: {} changes", params.changes.len());
         for change in &params.changes {
-            let mc_uri = String::from(change.uri.path());
+            let mc_uri = uri_fs_path(&change.uri);
             match change.typ {
                 FileChangeType::DELETED => {
                     let _ = self
@@ -1752,7 +1762,7 @@ impl LanguageServer for Backend {
                             );
                             return Ok(crate::features::gotodef::resolve(&self.state, &uri, pos));
                         };
-                        if let Ok(sem) = server.sem(uri.path(), Some(&text)).await {
+                        if let Ok(sem) = server.sem(&uri_fs_path(&uri), Some(&text)).await {
                             let rpc_symbols = crate::state::RpcSemSymbols::from(sem.symbols);
                             info!(
                                 "goto_definition: on-the-fly sem populated for {}",

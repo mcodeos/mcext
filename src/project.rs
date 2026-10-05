@@ -9,7 +9,6 @@
 //! - Auto-loading dependencies when opening a workspace folder
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -43,7 +42,11 @@ pub fn find_project_root_from_file(path: &Path) -> Option<PathBuf> {
 pub struct ProjectConfig {
     pub project: ProjectSection,
     #[serde(default)]
-    pub dependencies: BTreeMap<String, String>,
+    /// Dependency name → version requirement. An order-preserving map on
+    /// purpose (see the `preserve_order` note in Cargo.toml): lib.load
+    /// resolves `use` targets against the already-loaded set, so the
+    /// manifest's authoring order (system libs first) is load order.
+    pub dependencies: toml::map::Map<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
