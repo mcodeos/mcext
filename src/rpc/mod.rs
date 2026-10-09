@@ -137,7 +137,11 @@ impl MccRpcClient {
 
     /// Run the flat electrical net checks (ERC) for the workspace's top module.
     pub async fn erc(&self) -> Result<ErcResponse, RpcError> {
-        let result = self.call("erc", json!({})).await?;
+        // The erc face audits the daemon's current world and rejects any
+        // payload outright (fail-visible: a silently dropped payload once let
+        // a caller believe an option had been applied). Send a JSON null,
+        // the one spelling the server accepts.
+        let result = self.call("erc", Value::Null).await?;
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
