@@ -25,7 +25,7 @@ component basic
     ]*/
     pins = 
     [ 
-        io 1 = RXD, "Receive Data", [high:+3V ~ +15V, low:-15V ~ -3V]
+        io 1 = RXD, "Receive Data"
     ]
     pins = [
         1 = G, "Gate"
