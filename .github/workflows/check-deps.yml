@@ -1,0 +1,20 @@
+name: check-deps
+
+on:
+  push:
+  pull_request:
+
+# Dependency one-way law (mcd 3.design/arch/220-open-closed-partition.md §4.1
+# construction face): judgment A - no dependency edge into an L2/L3 repo;
+# judgment B - no network DB driver crate in the gate domain (the mechanical
+# core of §4.3's no-second-channel law). mcsrv, the exit gateway, is the sole
+# legitimate driver holder and is not in the gate domain.
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency one-way + no-second-channel
+        run: python3 scripts/check-deps.py
