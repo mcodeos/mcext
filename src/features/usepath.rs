@@ -1,6 +1,6 @@
 //! Use-path completion — segment-wise candidates for the four `use` forms
 //! (completion-design §5.7; corpus evidence §12 #14: `use ./power.mc`,
-//! `use ./ifs/xtal`, `use $::mcpub.power/ams1117.mc`, `use mclibs.power.tle7368`).
+//! `use ./ifs/xtal`, `use $::mcpub.power/ams1117.mc`, `use mcfam.power.tle7368`).
 //!
 //! Resolution semantics mirror mcc's `McUse` parsing
 //! (`mcc/src/db/infra/mc_use.rs`) and the grammar (`mcast/src/mca.y`): the
@@ -117,7 +117,7 @@ pub fn completions_with(
     } else {
         // `$`-prefixed or bare: the system-library space, over every root
         // `usechk` resolves for goto-def. Module segments separate on `.`
-        // (corpus `mclibs.power.tle7368`) or `/` (`mcpub.power/ams1117.mc`)
+        // (corpus `mcfam.power.tle7368`) or `/` (`mcpub.power/ams1117.mc`)
         // — whichever the typist started wins.
         let bare = typed.strip_prefix('$').unwrap_or(&typed);
         let rest = bare.strip_prefix("::").unwrap_or(bare);

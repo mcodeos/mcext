@@ -115,7 +115,7 @@
 				"mcodels.systemRoot": {
 					"type": "string",
 					"scope": "window",
-					"description": "MCode system library root (searched for `use` targets like `mclibs.power`; falls back to ~/.mcode)."
+					"description": "MCode system library root (searched for `use` targets like `mcfam.power`; falls back to ~/.mcode)."
 				},
 				"mcodels.projectRoot": {
 					"type": "string",

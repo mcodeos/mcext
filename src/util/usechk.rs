@@ -111,7 +111,7 @@ pub fn resolve_use_target(base_url: &Url, use_path: &str) -> Option<Url> {
 }
 
 // ============================================================================
-// System-library use paths (unprefixed or `$`-prefixed, e.g. `mclibs.power/ams1117.mc`)
+// System-library use paths (unprefixed or `$`-prefixed, e.g. `mcfam.power/ams1117.mc`)
 // ============================================================================
 
 /// Candidate system/data roots searched for a library, in priority order.
@@ -137,8 +137,8 @@ pub(crate) fn system_roots() -> Vec<PathBuf> {
 /// Resolve an unprefixed (system/library) use path to candidate absolute
 /// target files, mirroring mcc's `McUse` parsing + `update_abs_path`:
 ///
-/// - `mclibs.power/ams1117.mc` → `<root>/mclibs/power/ams1117.mc` (file path)
-/// - `mclibs.power` → `<root>/mclibs/power/power.mc` (module auto-complete)
+/// - `mcfam.power/ams1117.mc` → `<root>/mcfam/power/ams1117.mc` (file path)
+/// - `mcfam.power` → `<root>/mcfam/power/power.mc` (module auto-complete)
 /// - `conn` → `<root>/conn/conn.mc` (single module auto-complete)
 /// - `$conn` → same as `conn`
 ///
@@ -163,7 +163,7 @@ pub fn resolve_system_use_path(use_path: &str) -> Vec<PathBuf> {
     }
     let lib = stem_segments[0];
     let rel: PathBuf = if is_file {
-        // `mclibs.power/ams1117.mc` → `power/ams1117.mc`
+        // `mcfam.power/ams1117.mc` → `power/ams1117.mc`
         PathBuf::from(stem_segments[1..].join("/")).with_extension("mc")
     } else {
         let last = *stem_segments.last().unwrap();
@@ -312,21 +312,21 @@ mod tests {
 
     #[test]
     fn system_use_file_path() {
-        // `mclibs.power/ams1117.mc` → `<root>/mclibs/power/ams1117.mc`
-        let candidates = resolve_system_use_path("mclibs.power/ams1117.mc");
+        // `mcfam.power/ams1117.mc` → `<root>/mcfam/power/ams1117.mc`
+        let candidates = resolve_system_use_path("mcfam.power/ams1117.mc");
         assert!(candidates
             .iter()
-            .any(|p| p.ends_with("mclibs/power/ams1117.mc")));
+            .any(|p| p.ends_with("mcfam/power/ams1117.mc")));
     }
 
     #[test]
     fn system_use_file_actually_exists() {
-        // On a machine with ~/.mcode/mclibs installed, the candidate must be
+        // On a machine with ~/.mcode/mcfam installed, the candidate must be
         // the real on-disk target that mcc loads.
-        let candidates = resolve_system_use_path("mclibs.power/ams1117.mc");
+        let candidates = resolve_system_use_path("mcfam.power/ams1117.mc");
         let hit = candidates.iter().find(|p| p.exists());
         if let Some(hit) = hit {
-            assert!(hit.ends_with("mclibs/power/ams1117.mc"));
+            assert!(hit.ends_with("mcfam/power/ams1117.mc"));
         }
     }
 
@@ -347,11 +347,11 @@ mod tests {
 
     #[test]
     fn system_use_module_auto_complete() {
-        // `mclibs.power` → `<root>/mclibs/power/power.mc`
-        let candidates = resolve_system_use_path("mclibs.power");
+        // `mcfam.power` → `<root>/mcfam/power/power.mc`
+        let candidates = resolve_system_use_path("mcfam.power");
         assert!(candidates
             .iter()
-            .any(|p| p.ends_with("mclibs/power/power.mc")));
+            .any(|p| p.ends_with("mcfam/power/power.mc")));
     }
 
     #[test]

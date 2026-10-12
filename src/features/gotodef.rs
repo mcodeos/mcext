@@ -145,7 +145,7 @@ fn resolve_use_jump(
         let current_dir = current_file.parent()?;
         resolve_use_path(current_dir, use_path)
     } else {
-        // Unprefixed / `$` path (`mclibs.power/ams1117.mc`, `$conn`): system
+        // Unprefixed / `$` path (`mcfam.power/ams1117.mc`, `$conn`): system
         // library. parse_use_prefix returns None for these, which previously
         // made jump silently fail. Resolve against MCC_SYSTEM_ROOT / ~/.mcode.
         resolve_system_use_path(path)
