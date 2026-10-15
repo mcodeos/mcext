@@ -38,7 +38,7 @@ from pathlib import Path
 # L2/L3 repositories (220 section 2 layer registry). A dependency whose
 # resolved path crosses one of these directory names, or whose crate name is
 # one of these, is a backwards edge out of the open face.
-CLOSED_REPOS = {"mchub", "mce", "mcm", "mcs", "mct", "mcsrv", "mcide"}
+CLOSED_REPOS = {"mcdata", "mce", "mcm", "mcs", "mct", "mcsrv", "mcide"}
 
 # Network database driver crates (judgment B). Local embedded engines
 # (rusqlite and friends) are deliberately absent: the law bans channels to
