@@ -1,6 +1,6 @@
 //! Use-path completion — segment-wise candidates for the four `use` forms
 //! (completion-design §5.7; corpus evidence §12 #14: `use ./power.mc`,
-//! `use ./ifs/xtal`, `use $::mcpub.power/ams1117.mc`, `use mcfam.power.tle7368`).
+//! `use ./ifs/xtal`, `use $::mcparts.power/ams1117.mc`, `use mcfam.power.tle7368`).
 //!
 //! Resolution semantics mirror mcc's `McUse` parsing
 //! (`mcc/src/db/infra/mc_use.rs`) and the grammar (`mcast/src/mca.y`): the
@@ -117,7 +117,7 @@ pub fn completions_with(
     } else {
         // `$`-prefixed or bare: the system-library space, over every root
         // `usechk` resolves for goto-def. Module segments separate on `.`
-        // (corpus `mcfam.power.tle7368`) or `/` (`mcpub.power/ams1117.mc`)
+        // (corpus `mcfam.power.tle7368`) or `/` (`mcparts.power/ams1117.mc`)
         // — whichever the typist started wins.
         let bare = typed.strip_prefix('$').unwrap_or(&typed);
         let rest = bare.strip_prefix("::").unwrap_or(bare);
@@ -344,18 +344,18 @@ mod tests {
 
     #[test]
     fn dollar_prefixes_and_both_separators_walk_the_same_roots() {
-        let dir = fixture(&["mcpub/power/ams1117.mc"]);
+        let dir = fixture(&["mcparts/power/ams1117.mc"]);
         // `$::`, `$`, and the bare form all reach the system space; each next
         // module segment completes one at a time (§5.7 按段逐段补全).
-        for typed in ["$::mcpub", "$mcpub", "mcpub"] {
+        for typed in ["$::mcparts", "$mcparts", "mcparts"] {
             let items = completions_in(&dir, &format!("use {typed}"))
                 .unwrap_or_else(|| panic!("no items for {typed:?}"));
             assert_eq!(labels(&items), vec![format!("{typed}.")]);
         }
-        // A typed `/` keeps reassembling with `/` (corpus `mcpub.power/ams1117.mc`
+        // A typed `/` keeps reassembling with `/` (corpus `mcparts.power/ams1117.mc`
         // mixes them), and the entry file completes inside the last directory.
-        let items = completions_in(&dir, "use $::mcpub/power/a").expect("file deep in lib");
-        assert_eq!(labels(&items), vec!["$::mcpub/power/ams1117.mc"]);
+        let items = completions_in(&dir, "use $::mcparts/power/a").expect("file deep in lib");
+        assert_eq!(labels(&items), vec!["$::mcparts/power/ams1117.mc"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
