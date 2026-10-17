@@ -5,7 +5,7 @@
       "label": "cargo build",
       "type": "shell",
       "command": "cargo build",
-      "args": [],
+      "args": ["--release"],
       "group": "build",
       "problemMatcher": ["$rustc"],
       "presentation": {

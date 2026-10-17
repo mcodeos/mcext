@@ -28,7 +28,7 @@
       "name": "Debug LSP Server",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/mcodels",
+      "program": "${workspaceFolder}/target/release/mcodels",
       "args": [],
       "cwd": "${workspaceFolder}",
       "env": {
@@ -57,12 +57,12 @@
         // "${workspaceFolder}/../mcd/unitest/"
         // "${workspaceFolder}/../mcode"
         // "${workspaceFolder}/../mc-examples"
-        
+
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "build: all",
       "env": {
-        "SERVER_PATH": "${workspaceFolder}/target/debug/mcodels",
+        "SERVER_PATH": "${workspaceFolder}/target/release/mcodels",
         "RUST_LOG": "debug"
       }
     },
