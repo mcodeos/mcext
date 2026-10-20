@@ -206,7 +206,7 @@ fn is_mcode_keyword(text: &str) -> bool {
             | "case"
             | "claim"
             | "component"
-            | "conduit"
+            | "copper"
             | "domain"
             | "drive"
             | "else"
