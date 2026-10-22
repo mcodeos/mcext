@@ -27,7 +27,7 @@ direct connection is possible - prevention is cheaper than retrofit rerouting.
 
 Outside the gate: local embedded own-format storage is not a database driver
 (e.g. mcc's src/db/cmie file format); mcsrv itself is exempt (the exit gateway
-body, legitimately the sole sqlx holder); mcide is L3 and rides the P2 batch,
+body, legitimately the sole sqlx holder); mcbench is L3 and rides the P2 batch,
 not this gate.
 """
 import re
@@ -38,7 +38,7 @@ from pathlib import Path
 # L2/L3 repositories (220 section 2 layer registry). A dependency whose
 # resolved path crosses one of these directory names, or whose crate name is
 # one of these, is a backwards edge out of the open face.
-CLOSED_REPOS = {"mcdata", "mce", "mcm", "mcs", "mct", "mcsrv", "mcide"}
+CLOSED_REPOS = {"mcdata", "mce", "mcm", "mcs", "mct", "mcsrv", "mcbench"}
 
 # Network database driver crates (judgment B). Local embedded engines
 # (rusqlite and friends) are deliberately absent: the law bans channels to
