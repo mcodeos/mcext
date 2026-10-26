@@ -1,6 +1,6 @@
 //! Integration tests with a real mcc server subprocess.
 //!
-//! Prerequisites: `mcc` binary at `../mcc/target/debug/mcc` or on PATH.
+//! Prerequisites: the `mcc` binary, named by `MCC_PATH` or taken from PATH.
 //! These tests verify the RPC pipeline: start server → load fixture → call features.
 //!
 //! The mcc server binds to a fixed port (8080) inside the `mcc` binary, so we
@@ -437,11 +437,12 @@ async fn completion_layered_rpc_roundtrip() {
 /// on the port, then let MccServer reuse it through its existing
 /// port-busy probe path. Dropping the child kills it, freeing the port.
 async fn private_server(port: u16) -> (MccServer, tokio::process::Child) {
-    // Same resolution order as MccServer::find_mcc_path: env override first,
-    // then the cargo-workspace relative path.
+    // Same resolution order as MccServer::find_mcc_path: the anchor, then
+    // PATH. No sibling-directory guess: a neighbour checkout is this
+    // machine's layout, not an input (246 §1.7).
     let mcc_path = std::env::var("MCC_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| crate_path().join("../mcc/target/debug/mcc"));
+        .unwrap_or_else(|_| std::path::PathBuf::from("mcc"));
     // Isolated data root: `mcc start` refuses to run when the (global)
     // default-root pid file records a live daemon — without this, a private
     // child can never start once the shared :8080 daemon exists, and the

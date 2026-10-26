@@ -964,21 +964,9 @@ impl MccServer {
             warn!("MCC_PATH={} does not exist, falling back", path);
         }
 
-        // Try common relative locations (cargo workspace layout)
-        let candidates = [
-            PathBuf::from("../mcc/target/debug/mcc"),
-            PathBuf::from("../../mcc/target/debug/mcc"),
-            PathBuf::from("target/debug/mcc"),
-        ];
-
-        for path in &candidates {
-            if path.exists() {
-                debug!("Found mcc at {:?}", path);
-                return path.clone();
-            }
-        }
-
-        // Fallback to PATH
+        // No sibling-directory guessing: a neighbour checkout is this
+        // machine's layout, not an input (246 §1.7). The binary comes from
+        // the anchor, or from PATH.
         debug!("Using mcc from PATH");
         PathBuf::from("mcc")
     }
