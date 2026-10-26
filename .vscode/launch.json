@@ -51,7 +51,7 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${env:MCC_CORPUS_ROOT}/hbl"
+        "${workspaceFolder}/../mcs/hbl"
         // "${workspaceFolder}/../mc-examples"
 
       ],
