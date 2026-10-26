@@ -50,7 +50,7 @@
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
         "--inspect-extensions=9230",
-        "${workspaceFolder}/../mcs/hbl"
+        "${env:MCC_CORPUS_ROOT}/hbl"
       ],
       "problemMatcher": []
     }
