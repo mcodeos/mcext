@@ -3,6 +3,17 @@
 All notable changes to the MCode VS Code extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Dependency readiness in the build**: `MCode: Build Project` now checks the
+  libraries the manifest declares before it builds. A library that is not
+  installed is solved and installed first (the daemon's `lib.resolve` — the
+  same face the CLI's `mcc lib resolve` is), so a build reports "not
+  installed" as the fact it is, and installs instead of stopping there. The
+  build report names what was installed and what is still missing.
+
 ## [0.5.2] - 2026-09-24
 
 ### Added

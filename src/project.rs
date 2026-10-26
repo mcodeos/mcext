@@ -37,6 +37,20 @@ pub fn find_project_root_from_file(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The project root an entry belongs to — the directory that holds the
+/// manifest. An entry that is a folder is the root itself when it carries a
+/// manifest; a file finds its nearest ancestor that has one.
+pub fn project_root_for(entry: &str) -> Option<PathBuf> {
+    let path = Path::new(entry);
+    if path.is_dir() {
+        return PROJECT_MANIFEST_NAMES
+            .iter()
+            .any(|name| path.join(name).is_file())
+            .then(|| path.to_path_buf());
+    }
+    find_project_root_from_file(path)
+}
+
 /// Project configuration loaded from a project manifest
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
@@ -133,6 +147,30 @@ impl ProjectConfig {
     /// Get list of dependency names
     pub fn dependency_names(&self) -> Vec<&String> {
         self.dependencies.keys().collect()
+    }
+
+    /// The declared dependencies with their version requirements.
+    ///
+    /// A requirement is written either as a bare string (`mcfam = "0.141"`)
+    /// or as a table (`mcfam = { version = "0.141", local = true }`); both
+    /// name the same version requirement, so the readiness check reads one
+    /// shape. A declaration without a version states no requirement (`*`).
+    pub fn dependency_requirements(&self) -> Vec<(String, String)> {
+        self.dependencies
+            .iter()
+            .map(|(name, value)| {
+                let req = match value {
+                    toml::Value::String(s) => s.clone(),
+                    toml::Value::Table(t) => t
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("*")
+                        .to_string(),
+                    _ => "*".to_string(),
+                };
+                (name.clone(), req)
+            })
+            .collect()
     }
 }
 

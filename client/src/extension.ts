@@ -133,6 +133,15 @@ interface BuildResult {
       len?: number;
     }[];
   };
+  // The dependency precondition's answer (server side, `src/deps.rs`):
+  // what the build ran against, what this run installed, what is missing.
+  deps?: {
+    declared?: number;
+    installed?: string[];
+    missing?: string[];
+    notes?: string[];
+    ready?: boolean;
+  };
   error?: string;
 }
 
@@ -754,6 +763,26 @@ function renderBuildResult(entryFile: string, result: BuildResult): void {
   // ── Output console ──
   buildOutput.appendLine("");
   buildOutput.appendLine(`[mcc build] entry: ${entryFile}`);
+  // ── Dependency readiness (the build's precondition) ──
+  // What the build ran against, what this run installed, what is still
+  // missing — the server installs what is missing before the build runs.
+  const deps = result.deps;
+  if (deps && (deps.declared ?? 0) > 0) {
+    buildOutput.appendLine(
+      `[mcc build] dependencies: ${deps.declared} declared, ${
+        (deps.installed ?? []).length
+      } installed now`
+    );
+    for (const p of deps.installed ?? []) {
+      buildOutput.appendLine(`[mcc build]   installed: ${p}`);
+    }
+    for (const m of deps.missing ?? []) {
+      buildOutput.appendLine(`[mcc build]   MISSING: ${m}`);
+    }
+    for (const n of deps.notes ?? []) {
+      buildOutput.appendLine(`[mcc build]   note: ${n}`);
+    }
+  }
   buildOutput.appendLine(
     `[mcc build] modules: ${s.module_count ?? 0}, components: ${
       s.component_count ?? 0

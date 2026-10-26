@@ -11,7 +11,7 @@
 use crate::common::ServerConfig;
 use crate::index::IndexCommand;
 use crate::mccsrv::MccServer;
-use crate::project::{find_project_root_from_file, ProjectConfig};
+use crate::project::{find_project_root_from_file, project_root_for, ProjectConfig};
 use crate::state::WorkspaceState;
 use crate::util::uri_fs_path;
 use dashmap::DashMap;
@@ -367,6 +367,31 @@ impl Backend {
 
         // Serialize with other RPC calls (mcc is single-threaded — see server/mod.rs:445).
         let _rpc_guard = self.state.rpc_lock.lock().await;
+
+        // The dependency precondition: a library that is not installed cannot
+        // be loaded, so a build would report "library not found" where the
+        // real fact is "not installed yet". The readiness face installs what
+        // is missing before the build runs.
+        let readiness = match project_root_for(&entry) {
+            Some(root) => {
+                let declared = ProjectConfig::load_from(&root)
+                    .map(|c| c.dependency_requirements())
+                    .unwrap_or_default();
+                crate::deps::ensure_dependencies(server, &root, &declared).await
+            }
+            None => crate::deps::DepReadiness::default(),
+        };
+        if !readiness.installed.is_empty() {
+            info!(
+                "mcode.buildProject: installed {} dependency pack(s): {}",
+                readiness.installed.len(),
+                readiness.installed.join(", ")
+            );
+        }
+        for note in &readiness.notes {
+            warn!("mcode.buildProject: dependency: {note}");
+        }
+
         match server.build_full(&entry, top.as_deref(), &libs).await {
             Ok(resp) => {
                 // Flatten pass0/pass1/pass2 diagnostics into one list for the client.
@@ -406,6 +431,15 @@ impl Backend {
                         "stats": s.stats,
                     },
                     "diagnostics": diagnostics,
+                });
+                // The dependency precondition's answer: what the build ran
+                // against, what this run installed, what is still missing.
+                payload["deps"] = serde_json::json!({
+                    "declared": readiness.declared,
+                    "installed": readiness.installed,
+                    "missing": readiness.missing,
+                    "notes": readiness.notes,
+                    "ready": readiness.ready(),
                 });
                 // Failure ledger (resolve-gate-design.md §7.1-2) — omit when the
                 // backend didn't return one (older mcc daemon).

@@ -199,6 +199,36 @@ impl MccRpcClient {
         serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
     }
 
+    /// List the libraries on disk, merging the project's `libs/` tier.
+    ///
+    /// The project root names the tier to merge (the daemon scans it); the
+    /// answer is the on-disk truth about what is installed, not what is
+    /// loaded — the readiness check reads it before deciding to install.
+    pub async fn lib_list_at(&self, project_root: &str) -> Result<LibListResponse, RpcError> {
+        let result = self
+            .call("lib.list", json!({"project_root": project_root}))
+            .await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
+    /// Solve the project's `[dependencies]` and install what is missing.
+    ///
+    /// The daemon face (`mcc lib resolve` over RPC) is the one authority for
+    /// the dependency lock: it resolves each declaration against the
+    /// registry and downloads the packs that are not on disk yet. The answer
+    /// names the packs this run installed and the declarations that could
+    /// not be satisfied.
+    pub async fn lib_resolve(&self, project_root: &str) -> Result<LibResolveResponse, RpcError> {
+        let result = self
+            .call_with_timeout(
+                "lib.resolve",
+                json!({"project_root": project_root}),
+                Some(std::time::Duration::from_secs(120)),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
     /// Get library info
     pub async fn lib_show(&self, name: &str) -> Result<LibShowResponse, RpcError> {
         let result = self.call("lib.info", json!({"name": name})).await?;
@@ -422,6 +452,54 @@ pub struct LibListResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LibEntry {
     pub name: String,
+    /// The installed copy's version — the on-disk tier answers it, the
+    /// loaded tier does not.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Where the installed copy lives.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Response from the `lib.resolve` RPC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibResolveResponse {
+    /// One row per solved declaration.
+    #[serde(default)]
+    pub resolved: Vec<LibResolveEntry>,
+    /// The packs this run downloaded (`name@version`).
+    #[serde(default)]
+    pub installed: Vec<String>,
+    /// Whether a dependency lock was already there.
+    #[serde(default)]
+    pub lock_present: bool,
+    /// Whether this run wrote the lock.
+    #[serde(default)]
+    pub lock_written: bool,
+    /// The declarations that could not be satisfied.
+    #[serde(default)]
+    pub diagnostics: Vec<LibResolveDiagnostic>,
+}
+
+/// One solved dependency row.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibResolveEntry {
+    pub key: String,
+    pub package: String,
+    pub version: String,
+    /// Where the copy lives: `project` / `data-root` / `registry`.
+    #[serde(default)]
+    pub origin: String,
+}
+
+/// One unsatisfied declaration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibResolveDiagnostic {
+    pub code: i64,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 /// Response from `library.show` RPC

@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod common;
+pub mod deps;
 pub mod features;
 pub mod index;
 pub mod mccsrv;

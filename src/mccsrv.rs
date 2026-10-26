@@ -952,6 +952,45 @@ impl MccServer {
             })
     }
 
+    /// Load a library by name (or `name@version`).
+    pub async fn lib_load(&self, name: &str) -> Result<(), MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client.lib_load(name).await.map_err(|e| {
+            if e.is_connection_loss() {
+                self.mark_dead();
+            }
+            MccServerError::Rpc(e.to_string())
+        })
+    }
+
+    /// List the libraries on disk (the project's `libs/` tier included).
+    pub async fn lib_list_at(
+        &self,
+        project_root: &str,
+    ) -> Result<crate::rpc::LibListResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client.lib_list_at(project_root).await.map_err(|e| {
+            if e.is_connection_loss() {
+                self.mark_dead();
+            }
+            MccServerError::Rpc(e.to_string())
+        })
+    }
+
+    /// Solve the project's dependencies and install what is missing.
+    pub async fn lib_resolve(
+        &self,
+        project_root: &str,
+    ) -> Result<crate::rpc::LibResolveResponse, MccServerError> {
+        let client = self.client().ok_or(MccServerError::NotConnected)?;
+        client.lib_resolve(project_root).await.map_err(|e| {
+            if e.is_connection_loss() {
+                self.mark_dead();
+            }
+            MccServerError::Rpc(e.to_string())
+        })
+    }
+
     /// Find mcc binary path
     fn find_mcc_path() -> PathBuf {
         // Check MCC_PATH env var first
