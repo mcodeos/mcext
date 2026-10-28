@@ -1,5 +1,6 @@
 .claude/settings.json
 /target
+build/
 node_modules
 log.txt
 Cargo.lock
