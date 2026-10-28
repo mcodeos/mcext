@@ -215,6 +215,7 @@ fn is_mcode_keyword(text: &str) -> bool {
             | "error"
             | "fn"
             | "func"
+            | "general"
             | "if"
             | "in"
             | "interface"

@@ -44,7 +44,7 @@
       "patterns": [
         {
           "name": "keyword.control.mcode",
-          "match": "\\b(abstract|as|assert|bench|block|bom|case|claim|component|copper|domain|drive|else|enum|error|fn|func|if|in|interface|io|iface|let|meta|module|nc|out|pins|pinout|plan|probe|psrc|psnk|psbi|pub|rail|recipe|require|return|role|scenario|this|threat|use|within|true|false|int|float|string|bool)\\b"
+          "match": "\\b(abstract|as|assert|bench|block|bom|case|claim|component|copper|domain|drive|else|enum|error|fn|func|general|if|in|interface|io|iface|let|meta|module|nc|out|pins|pinout|plan|probe|psrc|psnk|psbi|pub|rail|recipe|require|return|role|scenario|this|threat|use|within|true|false|int|float|string|bool)\\b"
         },
         {
           "name": "keyword.operator.mcode",
