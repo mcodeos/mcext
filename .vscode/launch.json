@@ -51,7 +51,8 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../mcs/hbl"
+        // "${workspaceFolder}/../mcs/hbl"
+        "${workspaceFolder}/../project/moto"
         // "${workspaceFolder}/../mc-examples"
 
       ],
