@@ -16,3 +16,19 @@ rust-toolchains.toml
 target-slots
 
 tests/
+
+# The build tree holds the release manifest and the signature of an
+# earlier batch, and the packages of earlier batches.  None of them may
+# ride along inside the package: a package that carries a foreign batch
+# number contradicts its own name.
+build/
+*.vsix
+
+# The local run log and the local documents are the machine's, not the
+# user's.
+log.txt
+doc/
+__pycache__/
+
+# The agent's own skills are the development machine's, not the user's.
+.claude/
