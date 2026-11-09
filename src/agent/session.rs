@@ -157,17 +157,32 @@ mod tests {
 
     /// Minimal HTTP/1.1 server speaking just enough of the wire for reqwest:
     /// one response per connection, from a script queue.
+    ///
+    /// The whole request is read before the answer is written. A server that
+    /// answers a half-read request closes the socket with unread bytes in
+    /// its receive buffer, and the peer answers that with a reset: the
+    /// client then reports a send error instead of the response, and the
+    /// test fails on timing rather than on behaviour.
     async fn mock_endpoint(script: Mutex<VecDeque<Value>>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else { break };
                 let Some(resp) = script.lock().unwrap().pop_front() else { break };
-                let mut buf = vec![0u8; 65536];
-                let _ = sock.readable().await;
-                // Read the request head (best-effort; we do not parse it).
-                let _ = sock.try_read(&mut buf);
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(n) = sock.read(&mut chunk).await else { break };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if request_is_complete(&buf) {
+                        break;
+                    }
+                }
                 let body = serde_json::to_string(&resp).unwrap();
                 let http = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
@@ -181,6 +196,21 @@ mod tests {
             }
         });
         (format!("http://{addr}/v1"), handle)
+    }
+
+    /// True when the buffer holds a whole HTTP request: the head (up to the
+    /// blank line) plus the body the head announces.
+    fn request_is_complete(buf: &[u8]) -> bool {
+        let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+        let len = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        buf.len() >= head_end + 4 + len
     }
 
     fn tool_call_turn(id: &str, name: &str, args: &str) -> Value {
