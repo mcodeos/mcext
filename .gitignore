@@ -3,7 +3,6 @@
 build/
 node_modules
 log.txt
-Cargo.lock
 out/
 .pnpm-debug.log
 *.ast 

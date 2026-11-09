@@ -1,0 +1,47 @@
+name: ci
+
+# The gate, triggered by every push: the green must be recorded by the
+# gate, not promised by a human. The gate itself is scripts/ci.sh -- one
+# definition of what runs, shared by this host, a push hook and a
+# workstation.
+#
+# The gate reads the tree it lives in: no credential, no state outside the
+# checkout. It fetches the crates the committed Cargo.lock names, because
+# this repository is a Rust program and building it means building its
+# dependencies. A runner that cannot measure the world reports red rather
+# than green.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run the gate
+        run: scripts/ci.sh
+
+      - name: Upload the gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcext-gate-log
+          path: build
+          if-no-files-found: ignore
