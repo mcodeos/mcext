@@ -155,6 +155,20 @@ fn format_text(text: &str, options: &FormatOptions) -> Option<String> {
                 &mut chars,
                 options,
             ),
+            // `#` line comment — same weight as `//` (MCode syntax).
+            '#' => handle_hash_comment(
+                &mut result,
+                &mut indent_level,
+                &mut in_line,
+                &mut line_start,
+                &mut chars,
+                options,
+            ),
+            // String literals are opaque: their braces, semicolons and
+            // commas are content, not code.
+            '"' | '\'' => {
+                handle_string_literal(&mut result, &mut in_line, &mut line_start, c, &mut chars)
+            }
             '[' => handle_open_bracket(&mut result, &mut in_line, &mut line_start, &mut chars),
             ']' => handle_close_bracket(&mut result, &mut in_line, &mut line_start),
             _ => handle_default(c, &mut result, &mut in_line, &mut line_start),
@@ -304,11 +318,82 @@ fn handle_slash(
         result.push('\n');
         add_indent(result, *indent_level, options.indent_size);
         *line_start = true;
+    } else if chars.peek() == Some(&'*') {
+        // Block comment: copy verbatim to the closing `*/`. Its inner
+        // braces must not open a phantom indent.
+        result.push('/');
+        chars.next();
+        result.push('*');
+        while let Some(&c) = chars.peek() {
+            chars.next();
+            result.push(c);
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                result.push('/');
+                break;
+            }
+        }
+        *in_line = true;
+        *line_start = false;
     } else {
         result.push('/');
         *in_line = true;
         *line_start = false;
     }
+}
+
+/// `#` line comment — copy the rest of the line verbatim (its braces must
+/// not open a phantom indent), then re-indent the next line.
+fn handle_hash_comment(
+    result: &mut String,
+    indent_level: &mut usize,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    options: &FormatOptions,
+) {
+    result.push('#');
+    while let Some(&c) = chars.peek() {
+        if c == '\n' {
+            break;
+        }
+        result.push(c);
+        chars.next();
+    }
+    result.push('\n');
+    add_indent(result, *indent_level, options.indent_size);
+    *in_line = false;
+    *line_start = true;
+}
+
+/// String literal: copy verbatim to the closing quote. Braces, semicolons
+/// and commas inside are content, not code.
+fn handle_string_literal(
+    result: &mut String,
+    in_line: &mut bool,
+    line_start: &mut bool,
+    quote: char,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) {
+    result.push(quote);
+    while let Some(&c) = chars.peek() {
+        chars.next();
+        result.push(c);
+        if c == '\\' {
+            // Escaped character: copy it verbatim too.
+            if let Some(&e) = chars.peek() {
+                chars.next();
+                result.push(e);
+            }
+            continue;
+        }
+        if c == quote || c == '\n' {
+            // Closing quote, or an unterminated literal ended by the line.
+            break;
+        }
+    }
+    *in_line = true;
+    *line_start = false;
 }
 
 fn handle_open_bracket(
@@ -354,6 +439,15 @@ fn skip_whitespace_and_comments(chars: &mut std::iter::Peekable<std::str::Chars>
             } else {
                 // Not a comment, put back the '/'
                 break;
+            }
+        } else if c == '#' {
+            // `#` line comment — skip to end of line.
+            chars.next();
+            while let Some(&c) = chars.peek() {
+                if c == '\n' {
+                    break;
+                }
+                chars.next();
             }
         } else {
             break;
@@ -478,6 +572,45 @@ mod tests {
         let output = run_format(input).unwrap();
         // The body content after `//` is preserved
         assert!(output.contains("comment"), "comment body lost: {output}");
+    }
+
+    #[test]
+    fn format_handles_hash_comment() {
+        // `#` is a line comment too (MCode syntax): its body is preserved
+        // and its braces do not open a phantom indent.
+        let input = "# comment {\nmodule m {\n}\n";
+        let output = run_format(input).unwrap();
+        assert!(output.contains("# comment {"), "comment body lost: {output}");
+        // The comment's brace must not push the indent stack: the code
+        // after it formats exactly as it would without the comment.
+        let base = run_format("module m {\n}\n").unwrap();
+        assert!(
+            output.ends_with(&base),
+            "comment brace leaked into the indent stack: {output}"
+        );
+    }
+
+    #[test]
+    fn format_keeps_string_literals_opaque() {
+        // Braces and semicolons inside a literal are content, not code.
+        let input = "let s = \"a{b}c;d\";\n";
+        let output = run_format(input).unwrap();
+        assert!(
+            output.contains("\"a{b}c;d\""),
+            "string literal mangled: {output}"
+        );
+        assert_eq!(output.matches('{').count(), 1, "literal brace leaked: {output}");
+    }
+
+    #[test]
+    fn format_keeps_block_comments_opaque() {
+        let input = "/* {\n   } */\nmodule m {\n}\n";
+        let output = run_format(input).unwrap();
+        let base = run_format("module m {\n}\n").unwrap();
+        assert!(
+            output.ends_with(&base),
+            "block comment brace leaked into the indent stack: {output}"
+        );
     }
 
     #[test]
