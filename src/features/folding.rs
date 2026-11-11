@@ -47,6 +47,12 @@ pub fn compute(rope: &Rope) -> Vec<FoldingRange> {
                     state = Top::LineComment;
                     i += 1;
                 }
+                // `#` is a line comment too (MCode syntax: `//…` and `#…`).
+                // Same scope as the compiler's semantic scan: outside a
+                // string literal, `#` opens a comment to end of line.
+                b'#' if state == Top::Code => {
+                    state = Top::LineComment;
+                }
                 b'/' if bytes.get(i + 1) == Some(&b'*') => {
                     state = Top::BlockComment;
                     i += 1;
@@ -94,14 +100,15 @@ pub fn compute(rope: &Rope) -> Vec<FoldingRange> {
                     if state == Top::LineComment {
                         state = Top::Code;
                         run_end = line;
-                        // Look ahead: does the next line start with `//`?
+                        // Look ahead: does the next line start with `//` or `#`?
                         let mut j = i + 1;
                         while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                             j += 1;
                         }
                         if !(j < bytes.len()
-                            && bytes[j] == b'/'
-                            && bytes.get(j + 1) == Some(&b'/'))
+                            && (bytes[j] == b'#'
+                                || (bytes[j] == b'/'
+                                    && bytes.get(j + 1) == Some(&b'/'))))
                         {
                             if let Some(start) = run_start.take() {
                                 if run_end > start {
@@ -122,6 +129,13 @@ pub fn compute(rope: &Rope) -> Vec<FoldingRange> {
                     }
                     state = Top::LineComment;
                     i += 1;
+                }
+                // `#` line comment — same weight as `//` (MCode syntax).
+                b'#' if state == Top::Code => {
+                    if run_start.is_none() {
+                        run_start = Some(line);
+                    }
+                    state = Top::LineComment;
                 }
                 b'/' if bytes.get(i + 1) == Some(&b'*') && state == Top::Code => {
                     // Flush any line-comment run before the block comment.
@@ -243,6 +257,23 @@ mod tests {
     #[test]
     fn single_line_comment_does_not_fold() {
         let r = Rope::from_str("// just one\nlet x = 1;\n");
+        assert!(compute(&r).is_empty());
+    }
+
+    #[test]
+    fn hash_comment_runs_fold_like_slash_comments() {
+        // `#` is a line comment too — its runs fold, and a brace inside a
+        // `#` comment does not open a phantom fold.
+        let r = Rope::from_str("# a\n# b {\nlet x = 1;\n");
+        let folds = compute(&r);
+        assert_eq!(folds.len(), 1, "{folds:?}");
+        assert_eq!((folds[0].start_line, folds[0].end_line), (0, 1));
+        assert_eq!(folds[0].kind, Some(FoldingRangeKind::Comment));
+    }
+
+    #[test]
+    fn hash_inside_a_string_is_not_a_comment() {
+        let r = Rope::from_str("let s = \"LTC#4365\";\n");
         assert!(compute(&r).is_empty());
     }
 

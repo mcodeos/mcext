@@ -34,6 +34,10 @@
           "match": "//.*$"
         },
         {
+          "name": "comment.line.hash.mcode",
+          "match": "^\\s*#.*$"
+        },
+        {
           "name": "comment.block.mcode",
           "begin": "/\\*",
           "end": "\\*/"

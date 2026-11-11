@@ -213,6 +213,11 @@ fn detect_suppression(line_before: &str) -> Option<SuppressReason> {
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
                 return Some(SuppressReason::Comment)
             }
+            // `#` is a line comment as well (MCode syntax: `//…` and `#…`).
+            // Only outside strings and block comments.
+            b'#' if !in_string && block_depth == 0 => {
+                return Some(SuppressReason::Comment)
+            }
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
                 block_depth += 1;
                 i += 2;
@@ -692,6 +697,18 @@ mod tests {
         let src = "// a comment here";
         let c = ctx(src, 15, &[]);
         assert_eq!(c.suppressed, Some(SuppressReason::Comment));
+    }
+
+    #[test]
+    fn hash_comment_suppressed() {
+        // `#` is a line comment as well (MCode syntax: `//…` and `#…`).
+        let src = "# a comment here";
+        let c = ctx(src, 15, &[]);
+        assert_eq!(c.suppressed, Some(SuppressReason::Comment));
+        // A `#` inside a string literal is content, not a comment.
+        let src = "partno = \"LTC#4365\"";
+        let c = ctx(src, 14, &[]);
+        assert_eq!(c.suppressed, Some(SuppressReason::StringLit));
     }
 
     #[test]
