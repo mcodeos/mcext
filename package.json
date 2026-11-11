@@ -52,6 +52,11 @@
 				"command": "mcode.explainCode",
 				"title": "MCode: Explain Error Code",
 				"category": "MCode"
+			},
+			{
+				"command": "mcode.toggleLineComment",
+				"title": "MCode: Toggle Line Comment",
+				"category": "MCode"
 			}
 		],
 		"menus": {
@@ -177,6 +182,12 @@
 				"command": "mcode.previewViz",
 				"key": "ctrl+alt+v",
 				"mac": "ctrl+alt+v",
+				"when": "editorLangId == mcode"
+			},
+			{
+				"command": "mcode.toggleLineComment",
+				"key": "ctrl+/",
+				"mac": "cmd+/",
 				"when": "editorLangId == mcode"
 			}
 		],

@@ -40,6 +40,8 @@ import {
   ServerOptions,
 } from "vscode-languageclient/node";
 
+import { toggleLineComment } from "./toggle-comment";
+
 let client: LanguageClient;
 let clientStarted: Promise<void> | undefined;
 // type a = Parameters<>;
@@ -411,6 +413,12 @@ export async function activate(context: ExtensionContext) {
   );
   context.subscriptions.push(
     commands.registerCommand("mcode.explainCode", () => explainErrorCode())
+  );
+  // Line-comment toggle that knows both MCode comment forms (`//` and `#`).
+  // VS Code's built-in toggleLineComment only knows the single `lineComment`
+  // token from language-configuration.json, so it cannot see `#` lines.
+  context.subscriptions.push(
+    commands.registerCommand("mcode.toggleLineComment", () => toggleLineComment())
   );
 
   // Reconcile build diagnostics against live ones after the fact. The language

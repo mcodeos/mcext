@@ -6,6 +6,7 @@
 #   deps face      scripts/check-deps.py   (dependency one-way law)
 #   build face     cargo build --workspace --all-targets --locked
 #   lib-test face  cargo test --workspace --lib --locked
+#   client-test face  node --test --experimental-strip-types "client/test/*.test.ts"
 #
 # Three rules make the verdict mean something:
 #
@@ -34,12 +35,12 @@
 # Host-agnostic on purpose: nothing here knows about a runner image, a
 # token or a forge.
 #
-# Usage: scripts/ci.sh [--faces "deps build lib-test"]
+# Usage: scripts/ci.sh [--faces "deps build lib-test client-test"]
 set -u
 cd "$(dirname "$0")/.."
 
-FACES="deps build lib-test"
-ALL_FACES="deps build lib-test"
+FACES="deps build lib-test client-test"
+ALL_FACES="deps build lib-test client-test"
 
 # What each face runs, from the repository root.
 face_command() {
@@ -47,6 +48,7 @@ face_command() {
         deps) echo "python3 scripts/check-deps.py ." ;;
         build) echo "cargo build --workspace --all-targets --locked" ;;
         lib-test) echo "cargo test --workspace --lib --locked" ;;
+        client-test) echo "node --test --experimental-strip-types client/test/*.test.ts" ;;
         *) echo "" ;;
     esac
 }
