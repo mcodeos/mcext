@@ -52,6 +52,23 @@ let clientStarted: Promise<void> | undefined;
 // into its own window, instead of a fixed side-by-side pane.
 const VIZ_VIEW_TYPE = "mcode.viz";
 
+/** The kernel capability sheet the server negotiated (LSP notification
+ * `mcode/kernelCaps`). */
+interface KernelCaps {
+  server: string;
+  protocol: string;
+  cli_contract: string;
+  version: string;
+  build: number;
+  schema_version: number;
+  verdict: string;
+  detail?: string | null;
+  legacy: boolean;
+  methods: number;
+  capabilities: string[];
+  summary: string;
+}
+
 // Optional top-module override for no-project files, passed by the previewViz
 // command; keyed by the .mc file's path so re-opening that file's preview
 // (or re-rendering after edits) honours it. Empty for the common case where
@@ -242,6 +259,16 @@ export async function activate(context: ExtensionContext) {
     window.onDidChangeActiveTextEditor(syncMcodeStatus)
   );
   syncMcodeStatus();
+  // The negotiated kernel capability sheet (server → client). The sheet
+  // says what the mcc daemon this session talks to can answer to; it lands
+  // in the status bar tooltip and in the build output channel, so the
+  // negotiation is visible instead of being swallowed by the handshake.
+  client.onNotification("mcode/kernelCaps", (sheet: KernelCaps) => {
+    const line = `kernel capability sheet — ${sheet.summary}`;
+    buildOutput.appendLine(line);
+    mcodeStatus.tooltip = `${line} — click to build the project`;
+  });
+
   clientStarted
     .then(() => {
       mcodeStatus.text = "$(circuit-board) MCode";

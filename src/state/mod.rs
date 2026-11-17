@@ -367,6 +367,11 @@ pub struct WorkspaceState {
 
     /// Serializes RPC calls to mcc (single-threaded server).
     pub rpc_lock: TokioMutex<()>,
+
+    /// The kernel capability sheet the handshake negotiated (U740). The
+    /// verdict decided whether the daemon may be used; this says what it
+    /// can answer to, and stays readable for the rest of the session.
+    pub kernel_caps: tokio::sync::RwLock<Option<crate::features::caps::KernelCaps>>,
 }
 
 impl WorkspaceState {
@@ -381,6 +386,7 @@ impl WorkspaceState {
             erc: ErcState::new(),
             completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
+            kernel_caps: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -395,6 +401,7 @@ impl WorkspaceState {
             erc: ErcState::new(),
             completion: crate::features::comp::CompletionCache::new(),
             rpc_lock: TokioMutex::new(()),
+            kernel_caps: tokio::sync::RwLock::new(None),
         }
     }
 

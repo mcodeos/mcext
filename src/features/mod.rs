@@ -4,6 +4,7 @@
 //! - [`refs`]      — textDocument/references
 //! - [`semtok`]    — textDocument/semanticTokens/full + range
 //! - [`comp`]      — textDocument/completion (auto-completion)
+//! - [`caps`]      — the kernel capability sheet the handshake negotiated
 //! - [`fmt`]       — textDocument/formatting (code formatting)
 //! - [`hover`]     — textDocument/hover
 //! - [`symbols`]   — shared symbol resolution utilities
@@ -12,6 +13,7 @@
 //! Diagnostics are fetched via RPC in `server/mod.rs::parse_and_publish`.
 //! Document links (`usejump`) are disabled — use F12 (goto_definition) instead.
 
+pub mod caps;
 pub mod codeaction;
 pub mod comp;
 pub mod context;

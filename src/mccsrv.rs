@@ -273,6 +273,10 @@ pub struct MccServer {
     /// System root stored at init time so the cold reconnect can replay the
     /// same `set_system_root` without a snapshot from the caller.
     system_root: Option<PathBuf>,
+    /// The capability sheet the handshake negotiated (U740). The verdict
+    /// decides whether the daemon may be used; this sheet is *what* it can
+    /// answer to — it must survive the handshake, not be dropped with it.
+    negotiated: Option<crate::features::caps::KernelCaps>,
     /// Set when an RPC fails at the connection level (daemon died). The
     /// client then reads as disconnected and the publish path schedules one
     /// cold reconnect — crash recovery is a fresh start, since the world is
@@ -305,11 +309,22 @@ impl MccServer {
             restart_count: 0,
             max_restarts: 3,
             explicit_addr: false,
+            negotiated: None,
             slot_root: None,
             system_root: None,
             dead: AtomicBool::new(false),
             reconnecting: AtomicBool::new(false),
         }
+    }
+
+    /// The negotiated capability sheet, if the handshake produced one.
+    pub fn negotiated(&self) -> Option<&crate::features::caps::KernelCaps> {
+        self.negotiated.as_ref()
+    }
+
+    /// Record the sheet a handshake reply carried.
+    fn record_negotiation(&mut self, reply: &serde_json::Value, legacy: bool) {
+        self.negotiated = Some(crate::features::caps::KernelCaps::from_reply(reply, legacy));
     }
 
     /// Create with custom host/port
@@ -407,8 +422,9 @@ impl MccServer {
             match MccRpcClient::new(&self.host, self.port) {
                 Ok(client) => {
                     match timeout(Duration::from_secs(2), Self::handshake(&client, None)).await {
-                        Ok(Ok((caps, _))) => {
+                        Ok(Ok((caps, fallback))) => {
                             info!("Connected to existing mcc server (caps: {})", caps);
+                            self.record_negotiation(&caps, fallback);
                             self.client = Some(client);
                             self.state = ConnectionState::Connected;
                             return Ok(());
@@ -515,6 +531,7 @@ impl MccServer {
                     "handshake accepted, reusing slot daemon at {}:{}",
                     rec.host, rec.port
                 );
+                self.record_negotiation(&reply, fallback);
                 self.client = Some(client);
                 self.host = rec.host;
                 self.port = rec.port;
@@ -556,6 +573,7 @@ impl MccServer {
         match verdict_from_reply(&reply, fallback) {
             HandshakeVerdict::Accept => {
                 info!("handshake accepted, reusing orphan daemon at {host}:{port}");
+                self.record_negotiation(&reply, fallback);
                 self.client = Some(client);
                 self.host = host.to_string();
                 self.port = port;
@@ -702,6 +720,7 @@ impl MccServer {
                 match timeout(Duration::from_secs(2), Self::handshake(&client, triple)).await {
                     Ok(Ok((caps, fallback))) => match verdict_from_reply(&caps, fallback) {
                         HandshakeVerdict::Accept => {
+                            self.record_negotiation(&caps, fallback);
                             self.client = Some(client);
                             self.child = Some(child);
                             self.host = host;

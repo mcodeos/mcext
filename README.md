@@ -20,6 +20,11 @@ netlist preview).
 - **Dependency readiness**: building a project checks the libraries its
   manifest declares and installs the ones that are missing before the build
   runs (see [Dependencies](#dependencies))
+- **Negotiated with the kernel**: on connect the extension hands the mcc
+  daemon its version triple and reads the daemon's capability sheet back.
+  The verdict decides whether the daemon may be used; the sheet says what it
+  can answer to. The sheet is visible in the status bar tooltip and in the
+  `MCode Build` output channel.
 
 ## Dependencies
 

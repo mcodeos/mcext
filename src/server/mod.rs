@@ -644,6 +644,17 @@ impl Backend {
 
 /// MCC server initialization task: start subprocess, load project, fetch symbols,
 /// retry pending diagnostics. Runs in a background tokio task during initialize.
+/// The negotiated kernel capability sheet, pushed to the client once the
+/// handshake has produced one (U740 leg 2). The client shows it in the
+/// status bar and the output channel — the negotiation is visible, not
+/// swallowed by the handshake.
+enum KernelCapsNotification {}
+
+impl tower_lsp::lsp_types::notification::Notification for KernelCapsNotification {
+    type Params = serde_json::Value;
+    const METHOD: &'static str = "mcode/kernelCaps";
+}
+
 async fn run_server_init(
     mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
     project_root: Option<std::path::PathBuf>,
@@ -716,6 +727,39 @@ async fn warm_up_after_connect(
     }
 
     let _ = client.init().await;
+
+    // The negotiation result must land on a readable face: keep the sheet,
+    // log it, and hand it to the client. Before this the handshake verdict
+    // decided whether the daemon may be used and the sheet itself was
+    // dropped (U740 leg 2).
+    {
+        let sheet = mcc_server
+            .read()
+            .await
+            .as_ref()
+            .and_then(|srv| srv.negotiated().cloned());
+        if let Some(sheet) = sheet {
+            info!("kernel capability sheet: {}", sheet.summary());
+            *state.kernel_caps.write().await = Some(sheet.clone());
+            let payload = serde_json::json!({
+                "server": sheet.server,
+                "protocol": sheet.protocol,
+                "cli_contract": sheet.cli_contract,
+                "version": sheet.version,
+                "build": sheet.build,
+                "schema_version": sheet.schema_version,
+                "verdict": sheet.verdict,
+                "detail": sheet.detail,
+                "legacy": sheet.legacy,
+                "methods": sheet.methods.len(),
+                "capabilities": sheet.capabilities,
+                "summary": sheet.summary(),
+            });
+            lsp_client.send_notification::<KernelCapsNotification>(payload).await;
+        } else {
+            info!("no kernel capability sheet: the connection carries no caps reply");
+        }
+    }
 
     if let Some(ref root) = project_root {
         let root_str = root.to_string_lossy();
