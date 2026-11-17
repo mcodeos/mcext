@@ -297,8 +297,9 @@ pub async fn resolve_with_rpc(
             .map(CompletionResponse::Array);
     }
 
-    // §5.10: attr/spec key position is local-only — keys are free-form to
-    // mcc, so the RPC has no attr-key space to ask for.
+    // §5.10: attr/spec key position answers from the file's own assigned
+    // attr names — the key space itself belongs to the kernel, so there is
+    // no local key table to ask the RPC for.
     if let Some(items) = attr_keys(&rope, offset, &ctx, &lapper) {
         return Some(CompletionResponse::Array(items));
     }
@@ -380,11 +381,12 @@ fn curly_member_root(rope: &Rope, offset: usize) -> Option<String> {
     (!token.is_empty()).then_some(token.to_string())
 }
 
-/// §5.10 (S5): attribute-assignment key position. mcc keeps attr keys
-/// free-form (only reserved names and dotted resolution are checked), so the
-/// candidate set is the design's known-key convention plus every attr name
-/// actually assigned in this file (lapper `ATTR_DEF` rows) — corpus-derived
-/// and AST-derived, not re-parsed text.
+/// §5.10 (S5): attribute-assignment key position. The known-key set is the
+/// kernel's truth — mcc owns the attr key space, so the plugin offers no
+/// invented key table (U739 leg 2: the 22-key table is gone). What the
+/// plugin can offer without inventing semantics is every attr name already
+/// assigned in this file (lapper `ATTR_DEF` rows) — AST-derived facts, not a
+/// convention.
 ///
 /// The key side is recognized from the *whole* line (the detection in
 /// `context::detect` only sees text up to the cursor, so a mid-key cursor
@@ -421,20 +423,10 @@ fn attr_keys(rope: &Rope, offset: usize, ctx: &context::CompletionContext, lappe
     }
 
     let mut cands: Vec<Candidate> = Vec::new();
-    // Known-key convention (completion-design §5.10): the BOM/spec faces
-    // recurring across the corpus. Layer 2 so shadow treats them like
-    // container-scope names.
-    for (key, detail) in KNOWN_ATTR_KEYS {
-        cands.push(Candidate {
-            name: key.to_string(),
-            layer: 2,
-            item_kind: CompletionItemKind::PROPERTY,
-            kind_order: 0,
-            detail: detail.to_string(),
-            insert_text: None,
-        });
-    }
     // Attr names already assigned in this file (AST-derived, current lapper).
+    // No known-key convention table here on purpose: the key space belongs
+    // to the kernel, and a locally invented list is the self-made semantics
+    // U739 retires.
     let mut seen = std::collections::HashSet::new();
     for e in lapper {
         if e.kind != crate::features::context::ATTR_DEF {
@@ -448,7 +440,7 @@ fn attr_keys(rope: &Rope, offset: usize, ctx: &context::CompletionContext, lappe
             name,
             layer: 2,
             item_kind: CompletionItemKind::PROPERTY,
-            kind_order: 1,
+            kind_order: 0,
             detail: "assigned here".to_string(),
             insert_text: None,
         });
@@ -460,33 +452,6 @@ fn attr_keys(rope: &Rope, offset: usize, ctx: &context::CompletionContext, lappe
         Some(items)
     }
 }
-
-/// Known attribute keys (completion-design §5.10). Spec-block fields are the
-/// `spec = [ ... ]` subset the design names.
-const KNOWN_ATTR_KEYS: [(&str, &str); 22] = [
-    ("name", "attribute"),
-    ("package", "attribute"),
-    ("partno", "attribute"),
-    ("manufacture", "attribute"),
-    ("symbol", "attribute"),
-    ("footprint", "attribute"),
-    ("pitch", "attribute"),
-    ("voltage", "attribute"),
-    ("input_voltage", "attribute"),
-    ("spec", "spec block"),
-    ("libpath", "attribute"),
-    ("description", "attribute"),
-    ("value", "attribute"),
-    ("tolerance", "attribute"),
-    ("capacitance", "spec field"),
-    ("dielectric", "spec field"),
-    ("resistance", "spec field"),
-    ("current", "spec field"),
-    ("inductance", "spec field"),
-    ("frequency", "spec field"),
-    ("pins", "pin group"),
-    ("data-src-uri", "provenance"),
-];
 
 /// Build the cache key for a context. `member_root` is `Some` only for
 /// member-access positions, keeping `uC.` and `this.` snapshots apart.
@@ -1239,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn attr_key_position_offers_known_and_assigned_keys() {
+    fn attr_key_position_offers_assigned_keys_only() {
         // Cursor mid-key on a row whose `=` is further right — the key side.
         // (context::detect sees only text up to the cursor, so this is
         // exactly the position attr_keys must recognize on its own.)
@@ -1248,12 +1213,10 @@ mod tests {
         let key_row = text.find("package =").unwrap();
         let off = key_row; // cursor before the key's first char — empty prefix
         let ctx = context::detect(&rope, off, &[]);
-        let items = attr_keys(&rope, off, &ctx, &[])
-            .expect("key position must offer candidates");
-        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"partno"), "{labels:?}");
-        assert!(labels.contains(&"package"), "{labels:?}");
-        // The already-assigned attr from the lapper joins the set.
+        // No invented key table (U739 leg 2): with nothing assigned in the
+        // file the plugin has nothing to offer.
+        assert_eq!(attr_keys(&rope, off, &ctx, &[]), None);
+        // The already-assigned attr from the lapper is the only source.
         let lapper = vec![lapper_entry(
             crate::features::context::ATTR_DEF,
             text.find("partno").unwrap(),
@@ -1264,6 +1227,10 @@ mod tests {
         assert!(
             items.iter().any(|i| i.label == "partno" && i.detail.as_deref() == Some("assigned here")),
             "{items:?}"
+        );
+        assert!(
+            !items.iter().any(|i| i.label == "package"),
+            "the plugin must not invent known keys: {items:?}"
         );
     }
 

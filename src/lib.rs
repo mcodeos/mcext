@@ -3,7 +3,6 @@
 //! Library entry: exposes `mcodels` for external use (CLI, other Rust crates).
 //! Binary entry point see `main.rs`.
 
-pub mod agent;
 pub mod common;
 pub mod deps;
 pub mod features;
