@@ -11,7 +11,12 @@ dist/
 client/node_modules/
 client/target/
 .DS_Store
-doc/
+# doc/ holds local working notes; the capability matrix and the
+# per-capability documents are the repository's declared surface, so
+# they are tracked. Everything else under doc/ stays local.
+doc/*
+!doc/features.md
+!doc/features/
 
 # Generated audit artifacts written by mcc with cwd = repo root
 # (render_projection.md / known_missing.md) - never commit

@@ -26,6 +26,32 @@ const MULTILINE_COMMENT_TYPE: i16 = 101;
 ///
 /// Returns `Vec<SemanticToken>`, sorted by position in ascending order.
 pub fn compute(state: &WorkspaceState, uri: &Url) -> Option<Vec<SemanticToken>> {
+    compute_filtered(state, uri, None)
+}
+
+/// Compute semantic tokens restricted to `range`.
+///
+/// The range is the request's window: tokens outside it are dropped instead
+/// of the whole document being returned (the range request used to answer
+/// with the full document — a declared capability that did not do what it
+/// said).
+pub fn compute_range(
+    state: &WorkspaceState,
+    uri: &Url,
+    range: &tower_lsp::lsp_types::Range,
+) -> Option<Vec<SemanticToken>> {
+    let rope = state.document_rope(uri)?;
+    let start = crate::common::position::position_to_offset(range.start, &rope)?;
+    let end = crate::common::position::position_to_offset(range.end, &rope)?;
+    compute_filtered(state, uri, Some((start, end)))
+}
+
+/// Compute semantic tokens, optionally restricted to a byte window.
+fn compute_filtered(
+    state: &WorkspaceState,
+    uri: &Url,
+    window: Option<(usize, usize)>,
+) -> Option<Vec<SemanticToken>> {
     let rope = state.document_rope(uri)?;
     let tokens_ref = state.symbols.sem_tokens.get(uri)?;
     let tokens_guard = tokens_ref.lock().unwrap_or_else(|e| {
@@ -44,6 +70,15 @@ pub fn compute(state: &WorkspaceState, uri: &Url) -> Option<Vec<SemanticToken>> 
     for token in sorted {
         if token.position < 0 || token.length <= 0 {
             continue;
+        }
+
+        // Window crop: keep only tokens that overlap the requested range.
+        if let Some((win_start, win_end)) = window {
+            let tok_start = token.position as usize;
+            let tok_end = tok_start.saturating_add(token.length as usize);
+            if tok_start >= win_end || tok_end <= win_start {
+                continue;
+            }
         }
 
         // Multi-line comments need to be split by line
@@ -487,6 +522,7 @@ mod tests {
     use crate::state::{RpcSemTokens, SemTokenEntry};
     use ropey::Rope;
     use std::sync::{Arc, Mutex};
+    use tower_lsp::lsp_types::{Position, Range};
 
     fn state_with_tokens(text: &str, raw_tokens: Vec<(i16, i32, i32)>) -> (WorkspaceState, Url) {
         let state = WorkspaceState::new();
@@ -510,6 +546,30 @@ mod tests {
     }
 
     // ── compute() tests ──
+
+    #[test]
+    fn range_request_keeps_only_the_window() {
+        // Three tokens, one per line; the request asks for line 1 only.
+        let (state, uri) = state_with_tokens("aaaa\nbbbb\ncccc\n", vec![(0, 0, 4), (1, 5, 4), (2, 10, 4)]);
+        let full = compute(&state, &uri).unwrap();
+        assert_eq!(full.len(), 3);
+
+        let range = Range::new(Position::new(1, 0), Position::new(1, 4));
+        let windowed = compute_range(&state, &uri, &range).unwrap();
+        assert_eq!(windowed.len(), 1, "the range request must not answer the whole document");
+        // The surviving token sits on line 1 (delta encoded from line 0).
+        assert_eq!(windowed[0].delta_line, 1);
+        assert_eq!(windowed[0].delta_start, 0);
+    }
+
+    #[test]
+    fn range_request_keeps_overlapping_tokens() {
+        // A token that starts before the window but reaches into it stays.
+        let (state, uri) = state_with_tokens("aaaa\nbbbb\n", vec![(0, 2, 6)]);
+        let range = Range::new(Position::new(1, 0), Position::new(1, 2));
+        let windowed = compute_range(&state, &uri, &range).unwrap();
+        assert_eq!(windowed.len(), 1);
+    }
 
     #[test]
     fn empty_tokens_returns_some_empty() {

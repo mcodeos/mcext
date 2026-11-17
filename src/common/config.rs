@@ -28,10 +28,6 @@ pub struct ServerConfig {
     #[serde(default = "default_true")]
     pub semantic_tokens_enabled: bool,
 
-    /// Whether inlay hints are enabled (enabled by default)
-    #[serde(default = "default_true")]
-    pub inlay_hints_enabled: bool,
-
     /// Diagnostics debounce interval (ms)
     #[serde(default = "default_debounce_ms")]
     pub diagnostics_debounce_ms: u64,
@@ -95,7 +91,6 @@ impl ServerConfig {
             system_root: None,
             project_root: None,
             semantic_tokens_enabled: true,
-            inlay_hints_enabled: true,
             diagnostics_debounce_ms: 150,
             format_tab_size: 4,
             format_insert_final_newline: true,
@@ -114,7 +109,6 @@ mod tests {
     fn default_is_sensible() {
         let cfg = ServerConfig::default();
         assert!(cfg.semantic_tokens_enabled);
-        assert!(cfg.inlay_hints_enabled);
         assert_eq!(cfg.diagnostics_debounce_ms, 150);
         assert_eq!(cfg.format_tab_size, 4);
     }
@@ -133,7 +127,6 @@ mod tests {
         assert_eq!(cfg.format_tab_size, 2);
         assert!(!cfg.semantic_tokens_enabled);
         // Untouched keys keep their defaults.
-        assert!(cfg.inlay_hints_enabled);
         assert_eq!(cfg.format_insert_final_newline, true);
     }
 

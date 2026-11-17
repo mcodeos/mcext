@@ -621,7 +621,6 @@ impl Backend {
             }),
             document_formatting_provider: Some(OneOf::Left(true)),
             document_range_formatting_provider: Some(OneOf::Left(true)),
-            inlay_hint_provider: Some(OneOf::Left(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             // Textual faces: brace/comment folding, cursor occurrence
             // highlight, expand-selection chains — all local, no RPC.
@@ -1729,26 +1728,10 @@ impl LanguageServer for Backend {
         ))
     }
 
-    // Phase 4.3: inline hints
-    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        let uri = params.text_document.uri.clone();
-        let span = tracing::debug_span!("inlay_hint", uri = %uri.path());
-        let _guard = span.enter();
-
-        let _rope = match self.state.document_rope(&uri) {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        if !self.current_config().inlay_hints_enabled {
-            return Ok(None);
-        }
-        Ok(crate::features::inhint::compute(
-            &self.state,
-            &uri,
-            params.range,
-        ))
-    }
+    // Inline hints: not declared. The provider used to answer with an empty
+    // list — a declared capability that never carried anything. It comes
+    // back when the kernel exposes a type face to compute hints from (U738
+    // leg 3).
 
     async fn goto_definition(
         &self,
@@ -2054,7 +2037,9 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensRangeResult>> {
         debug!("semantic_tokens_range: {}", params.text_document.uri.path());
         let uri = params.text_document.uri;
-        let tokens = crate::features::semtok::compute(&self.state, &uri);
+        // The range request answers with the tokens of that range only —
+        // it used to answer with the whole document.
+        let tokens = crate::features::semtok::compute_range(&self.state, &uri, &params.range);
         let tokens = tokens.unwrap_or_default();
         Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
             result_id: None,
@@ -2089,9 +2074,6 @@ impl LanguageServer for Backend {
         if let Some(v) = obj.get("semanticTokensEnabled").and_then(|v| v.as_bool()) {
             merged.semantic_tokens_enabled = v;
         }
-        if let Some(v) = obj.get("inlayHintsEnabled").and_then(|v| v.as_bool()) {
-            merged.inlay_hints_enabled = v;
-        }
         if let Some(v) = obj.get("diagnosticsDebounceMs").and_then(|v| v.as_u64()) {
             merged.diagnostics_debounce_ms = v;
         }
@@ -2102,10 +2084,9 @@ impl LanguageServer for Backend {
             merged.format_insert_final_newline = v;
         }
         info!(
-            "config updated: tabSize={} semtok={} inlay={} debounce={}ms",
+            "config updated: tabSize={} semtok={} debounce={}ms",
             merged.format_tab_size,
             merged.semantic_tokens_enabled,
-            merged.inlay_hints_enabled,
             merged.diagnostics_debounce_ms
         );
         // The scheduler is built once at startup with the default debounce;
@@ -2253,13 +2234,9 @@ impl LanguageServer for Backend {
         }
     }
 
-    // Phase 5: document links disabled — hover handles this now
-    async fn document_link(
-        &self,
-        _params: DocumentLinkParams,
-    ) -> Result<Option<Vec<DocumentLink>>> {
-        Ok(None)
-    }
+    // Document links: not declared. The handler used to answer `None` for
+    // every request — a face that never carried anything. Hover and F12
+    // (goto_definition) carry the navigation instead (U738 leg 3).
 
     // Phase 5.1: quick fixes from the request's own diagnostics — the only
     // concrete one is "Explain E…", routed to the `mcode.explain` command.

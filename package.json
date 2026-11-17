@@ -133,12 +133,6 @@
 					"default": true,
 					"description": "Enable semantic token highlighting."
 				},
-				"mcodels.inlayHintsEnabled": {
-					"type": "boolean",
-					"scope": "resource",
-					"default": true,
-					"description": "Enable inlay hints."
-				},
 				"mcodels.diagnosticsDebounceMs": {
 					"type": "number",
 					"scope": "resource",

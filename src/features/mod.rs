@@ -5,7 +5,6 @@
 //! - [`semtok`]    — textDocument/semanticTokens/full + range
 //! - [`comp`]      — textDocument/completion (auto-completion)
 //! - [`fmt`]       — textDocument/formatting (code formatting)
-//! - [`inhint`]    — textDocument/inlayHint (inline hints)
 //! - [`hover`]     — textDocument/hover
 //! - [`symbols`]   — shared symbol resolution utilities
 //! - [`erc`]       — mcc `erc` RPC → `mcc-erc` diagnostics (save/build triggered)
@@ -23,7 +22,6 @@ pub mod fmt;
 pub mod gotodef;
 pub mod highlight;
 pub mod hover;
-pub mod inhint;
 pub mod refs;
 pub mod selrange;
 pub mod semtok;

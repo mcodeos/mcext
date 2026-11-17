@@ -4,14 +4,19 @@ A VSCode language extension providing language server features for MCode files (
 
 ## Features
 
-- **Semantic Highlighting**: Syntax highlighting based on semantic token types
-- **Auto-completion**: Context-aware completion suggestions
-- **Go to Definition**: Navigate to symbol definitions
-- **Find References**: Locate all references to a symbol
-- **Diagnostics**: Real-time error and warning detection
-- **Inlay Hints**: Type annotations and parameter hints
-- **Formatting**: Code formatting support
-- **Cross-file Support**: Full language server features across multiple files
+The capability list lives in one place: **[doc/features.md](doc/features.md)**
+— the feature matrix, one row per capability, with its LSP entry point, its
+implementation status and a link to the capability's own document. That
+matrix is the only implementation truth in this repository; this README does
+not restate it.
+
+What is in place today: semantic highlighting (full / delta / range),
+auto-completion, go to definition, find references, diagnostics, hover,
+rename, document outline, formatting, folding, selection range, document
+highlight, code actions, workspace symbol search, snippets, and the
+infrastructure around them (settings, commands, keybindings, status bar,
+netlist preview).
+
 - **Dependency readiness**: building a project checks the libraries its
   manifest declares and installs the ones that are missing before the build
   runs (see [Dependencies](#dependencies))
