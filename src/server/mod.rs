@@ -780,11 +780,11 @@ async fn warm_up_after_connect(
                 "Auto-loading {} dependencies from project manifest...",
                 config.dependency_names().len()
             );
-            for lib_name in config.dependency_names() {
+            for lib_name in config.dependency_load_names(root) {
                 info!("Calling lib.load for: {}", lib_name);
                 let lib_result = {
                     let _rpc_guard = state.rpc_lock.lock().await;
-                    client.lib_load(lib_name).await
+                    client.lib_load(&lib_name).await
                 };
                 if lib_result.is_ok() {
                     info!("Successfully loaded lib: {}", lib_name);
@@ -793,7 +793,7 @@ async fn warm_up_after_connect(
                 }
                 let show_result = {
                     let _rpc_guard = state.rpc_lock.lock().await;
-                    client.lib_show(lib_name).await
+                    client.lib_show(&lib_name).await
                 };
                 match show_result {
                     Ok(info) => {

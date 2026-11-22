@@ -9,6 +9,7 @@
 //! - Auto-loading dependencies when opening a workspace folder
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -79,6 +80,50 @@ fn default_version() -> String {
     "0.1.0".into()
 }
 
+/// The lock face's version per library: `mcode.lock` names one section per
+/// library, and a section without a `version` (the `rev` shape) states no
+/// version.
+fn read_lock_versions(root: &Path) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(content) = std::fs::read_to_string(root.join("mcode.lock")) else {
+        return out;
+    };
+    let Ok(parsed) = content.parse::<toml::Value>() else {
+        return out;
+    };
+    let Some(table) = parsed.as_table() else {
+        return out;
+    };
+    for (name, section) in table {
+        let Some(version) = section.get("version").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        out.insert(name.clone(), version.to_string());
+    }
+    out
+}
+
+/// The selection face's version per library: `mcode.selection.toml` keeps a
+/// `[selection]` table of `name = "version"`.
+fn read_selection_versions(root: &Path) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(content) = std::fs::read_to_string(root.join("mcode.selection.toml")) else {
+        return out;
+    };
+    let Ok(parsed) = content.parse::<toml::Value>() else {
+        return out;
+    };
+    let Some(table) = parsed.get("selection").and_then(|s| s.as_table()) else {
+        return out;
+    };
+    for (name, version) in table {
+        if let Some(version) = version.as_str() {
+            out.insert(name.clone(), version.to_string());
+        }
+    }
+    out
+}
+
 impl ProjectConfig {
     /// Load the project manifest from a directory. Tries the manifest names
     /// in [`PROJECT_MANIFEST_NAMES`] priority order (same as the mcc CLI).
@@ -147,6 +192,34 @@ impl ProjectConfig {
     /// Get list of dependency names
     pub fn dependency_names(&self) -> Vec<&String> {
         self.dependencies.keys().collect()
+    }
+
+    /// The dependency names as `lib.load` wants them: the name plus the
+    /// version the project stands on.
+    ///
+    /// `lib.load` refuses a bare name when the store holds several copies of
+    /// that library ("installed as multiple versions ... no explicit version
+    /// was given"), so a bare name silently loads *nothing* on a machine
+    /// with a populated store — and the editor's world then misses every
+    /// component class the board names. The project's own lock face
+    /// (`mcode.lock`) is the build's only authority; the selection face
+    /// (`mcode.selection.toml`) is the world's copy list. Both name one
+    /// version per library; the lock wins where the two differ, and a
+    /// library neither face pins loads by its bare name (the store holds one
+    /// copy, or the load fails loudly, which is the honest outcome).
+    pub fn dependency_load_names(&self, root: &Path) -> Vec<String> {
+        let locked = read_lock_versions(root);
+        let selected = read_selection_versions(root);
+        self.dependencies
+            .keys()
+            .map(|name| {
+                let version = locked.get(name).or_else(|| selected.get(name));
+                match version {
+                    Some(v) => format!("{name}@{v}"),
+                    None => name.clone(),
+                }
+            })
+            .collect()
     }
 
     /// The declared dependencies with their version requirements.
@@ -251,6 +324,49 @@ mcode = "*"
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&orphan).ok();
+    }
+
+    #[test]
+    fn test_dependency_load_names_pins_versions() {
+        let dir = std::env::temp_dir().join(format!("mcext_loadnames_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            "[project]\nname = \"p\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n\n[dependencies]\nmcode = \"1.40\"\nsmbj5 = \">= 0.11\"\nloose = \"*\"\n",
+        )
+        .unwrap();
+        // The lock face names one version per library.
+        std::fs::write(
+            dir.join("mcode.lock"),
+            "[mcode]\nversion = \"1.40\"\nrev = \"0\"\n\n[smbj5]\nversion = \"0.16\"\n",
+        )
+        .unwrap();
+        // The selection face covers what the lock leaves out.
+        std::fs::write(
+            dir.join("mcode.selection.toml"),
+            "format = 1\n\n[selection]\nmcode = \"1.40\"\nloose = \"0.7\"\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from(&dir).expect("manifest should load");
+        let names = config.dependency_load_names(&dir);
+        assert_eq!(names, vec!["mcode@1.40", "smbj5@0.16", "loose@0.7"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_dependency_load_names_without_faces_stays_bare() {
+        let dir = std::env::temp_dir().join(format!("mcext_loadnames_bare_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            "[project]\nname = \"p\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n\n[dependencies]\nmcode = \"1.40\"\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load_from(&dir).expect("manifest should load");
+        assert_eq!(config.dependency_load_names(&dir), vec!["mcode"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
