@@ -626,6 +626,13 @@ impl MccServer {
                 .stdout(Stdio::null()) // Don't capture stdout, let mcc write directly
                 .stderr(Stdio::inherit()) // Inherit stderr for debugging
                 .kill_on_drop(true);
+            // The data root the editor was told to use reaches the daemon
+            // through the environment it inherits: the daemon resolves its
+            // data root when it starts, and a root named only afterwards
+            // arrives too late for the libraries it loads on the way up.
+            if let Some(root) = self.system_root.as_ref() {
+                cmd.env("MCC_SYSTEM_ROOT", root);
+            }
             if let Some(dir) = slot.and_then(|s| s.cwd.as_ref()) {
                 cmd.current_dir(dir);
             } else {
