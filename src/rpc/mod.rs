@@ -193,6 +193,14 @@ impl MccRpcClient {
         Ok(())
     }
 
+    /// The world bootstrap in one call: the kernel projects the project's
+    /// lock — loads every library it names — and answers with the loaded
+    /// set and the loud gap list.
+    pub async fn lib_bootstrap(&self) -> Result<LibBootstrap, RpcError> {
+        let result = self.call("lib.bootstrap", json!({})).await?;
+        serde_json::from_value(result).map_err(|e| RpcError::Parse(e.to_string()))
+    }
+
     /// List loaded libraries
     pub async fn lib_list(&self) -> Result<LibListResponse, RpcError> {
         let result = self.call("lib.list", json!({})).await?;
@@ -447,6 +455,21 @@ pub struct ErcViolation {
 pub struct LibListResponse {
     pub loaded: Vec<LibEntry>,
     pub installed: Vec<LibEntry>,
+}
+
+/// The answer to `lib.bootstrap`: the lock projected — what loaded, and
+/// the loud gap list for what did not.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibBootstrap {
+    pub loaded: Vec<String>,
+    pub gaps: Vec<LibGap>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibGap {
+    pub name: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

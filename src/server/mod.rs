@@ -788,66 +788,64 @@ async fn warm_up_after_connect(
     if let Some(ref root) = project_root {
         if let Some(config) = ProjectConfig::load_from(root) {
             info!(
-                "Auto-loading {} dependencies from project manifest...",
+                "Project manifest names {} dependencies — projecting the lock in one call...",
                 config.dependency_names().len()
             );
-            let mut lib_gaps: Vec<String> = Vec::new();
-            for lib_name in config.dependency_load_names(root) {
-                info!("Calling lib.load for: {}", lib_name);
-                let lib_result = {
-                    let _rpc_guard = state.rpc_lock.lock().await;
-                    client.lib_load(&lib_name).await
-                };
-                if let Err(e) = &lib_result {
-                    warn!("Failed to load lib '{}': {:?}", lib_name, e);
-                    lib_gaps.push(format!(
-                        "{}: {}",
-                        lib_name,
-                        match e {
-                            crate::rpc::RpcError::Server(code, msg) => {
-                                format!("[{code}] {msg}")
-                            }
-                            other => format!("{other}"),
-                        }
-                    ));
-                } else {
-                    info!("Successfully loaded lib: {}", lib_name);
-                }
-                let show_result = {
-                    let _rpc_guard = state.rpc_lock.lock().await;
-                    client.lib_show(&lib_name).await
-                };
-                match show_result {
-                    Ok(info) => {
-                        info!(
-                            "Lib info: name={} symbols={} modules={} components={} interfaces={}",
-                            info.name,
-                            info.total_symbols,
-                            info.module_count,
-                            info.component_count,
-                            info.interface_count
+            let bootstrap = {
+                let _rpc_guard = state.rpc_lock.lock().await;
+                client.lib_bootstrap().await
+            };
+            match bootstrap {
+                Ok(b) => {
+                    info!(
+                        "lib.bootstrap: {} loaded, {} gaps, complete={}",
+                        b.loaded.len(),
+                        b.gaps.len(),
+                        b.complete
+                    );
+                    if !b.complete {
+                        let lines: Vec<String> = b
+                            .gaps
+                            .iter()
+                            .map(|g| format!("{}: {}", g.name, g.reason))
+                            .collect();
+                        let detail = lines.join("\n");
+                        error!(
+                            "lock↔store gap: {} library/libraries the lock names did not \
+                             load — the world is standing on an incomplete library set:\n{}",
+                            b.gaps.len(),
+                            detail
                         );
-                    }
-                    Err(e) => {
-                        warn!("lib_show failed: {:?}", e);
+                        lsp_client
+                            .send_notification::<LibraryGapNotification>(serde_json::json!({
+                                "count": b.gaps.len(),
+                                "gaps": b.gaps,
+                                "detail": detail,
+                            }))
+                            .await;
                     }
                 }
-            }
-            if !lib_gaps.is_empty() {
-                let detail = lib_gaps.join("\n");
-                error!(
-                    "lock↔store gap: {} library/libraries the lock names did not \
-                     load — the world is standing on an incomplete library set:\n{}",
-                    lib_gaps.len(),
-                    detail
-                );
-                lsp_client
-                    .send_notification::<LibraryGapNotification>(serde_json::json!({
-                        "count": lib_gaps.len(),
-                        "gaps": lib_gaps,
-                        "detail": detail,
-                    }))
-                    .await;
+                // Older kernels answer method-not-found: walk the feed loop
+                // so the world still loads — the primitive is the forward
+                // face, the loop its fallback, not a second authority.
+                Err(e) if matches!(e, crate::rpc::RpcError::Server(32601, _) | crate::rpc::RpcError::Http(404, _)) => {
+                    info!("lib.bootstrap unavailable on this kernel — falling back to per-library loads");
+                    for lib_name in config.dependency_load_names(root) {
+                        let _rpc_guard = state.rpc_lock.lock().await;
+                        if let Err(e) = client.lib_load(&lib_name).await {
+                            warn!("Failed to load lib '{}': {:?}", lib_name, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("lib.bootstrap failed: {:?} — falling back to per-library loads", e);
+                    for lib_name in config.dependency_load_names(root) {
+                        let _rpc_guard = state.rpc_lock.lock().await;
+                        if let Err(e) = client.lib_load(&lib_name).await {
+                            warn!("Failed to load lib '{}': {:?}", lib_name, e);
+                        }
+                    }
+                }
             }
 
             let entry = config.entry_path(root);
