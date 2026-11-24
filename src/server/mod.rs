@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// mcode LSP server
 pub struct Backend {
@@ -655,6 +655,17 @@ impl tower_lsp::lsp_types::notification::Notification for KernelCapsNotification
     const METHOD: &'static str = "mcode/kernelCaps";
 }
 
+/// The lock↔store gap the world bootstrap hit: the lock names libraries
+/// the store does not hold (or resolve refused). One loud report for the
+/// whole bootstrap instead of one swallowed warn per library — an empty
+/// library world must never pose as a loaded one (U795, ARC-522 EN5).
+enum LibraryGapNotification {}
+
+impl tower_lsp::lsp_types::notification::Notification for LibraryGapNotification {
+    type Params = serde_json::Value;
+    const METHOD: &'static str = "mcode/libraryGap";
+}
+
 async fn run_server_init(
     mcc_server: Arc<tokio::sync::RwLock<Option<MccServer>>>,
     project_root: Option<std::path::PathBuf>,
@@ -780,16 +791,27 @@ async fn warm_up_after_connect(
                 "Auto-loading {} dependencies from project manifest...",
                 config.dependency_names().len()
             );
+            let mut lib_gaps: Vec<String> = Vec::new();
             for lib_name in config.dependency_load_names(root) {
                 info!("Calling lib.load for: {}", lib_name);
                 let lib_result = {
                     let _rpc_guard = state.rpc_lock.lock().await;
                     client.lib_load(&lib_name).await
                 };
-                if lib_result.is_ok() {
-                    info!("Successfully loaded lib: {}", lib_name);
+                if let Err(e) = &lib_result {
+                    warn!("Failed to load lib '{}': {:?}", lib_name, e);
+                    lib_gaps.push(format!(
+                        "{}: {}",
+                        lib_name,
+                        match e {
+                            crate::rpc::RpcError::Server(code, msg) => {
+                                format!("[{code}] {msg}")
+                            }
+                            other => format!("{other}"),
+                        }
+                    ));
                 } else {
-                    warn!("Failed to load lib '{}': {:?}", lib_name, lib_result.err());
+                    info!("Successfully loaded lib: {}", lib_name);
                 }
                 let show_result = {
                     let _rpc_guard = state.rpc_lock.lock().await;
@@ -810,6 +832,22 @@ async fn warm_up_after_connect(
                         warn!("lib_show failed: {:?}", e);
                     }
                 }
+            }
+            if !lib_gaps.is_empty() {
+                let detail = lib_gaps.join("\n");
+                error!(
+                    "lock↔store gap: {} library/libraries the lock names did not \
+                     load — the world is standing on an incomplete library set:\n{}",
+                    lib_gaps.len(),
+                    detail
+                );
+                lsp_client
+                    .send_notification::<LibraryGapNotification>(serde_json::json!({
+                        "count": lib_gaps.len(),
+                        "gaps": lib_gaps,
+                        "detail": detail,
+                    }))
+                    .await;
             }
 
             let entry = config.entry_path(root);
