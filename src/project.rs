@@ -174,27 +174,6 @@ fn read_lock_versions(root: &Path) -> HashMap<String, String> {
     out
 }
 
-/// The selection face's version per library: `mcode.selection.toml` keeps a
-/// `[selection]` table of `name = "version"`.
-fn read_selection_versions(root: &Path) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let Ok(content) = std::fs::read_to_string(root.join("mcode.selection.toml")) else {
-        return out;
-    };
-    let Ok(parsed) = content.parse::<toml::Value>() else {
-        return out;
-    };
-    let Some(table) = parsed.get("selection").and_then(|s| s.as_table()) else {
-        return out;
-    };
-    for (name, version) in table {
-        if let Some(version) = version.as_str() {
-            out.insert(name.clone(), version.to_string());
-        }
-    }
-    out
-}
-
 impl ProjectConfig {
     /// Load the project manifest from a directory. Tries the manifest names
     /// in [`PROJECT_MANIFEST_NAMES`] priority order (same as the mcc CLI).
@@ -289,19 +268,18 @@ impl ProjectConfig {
     /// that library ("installed as multiple versions ... no explicit version
     /// was given"), so a bare name silently loads *nothing* on a machine
     /// with a populated store — and the editor's world then misses every
-    /// component class the board names. The project's own lock face
-    /// (`mcode.lock`) is the build's only authority; the selection face
-    /// (`mcode.selection.toml`) is the world's copy list. Both name one
-    /// version per library; the lock wins where the two differ, and a
-    /// library neither face pins loads by its bare name (the store holds one
-    /// copy, or the load fails loudly, which is the honest outcome).
+    /// component class the board names. The project's own lock
+    /// (`mcode.lock`) is the world's only version record — the selection
+    /// projection is the lock read in memory, and no projection file
+    /// exists to read. A library the lock does not pin loads by its bare
+    /// name (the store holds one copy, or the load fails loudly, which is
+    /// the honest outcome).
     pub fn dependency_load_names(&self, root: &Path) -> Vec<String> {
         let locked = read_lock_versions(root);
-        let selected = read_selection_versions(root);
         self.dependencies
             .keys()
             .map(|name| {
-                let version = locked.get(name).or_else(|| selected.get(name));
+                let version = locked.get(name);
                 match version {
                     Some(v) => format!("{name}@{v}"),
                     None => name.clone(),
@@ -471,22 +449,25 @@ mcode = "*"
             "[project]\nname = \"p\"\nversion = \"0.1.0\"\nentry = \"src/main.mc\"\n\n[dependencies]\nmcode = \"1.40\"\nsmbj5 = \">= 0.11\"\nloose = \"*\"\n",
         )
         .unwrap();
-        // The lock face names one version per library.
+        // The lock names one version per library; it is the world's only
+        // version record (the selection projection is the lock read in
+        // memory — no projection file exists to read).
         std::fs::write(
             dir.join("mcode.lock"),
             "[mcode]\nversion = \"1.40\"\nrev = \"0\"\n\n[smbj5]\nversion = \"0.16\"\n",
         )
         .unwrap();
-        // The selection face covers what the lock leaves out.
+        // A stale projection left by an earlier world is not a record:
+        // the editor does not read it.
         std::fs::write(
             dir.join("mcode.selection.toml"),
-            "format = 1\n\n[selection]\nmcode = \"1.40\"\nloose = \"0.7\"\n",
+            "format = 1\n\n[selection]\nmcode = \"9.9\"\nloose = \"9.9\"\n",
         )
         .unwrap();
 
         let config = ProjectConfig::load_from(&dir).expect("manifest should load");
         let names = config.dependency_load_names(&dir);
-        assert_eq!(names, vec!["mcode@1.40", "smbj5@0.16", "loose@0.7"]);
+        assert_eq!(names, vec!["mcode@1.40", "smbj5@0.16", "loose"]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
