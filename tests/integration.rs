@@ -153,7 +153,12 @@ async fn project_slot_spawn_discovers_through_pid_file() {
     let mut lines = record.lines();
     let pid: u32 = lines.next().expect("pid line").parse().expect("pid");
     let addr = lines.next().expect("addr line");
-    let port: u16 = addr.split_once(':').expect("host:port").1.parse().expect("port");
+    let port: u16 = addr
+        .split_once(':')
+        .expect("host:port")
+        .1
+        .parse()
+        .expect("port");
     assert_ne!(port, 8080, "project slot must not bind the well-known port");
     assert!(
         addr.starts_with("127.0.0.1"),
@@ -498,7 +503,10 @@ async fn erc_reports_driver_conflict_as_violations() {
     let resp = client.erc().await;
     assert!(resp.is_ok(), "erc RPC failed: {:?}", resp.err());
     let resp = resp.unwrap();
-    assert_eq!(resp.top, "erc_top", "top module should be the ERC fixture's");
+    assert_eq!(
+        resp.top, "erc_top",
+        "top module should be the ERC fixture's"
+    );
     let conflict = resp
         .violations
         .iter()
@@ -506,7 +514,10 @@ async fn erc_reports_driver_conflict_as_violations() {
         .expect("driver-conflict violation must fire");
     assert_eq!(conflict.severity, "error");
     assert!(
-        resp.summary.get("violations").and_then(|v| v.as_u64()).is_some(),
+        resp.summary
+            .get("violations")
+            .and_then(|v| v.as_u64())
+            .is_some(),
         "summary.violations must be present"
     );
     // Cleanup so the private port frees up for a rerun.
@@ -556,10 +567,14 @@ async fn refs_cross_file_finds_definition_and_references() {
         def.uri
     );
     // The ClassRef in the probe file itself.
-    let here = resp.refs.iter().find(|r| {
-        !r.def && r.uri.ends_with("refs_main.mc")
-    });
-    assert!(here.is_some(), "the probe file's own ClassRef must be present");
+    let here = resp
+        .refs
+        .iter()
+        .find(|r| !r.def && r.uri.ends_with("refs_main.mc"));
+    assert!(
+        here.is_some(),
+        "the probe file's own ClassRef must be present"
+    );
     for r in &resp.refs {
         assert!(r.end >= r.pos, "span end must not precede start");
     }
@@ -741,9 +756,21 @@ async fn hover_ground_appends_show_card_and_falls_back() {
     let tower_lsp::lsp_types::HoverContents::Markup(mc) = &grounded.contents else {
         panic!("expected Markup");
     };
-    assert!(mc.value.starts_with("`helper_chip` (component)"), "{}", mc.value);
-    assert!(mc.value.contains("---"), "card separator missing: {}", mc.value);
-    assert!(mc.value.contains("3 pin(s)"), "pin table missing: {}", mc.value);
+    assert!(
+        mc.value.starts_with("`helper_chip` (component)"),
+        "{}",
+        mc.value
+    );
+    assert!(
+        mc.value.contains("---"),
+        "card separator missing: {}",
+        mc.value
+    );
+    assert!(
+        mc.value.contains("3 pin(s)"),
+        "pin table missing: {}",
+        mc.value
+    );
 
     // Unknown symbol: show fails, the local hover comes back byte-identical.
     let missing = mcodels::features::hover::Subject {
@@ -824,4 +851,96 @@ async fn net_layer_and_family_members_feed_completion() {
     );
 
     let _ = server.stop().await;
+}
+
+/// Live-kernel round trip of the world bootstrap (U795, 304 §5): a project
+/// slot daemon is spawned, the project root is set, and one `lib.bootstrap`
+/// call must project the lock — an empty lock comes back complete, a lock
+/// naming a library the store cannot hold comes back with a loud gap naming
+/// it, and no lock at all is a refused bootstrap (the lock is the build's
+/// only authority). The feed loop is the fallback, never the answer face.
+#[tokio::test]
+async fn lib_bootstrap_projects_the_lock_live() {
+    let manifest = "[project]\nname = \"boot\",\nversion = \"0.1.0\"\nentry = \"main.mc\"\n";
+
+    async fn roundtrip(proj: &std::path::Path, what: &str) -> mcodels::rpc::LibBootstrap {
+        let mut server = MccServer::new();
+        server
+            .start(Some(proj))
+            .await
+            .expect("project-slot daemon should start");
+        assert!(wait_connected(&server).await, "daemon should connect");
+        let client = server.client().cloned().expect("rpc client present");
+        client
+            .set_project_root(proj.to_str().expect("utf8 root"))
+            .await
+            .expect("set_project_root failed");
+        let boot = client
+            .lib_bootstrap()
+            .await
+            .unwrap_or_else(|e| panic!("lib.bootstrap ({what}) failed: {e:?}"));
+        let _ = server.stop().await;
+        boot
+    }
+
+    // 1. Empty lock: nothing to project → complete, no gaps.
+    let proj = std::env::temp_dir().join(format!("mcext-bootstrap-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&proj).expect("temp project dir");
+    std::fs::write(proj.join("project.toml"), manifest).expect("project manifest");
+    std::fs::write(proj.join("mcode.lock"), "").expect("empty lock");
+    let boot = roundtrip(&proj, "empty lock").await;
+    assert!(boot.complete, "empty lock must project complete");
+    assert!(boot.gaps.is_empty(), "empty lock has no gaps");
+    let _ = std::fs::remove_dir_all(&proj);
+
+    // 2. Lock naming a library the store cannot hold: the gap must be loud
+    // and name the missing library — an empty world must never pose as a
+    // loaded one.
+    let proj = std::env::temp_dir().join(format!("mcext-bootstrap-gap-{}", std::process::id()));
+    std::fs::create_dir_all(&proj).expect("temp project dir");
+    std::fs::write(proj.join("project.toml"), manifest).expect("project manifest");
+    std::fs::write(
+        proj.join("mcode.lock"),
+        "[no-such-library-e2e]\nversion = \"1.0\"\n",
+    )
+    .expect("gap lock");
+    let boot = roundtrip(&proj, "gap lock").await;
+    assert!(
+        !boot.complete,
+        "a lock naming an absent library must not project complete"
+    );
+    assert!(
+        boot.gaps.iter().any(|g| g.name == "no-such-library-e2e"),
+        "gap must name the missing library, got {:?}",
+        boot.gaps
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+
+    // 3. No lock at all: the bootstrap refuses loudly (error 32107) — the
+    // lock is the build's only authority, a silent empty answer would mask
+    // an unresolved project.
+    let proj = std::env::temp_dir().join(format!("mcext-bootstrap-nolock-{}", std::process::id()));
+    std::fs::create_dir_all(&proj).expect("temp project dir");
+    std::fs::write(proj.join("project.toml"), manifest).expect("project manifest");
+    let mut server = MccServer::new();
+    server
+        .start(Some(&proj))
+        .await
+        .expect("project-slot daemon should start");
+    assert!(wait_connected(&server).await, "daemon should connect");
+    let client = server.client().cloned().expect("rpc client present");
+    client
+        .set_project_root(proj.to_str().expect("utf8 root"))
+        .await
+        .expect("set_project_root failed");
+    let err = client
+        .lib_bootstrap()
+        .await
+        .expect_err("bootstrap without a lock must be refused");
+    assert!(
+        format!("{err:?}").contains("32107") || format!("{err}").contains("lock"),
+        "refusal must name the lock, got {err:?}"
+    );
+    let _ = server.stop().await;
+    let _ = std::fs::remove_dir_all(&proj);
 }

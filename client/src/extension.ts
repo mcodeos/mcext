@@ -69,6 +69,22 @@ interface KernelCaps {
   summary: string;
 }
 
+/** One library the lock names that the store could not load (LSP
+ * notification `mcode/libraryGap`, payload `gaps[]`). */
+interface LibGap {
+  name: string;
+  reason: string;
+}
+
+/** The lock↔store gap the world bootstrap hit: the project's lock names
+ * libraries the store does not hold — the world stands on an incomplete
+ * library set (U795, ARC-522 EN5). */
+interface LibraryGap {
+  count: number;
+  gaps: LibGap[];
+  detail: string;
+}
+
 // Optional top-module override for no-project files, passed by the previewViz
 // command; keyed by the .mc file's path so re-opening that file's preview
 // (or re-rendering after edits) honours it. Empty for the common case where
@@ -268,6 +284,25 @@ export async function activate(context: ExtensionContext) {
     buildOutput.appendLine(line);
     mcodeStatus.tooltip = `${line} — click to build the project`;
   });
+
+  // The lock↔store gap the world bootstrap hit (server → client, one loud
+  // report per bootstrap). An empty library world must never pose as a
+  // loaded one: the status bar turns into a persistent warning naming the
+  // missing libraries, the full report lands in the output channel, and
+  // clicking the item opens that report (U795, ARC-522 EN5).
+  client.onNotification("mcode/libraryGap", (gap: LibraryGap) => {
+    const headline = `library gap: ${gap.count} library/libraries the lock names did not load`;
+    buildOutput.appendLine(headline);
+    buildOutput.appendLine(gap.detail);
+    mcodeStatus.text = `$(warning) MCode (${gap.count} lib gap)`;
+    mcodeStatus.tooltip = `${headline}\n\n${gap.detail}\n\nClick to open the report`;
+    mcodeStatus.command = "mcode.showLibraryGap";
+    mcodeStatus.show();
+    syncMcodeStatus();
+  });
+  context.subscriptions.push(
+    commands.registerCommand("mcode.showLibraryGap", () => buildOutput.show())
+  );
 
   clientStarted
     .then(() => {
