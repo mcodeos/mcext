@@ -151,6 +151,12 @@ fn stop_daemon(rec: &PidRecord, pid_path: &Path) {
 struct ClientTriple {
     mcc_version: String,
     build: u64,
+    /// The commit the local binary was built from (`b<build>.<sha>` tail of
+    /// `mcc --version`). Batch numbers read `0` on an unbatched build, so
+    /// two binaries from different commits both self-report build 0 — the
+    /// commit is the identity that actually drifts when a replaced binary
+    /// must bleed a still-running daemon out of its slot.
+    sha: String,
 }
 
 impl ClientTriple {
@@ -162,8 +168,13 @@ impl ClientTriple {
         if !out.status.success() {
             return None;
         }
-        let (mcc_version, build) = parse_version_output(&String::from_utf8_lossy(&out.stdout))?;
-        Some(ClientTriple { mcc_version, build })
+        let (mcc_version, build, sha) =
+            parse_version_output(&String::from_utf8_lossy(&out.stdout))?;
+        Some(ClientTriple {
+            mcc_version,
+            build,
+            sha,
+        })
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -171,12 +182,16 @@ impl ClientTriple {
             "protocol": RPC_PROTOCOL,
             "mcc_version": self.mcc_version,
             "build": self.build,
+            "sha": self.sha,
         })
     }
 }
 
-/// Parse `mcc 0.9.1.b4546` into `(version, build)`.
-fn parse_version_output(out: &str) -> Option<(String, u64)> {
+/// Parse `mcc 1.0.0.b0.396a1a0d5a02 (built …)` into `(version, build, sha)`.
+/// The build token carries the commit as its tail (`b<build>.<sha>`); a
+/// legacy line without the tail yields an empty sha (the daemon then falls
+/// back to the batch comparison alone).
+fn parse_version_output(out: &str) -> Option<(String, u64, String)> {
     let token = out.split_whitespace().find(|t| t.contains('.'))?;
     let mut parts = token.splitn(4, '.');
     let (maj, min, patch, build) = (
@@ -188,9 +203,15 @@ fn parse_version_output(out: &str) -> Option<(String, u64)> {
     if maj.is_empty() || min.is_empty() || patch.is_empty() {
         return None;
     }
+    let build = build.strip_prefix('b')?;
+    let (build_num, sha) = match build.split_once('.') {
+        Some((num, sha)) => (num, sha.to_string()),
+        None => (build, String::new()),
+    };
     Some((
         format!("{maj}.{min}.{patch}"),
-        build.strip_prefix('b')?.parse().ok()?,
+        build_num.parse().ok()?,
+        sha,
     ))
 }
 
@@ -1105,9 +1126,24 @@ mod tests {
 
     #[test]
     fn parse_version_output_full_form() {
-        let (v, b) = parse_version_output("mcc 0.9.1.b4546\n").expect("parses");
+        let (v, b, sha) = parse_version_output("mcc 0.9.1.b4546\n").expect("parses");
         assert_eq!(v, "0.9.1");
         assert_eq!(b, 4546);
+        assert_eq!(sha, "");
+    }
+
+    /// The unbatched build's self-report: the build token carries the
+    /// commit as its tail. Parsing it is what lets the handshake compare
+    /// binary identities — the sha is the field that actually drifts when
+    /// a replaced binary must bleed a running daemon out of its slot.
+    #[test]
+    fn parse_version_output_sha_tail() {
+        let (v, b, sha) =
+            parse_version_output("mcc 1.0.0.b0.396a1a0d5a02 (built 2026-11-25T01:55:19Z)\n")
+                .expect("parses");
+        assert_eq!(v, "1.0.0");
+        assert_eq!(b, 0);
+        assert_eq!(sha, "396a1a0d5a02");
     }
 
     #[test]
